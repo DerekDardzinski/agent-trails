@@ -1,0 +1,149 @@
+# trails
+
+A general memory store for agents: records, the links between them, the data they point at,
+and the code that produced them. Binaries: `trails` (CLI) and `trails-mcp` (MCP server on
+stdio). Distribution name `agent-trails`; import name `trails`.
+
+## What it does, and what it does not
+
+trails stores, presents, links and tracks records. **It decides nothing.** It computes no
+statistics, judges no result, enforces no workflow and holds no opinion about which record is
+right. It serves an ad hoc analysis, a design session and a formal study the same way. No LLM
+runs inside any operation.
+
+The store refuses exactly two things, both as `ValidationError`:
+
+1. **Malformed input**: an empty title, a supersession with no reason, a link to a record that
+   does not exist, a malformed id or digest, a value wider than its column, or two tags the
+   database's case- and accent-insensitive comparison treats as one (`cafe` and `café`).
+2. **An attempt to overwrite a record**: publishing under an id that already exists.
+
+Everything else is recorded as given.
+
+## Records
+
+Every record has one explicit entry type and one caller-selected work status.
+
+```
+id          type prefix + "-" + 5 lowercase base36 characters normally; 6 after repeated collisions
+entry_type  project-context, problem-statement, hypothesis, procedure, result,
+            verification, fact, insight, decision, report, or note
+work_status open when another action is expected on this exact record; closed otherwise
+title       one line, required
+body        Markdown
+tags        sorted, lowercase descriptive labels; an entry type is not a tag
+project     optional project name
+author      the operating system user
+created_at  UTC
+value       optional JSON object: structured numbers or fields
+artifacts   references to data: a local path, an s3:// URI, a query, or free text,
+            each with an optional sha256 digest and notes; data is never copied
+code        captured commits of the repositories that produced the record, held in
+            trails' own git store
+```
+
+Generated id prefixes are `ctx-`, `prb-`, `hyp-`, `pro-`, `res-`, `ver-`, `fac-`, `ins-`,
+`dec-`, `rpt-`, and `note-`, matching the entry types above. Generation tries ten five-character
+base36 candidates, then ten six-character candidates, checking the complete ID for a collision.
+The old `rec-` plus 16-hex form and the prior type-prefixed 16-hex form remain recognizable for
+archived identifiers but are not generated.
+
+`publish` requires an entry type and initial work status. The initial status needs no reason.
+`set_work_status` appends an `open` or `closed` transition with its time, author and required
+reason. Any entry type may move in either direction; trails records the caller's decision and
+imposes no workflow conditions. This work status is separate from the derived lifecycle of
+current, superseded or retired.
+
+Four link relations: `builds_on`, `supersedes`, `contradicts`, `cites`.
+
+History is append-only. A revision is a new record linked `supersedes` onto the old one, with
+a required one-sentence `reason`; the old record then reports `superseded_by`. `retire` marks a
+record no longer true without replacing it. Work-status changes append events. Nothing updates
+or deletes a record or status event; a project registration's paths are metadata and are edited
+in place, with Dolt's history keeping every version.
+
+## Code capture
+
+`publish(repos=[...])` captures each repository's whole working tree, uncommitted and
+untracked files included, as a commit in `<db>/captures.git`, a bare repository trails owns.
+Nothing is written to your repository: the commit is built through a temporary index with git's
+object directory pointed at the store, and the repository's own objects are read as an
+alternate. Every object the capture needs is then packed into the store, so the capture reads
+after the repository is gone. The capture commit has no parent; the commit you had checked out
+is recorded beside it.
+
+A file over 50 MiB (`TRAILS_MAX_CAPTURE_BYTES`) refuses the publish, and the refusal prints
+two complete calls: one leaving the file out with `exclude` and referencing it as an artifact,
+one keeping it with `allow_large`. A committed large file already in the store is not refused
+again.
+
+## Projects
+
+A project is metadata: a name, the paths it uses (repositories, data directories, s3://
+prefixes), each with a label and free-text access instructions, and a project-context record.
+The project context is the durable information a new agent needs before working in the project:
+its long-term goal, data, environments, code, conventions and open questions. It spans many
+initiatives and sessions. `register_project` creates nothing on disk and warns on a local path
+that does not exist.
+
+## A possible secret is a warning
+
+Every write is scanned with detect-secrets (keyword, AWS key, token and private-key detectors;
+the two high-entropy detectors are off, because they flag every sha256 digest). A finding names
+the field, the line and the detector, never the matched text, and the record is still stored.
+The agent is told to tell the user. Removing a written secret requires the user to perform a
+manual database-history rewrite. A secret written in plain prose is not detected.
+
+## Record files
+
+A record exports to Markdown with TOML front matter between `+++` lines. The header includes the
+record's required `entry_type` and latest `work_status`; `publish(from_file=...)` reads the same
+format back. A file whose header names an existing id publishes a superseding record and needs a
+`reason` line in the header. TOML rather than YAML, because YAML silently coerces values such as
+`no` to false.
+
+## Operations
+
+Each operation is one async function under `src/trails/ops/`, registered on both surfaces from
+the same signature and docstring. Every result renders as text: the CLI prints it (or the model
+as JSON with `--json`), and MCP returns the text together with the model as structured content.
+Search hits contain compact record metadata and a body excerpt of at most 240 characters when the
+matching passage is known; they omit the full body, status history, provenance, and retrieval
+scores. Use `show` to read the complete record. A writing operation ends with a `Next:` line
+naming the `show()` call for the record it wrote.
+
+The MCP server's default toolset is the nine agent operations: `prime`, `search`, `show`,
+`lineage`, `publish`, `set_work_status`, `link`, `retire` and `export`.
+`trails-mcp --toolset full` adds `register_project`, `lint`, `alias`, `mark_verified`, `embed`
+and `version`. The CLI has every operation; `trails <name> --help` describes each.
+
+## Concurrency
+
+Every write goes through `dolt.run_script`, which holds an exclusive `fcntl.flock` on
+`<db>/.trails-write.lock`; every read holds the same lock shared. Without the shared read
+lock, a read that overlaps a commit makes that commit fail on dolt 2.4.0 ("cannot update
+manifest: database is read only"). An earlier stress measurement persisted 400 of 400 writes
+from 8 processes in about 52 seconds, about 8 writes per second. The default regression holds
+the real lock in one process and verifies that another process waits before writing once; the
+ordinary suite does not repeat the stress run. There is no retry.
+
+## Development
+
+```bash
+uv sync                      # core, plus the dev group
+uv sync --extra search       # the vector arm alone (onnxruntime + tokenizers)
+
+uv run ruff check . && uv run ruff format --check . && uv run ty check . && uv run pytest
+uv run pytest -m slow        # tests that download the ONNX model
+```
+
+`ty check` exits 0 even when it prints a diagnostic, so read its output. The suite runs in
+parallel via `pytest-xdist` against real Dolt, about a minute; there is no fake store, because
+the properties worth testing are the ones a fake would stub out.
+
+The store lives at `~/.trails/db`, overridable with `TRAILS_DB`. A database is created with
+the current schema on first use; there is no migration.
+
+## License
+
+AGPL-3.0-only.

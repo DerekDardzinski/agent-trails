@@ -1,0 +1,352 @@
+"""The `publish` operation.
+
+NOTE: no `from __future__ import annotations` in this package. See `ops/__init__.py`.
+"""
+
+from pathlib import Path
+from typing import Annotated, Any
+
+from pydantic import Field
+
+from trails import capture, dolt, engine as engine_seam, gitprobe, vector
+from trails.errors import RecordNotFoundError, ValidationError
+from trails.models import ArtifactRef, Link, Record, RecordDraft
+from trails.ops import context
+from trails.ops._guidance import result_hypothesis_link_notes
+from trails.ops._marks import Operation
+from trails.ops._write_types import PublishResult
+from trails.record_file import from_markdown
+from trails.vocab import EntryType, WorkStatus
+
+OPERATION = Operation(toolset="agent", read_only=False, destructive=False, idempotent=False)
+
+
+async def publish(  # noqa: PLR0912, PLR0915, PLR0917 — operation orchestration; public params
+    entry_type: Annotated[
+        EntryType | None,
+        Field(
+            description=(
+                "What this record is: project-context, problem-statement, hypothesis, "
+                "procedure, result, verification, fact, insight, decision, report or note. "
+                "Required unless from_file supplies it."
+            )
+        ),
+    ] = None,
+    work_status: Annotated[
+        WorkStatus | None,
+        Field(
+            description=(
+                "Open means a later action is expected on this exact record, for example an "
+                "untested hypothesis or a note with an unresolved question; closed means no "
+                "later action is expected on it. A record may be current and closed. Required "
+                "unless from_file supplies it. Work status says nothing about truth."
+            )
+        ),
+    ] = None,
+    title: Annotated[
+        str,
+        Field(
+            description=(
+                "One line stating the claim or outcome rather than only naming the activity; "
+                "prime lists this title when orienting an agent."
+            )
+        ),
+    ] = "",
+    body: Annotated[str, Field(description="The content, in Markdown.")] = "",
+    tags: Annotated[
+        list[str],
+        Field(
+            description=(
+                "Open-ended descriptive labels for subjects, methods, datasets or analysis "
+                "properties. Do not repeat entry_type here."
+            )
+        ),
+    ] = [],  # noqa: B006 — contracted default; never mutated
+    project: Annotated[
+        str | None,
+        Field(description="Project name, as shown by prime or given to register_project."),
+    ] = None,
+    value: Annotated[
+        dict[str, Any] | None,
+        Field(
+            description=(
+                "Structured numbers or fields as a JSON object, for example "
+                '{"did_estimate": -0.0041, "ci95": [-0.0093, 0.0011]}.'
+            )
+        ),
+    ] = None,
+    links: Annotated[
+        list[Link],
+        Field(
+            description=(
+                'List of {"relation": ..., "target_id": ...} from this new record. builds_on: '
+                "this record builds on the target (a result built on a hypothesis, a "
+                "verification of a result). contradicts: this record conflicts with the "
+                "target. cites: the target is a source. Use supersedes, not links, to replace "
+                "a record."
+            )
+        ),
+    ] = [],  # noqa: B006 — contracted default; never mutated
+    artifacts: Annotated[
+        list[ArtifactRef],
+        Field(
+            description=(
+                'References to data, each {"location": ..., "digest": null or '
+                '"sha256:<64 lowercase hex>", "notes": ...}. location is a path, an s3:// URI, '
+                "a query, or a description; notes say what identifies the data, such as a "
+                "version, a row count or a query date. Data is referenced, never copied. An "
+                "uppercase hex digest is refused."
+            )
+        ),
+    ] = [],  # noqa: B006 — contracted default; never mutated
+    repos: Annotated[
+        list[str],
+        Field(
+            description=(
+                "Git repositories whose full working tree, uncommitted and untracked files "
+                "included, is captured as a pinned commit without changing your files or "
+                "index. Pass every repository whose code produced this record. Captured code "
+                "is not carried into a superseding record; pass repos again when publishing a "
+                "revision of a result. Each entry must be a different repository; a "
+                "repository and its own linked worktree cannot be captured in one publish. A "
+                "file over 50 MiB (TRAILS_MAX_CAPTURE_BYTES) refuses the publish until it is "
+                "named in exclude or allow_large."
+            )
+        ),
+    ] = [],  # noqa: B006 — contracted default; never mutated
+    exclude: Annotated[
+        list[str],
+        Field(
+            description=(
+                "Paths relative to a repository's top level to leave out of its capture, "
+                "tracked or not. A directory leaves out everything under it."
+            )
+        ),
+    ] = [],  # noqa: B006 — contracted default; never mutated
+    allow_large: Annotated[
+        list[str],
+        Field(
+            description=(
+                "Paths relative to a repository's top level to capture even though they are "
+                "over the size cap."
+            )
+        ),
+    ] = [],  # noqa: B006 — contracted default; never mutated
+    supersedes: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Id of the record this one replaces. Requires reason. Links, artifacts, "
+                "captured code and verification stamps do not carry into the new record; "
+                "supply them again when they still apply, or use export as an editable "
+                "starting copy of the old links and artifacts."
+            )
+        ),
+    ] = None,
+    reason: Annotated[
+        str | None,
+        Field(description="One sentence saying what changed relative to the superseded record."),
+    ] = None,
+    from_file: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Path to a file written by export. The file supplies entry_type, work_status, "
+                "title, body, tags, project, value, links and artifacts; leave those parameters "
+                "empty. When the file's header names an existing id, the new record supersedes "
+                "it and the "
+                "header must include a reason line. repos, exclude and allow_large may be "
+                "combined with from_file."
+            )
+        ),
+    ] = None,
+) -> PublishResult:
+    """Write a record. Use it for anything worth keeping: a result, a procedure that finally worked, a decision and its reason, a fact about an environment, a hypothesis, a verification of another result, or a note. Nothing is reviewed or gated; the record is stored as given. A write is refused only for malformed input or an attempt to overwrite a record. A possible secret does not stop the write: it is reported in warnings, and you must tell the user, because removing it from history requires a manual database-history rewrite by the user.
+
+    Use this when: you learned something a later session would otherwise have to rediscover. Store a procedure the moment it works, not at handoff.
+
+    Use instead: mark_verified (full toolset), to record that a procedure still works: a verification record does not stamp the procedure, and prime keeps listing it as not verified; link, to relate two records that already exist; retire, when a record is no longer true and nothing replaces it; export and then publish(from_file=...), to revise a long record from an editable copy of its links and artifacts. A superseding record starts unverified and inherits no links, artifacts, captured code or verification stamps unless this call supplies them again.
+
+    Returns: the new record's id, the id it superseded if any, whether it was embedded for similarity search, one line per captured repository with its changed files and largest files, notes about expected link behavior, and warnings that need attention, including any possible secret by field, line and detector.
+    """
+    if from_file is not None:
+        given = {
+            "entry_type": entry_type,
+            "work_status": work_status,
+            "title": title,
+            "body": body,
+            "tags": tags,
+            "project": project,
+            "value": value,
+            "links": links,
+            "artifacts": artifacts,
+            "supersedes": supersedes,
+            "reason": reason,
+        }
+        clashing = [name for name, argument in given.items() if argument]
+        if clashing:
+            raise ValidationError(
+                f"from_file supplies {', '.join(clashing)}; leave those parameters empty"
+            )
+        try:
+            # expanduser raises RuntimeError for an unknown user, as in "~nosuchuser/x".
+            text = Path(from_file).expanduser().read_text()
+        except (OSError, UnicodeDecodeError, RuntimeError) as exc:
+            raise ValidationError(f"cannot read {from_file}: {exc}") from exc
+        draft = from_markdown(text).draft
+    else:
+        if entry_type is None or work_status is None:
+            missing = [
+                name
+                for name, value in (("entry_type", entry_type), ("work_status", work_status))
+                if value is None
+            ]
+            raise ValidationError(
+                f"direct publish requires {', '.join(missing)}; a file supplies them through "
+                "from_file"
+            )
+        draft = RecordDraft(
+            entry_type=entry_type,
+            work_status=work_status,
+            title=title,
+            body=body,
+            tags=tags,
+            project=project,
+            value=value,
+            links=links,
+            artifacts=artifacts,
+            supersedes=supersedes,
+            reason=reason,
+        )
+
+    if (exclude or allow_large) and not repos:
+        raise ValidationError("exclude and allow_large apply to repos; pass repos too")
+    store = context.store()
+    store.validate_record_draft(draft)
+    target_ids = list(dict.fromkeys(link.target_id for link in draft.links))
+    link_targets = store.get_records(target_ids)
+    missing_targets = [target for target in target_ids if target not in link_targets]
+    if missing_targets:
+        raise ValidationError(f"no existing record has id {', '.join(missing_targets)}")
+    if draft.supersedes is not None:
+        try:
+            store.get_record(draft.supersedes)
+        except RecordNotFoundError as exc:
+            raise ValidationError(f"no existing record has id {draft.supersedes}") from exc
+
+    repo_paths = _distinct_repos(repos)
+    capture_store = capture.store_path(store.db_path)
+    plans = [capture.plan_capture(path, capture_store, exclude, allow_large) for path in repo_paths]
+    refusal = capture.size_refusal(plans, exclude, allow_large)
+    if refusal is not None:
+        raise ValidationError(refusal)
+
+    record_id = draft.id
+    captures = []
+    summaries = []
+    findings = []
+    notices: list[str] = []
+    if plans:
+        # The id is minted before capture so the ref name and the record agree.
+        record_id = record_id or store.new_record_id(draft.entry_type)
+        capture_store = capture.open_store(store.db_path)
+        resolved = [plan.top for plan in plans]
+        for position, plan in enumerate(plans):
+            others = frozenset(other for other in resolved if other != plan.top)
+            captured = capture.capture_repo(plan, capture_store, record_id, position, others)
+            captures.append(captured.code)
+            summaries.append(captured.summary)
+            findings.extend(captured.findings)
+            notices.extend(captured.warnings)
+
+    draft = draft.model_copy(update={"id": record_id, "code": [*draft.code, *captures]})
+    if draft.supersedes is None:
+        replaced = None
+        outcome = store.write_record(draft)
+    else:
+        # The warning and the superseding write see one database state. In particular, a
+        # verification stamp cannot land after the read and disappear from the warning.
+        with dolt.exclusive(store.db_path):
+            replaced = store.get_record(draft.supersedes)
+            outcome = store.write_record(draft)
+    record_id = outcome.record.id
+    warnings = [
+        f"possible secret: {finding.detector} in {finding.field} line {finding.line}"
+        for finding in [*outcome.secret_findings, *findings]
+    ]
+    warnings.extend(notices)
+    notes = _supersession_notes(replaced)
+    warnings.extend(_supersession_warnings(replaced, outcome.record))
+    notes.extend(
+        result_hypothesis_link_notes(
+            record_id, outcome.record.entry_type, outcome.record.links, link_targets
+        )
+    )
+
+    # THE RECORD IS DURABLE from here, so nothing below may raise: an exception would hide a
+    # successful write and invite a retry that duplicates it. Broad on purpose, because model
+    # download and inference raise types owned by urllib, onnxruntime and tokenizers.
+    embedded = False
+    try:
+        engine = engine_seam.build_engine()
+        if engine.is_available():
+            embedded = vector.embed_record(store, engine, record_id) > 0
+    except Exception as exc:
+        warnings.append(f"the record was written but not embedded for similarity search: {exc}")
+
+    return PublishResult(
+        record_id=record_id,
+        superseded_id=draft.supersedes,
+        embedded=embedded,
+        captures=summaries,
+        notes=notes,
+        warnings=warnings,
+    )
+
+
+def _distinct_repos(repos: list[str]) -> list[Path]:
+    """The repos as paths, refused before anything is written to git.
+
+    Two entries sharing one git common dir are one repository: capturing it twice under one
+    record would record the same code twice under two paths.
+
+    Raises:
+        ValidationError: an entry is not a git repository, or two share one git common dir.
+    """
+    try:
+        paths = [Path(repo).expanduser() for repo in repos]
+    except RuntimeError as exc:  # expanduser on an unknown user, as in "~nosuchuser/x"
+        raise ValidationError(f"cannot expand a repos path: {exc}") from exc
+    seen: dict[str, Path] = {}
+    for path in paths:
+        common = gitprobe.repo_id(path)
+        if common is None:
+            raise ValidationError(f"{path} is not a git repository")
+        if common in seen:
+            raise ValidationError(
+                f"{seen[common]} and {path} are the same repository ({common}); each repos "
+                "entry must be a different repository"
+            )
+        seen[common] = path
+    return paths
+
+
+def _supersession_notes(replaced: Record | None) -> list[str]:
+    """Expected information about what an append-only replacement does not inherit."""
+    if replaced is None:
+        return []
+    return [
+        "superseding records inherit no links, artifacts, captured code or verification "
+        "stamps; this record contains only what this call supplied"
+    ]
+
+
+def _supersession_warnings(replaced: Record | None, written: Record) -> list[str]:
+    """A prior procedure stamp the replacement no longer holds."""
+    if replaced is None or written.entry_type != "procedure" or replaced.last_verified is None:
+        return []
+    day, environment = replaced.last_verified
+    return [
+        f"the procedure this replaces was verified {day.isoformat()} in {environment}; "
+        f"{written.id} starts unverified"
+    ]

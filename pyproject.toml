@@ -1,0 +1,128 @@
+[project]
+name = "agent-trails"
+version = "0.1.0"
+description = "trails — a general memory store for agents"
+requires-python = ">=3.12"
+license = "AGPL-3.0-only"
+readme = "README.md"
+authors = [
+    { name = "Derek Dardzinski", email = "dardzinski.derek@gmail.com" },
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = [
+    # The two binder libraries, and the only two. `cyclopts` builds the CLI surface and
+    # `fastmcp` the MCP one, both from the same operation signatures. Measured: `import
+    # fastmcp` costs 480ms against 62ms for `import cyclopts`, so `surfaces/cli.py` must
+    # never import fastmcp — a test asserts it in a subprocess.
+    #
+    # There is no direct `mcp` pin. fastmcp depends on the transport package and chooses
+    # its version; a second constraint here would be this package claiming a say over a
+    # dependency it no longer imports, and the only import of it went with the bundled
+    # FastMCP 1.x server.
+    "cyclopts>=4.22,<5",
+    # Possible-secret warnings on write. Used through its Python API with the two
+    # high-entropy plugins off, because with them on every sha256 digest is flagged.
+    "detect-secrets>=1.5,<2",
+    "fastmcp>=3.4,<4",
+]
+
+[project.optional-dependencies]
+# Vector arm. Absent by design: `trails search` must work without these.
+search = [
+    "onnxruntime>=1.17.0",
+    "tokenizers>=0.15.0",
+    "numpy>=1.26",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0",
+    # Each test gets its own copied database, so the suite can run in parallel, but every
+    # store call starts a Dolt process. `-n auto` alone started 12 pytest workers on a 12-core
+    # machine, and one old concurrency test added 8 more processes and 400 writes, freezing
+    # the desktop. Cap the pool while preserving enough concurrency to hide process startup.
+    "pytest-xdist>=3.6",
+    "ruff>=0.11",
+    "ty>=0.0.1a7",
+    # The vector arm, in the DEV environment only. `ty` cannot check a module whose
+    # imports it cannot resolve, and suppressing `unresolved-import` per import site
+    # would then report an unused ignore for anyone who does install the extra — so
+    # the gate would be green in exactly one of the two configurations either way.
+    # This changes nothing about the package: `search` stays an optional extra, and
+    # the tests that assert the arm is absent inject the ImportError rather than
+    # relying on the environment, so they hold whether it is installed or not.
+    "onnxruntime>=1.17.0",
+    "tokenizers>=0.15.0",
+    "numpy>=1.26",
+]
+
+[project.scripts]
+trails = "trails.cli:main"
+trails-mcp = "trails.mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/trails"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Model-download tests fetch tens of MB from HuggingFace on first run and must not
+# sit on the default gate. Run them explicitly with `uv run pytest -m slow`.
+#
+# `-n auto --maxprocesses=4` is on by default so the documented gate command stays
+# `uv run pytest`. Four workers retain the process-startup speedup without saturating the
+# machine with Dolt processes. Pass `-n0` when a failure's ordering matters.
+#
+# The Dolt-backed tests are deliberately NOT marked slow. They are the store's five
+# enforced guards, and the design's rule is real Dolt in tests with no fake store,
+# because the guards worth testing are exactly the ones a fake would stub out.
+# Deselecting them by default would leave the gate testing nothing that matters.
+addopts = "-m 'not slow' -n auto --maxprocesses=4"
+markers = [
+    "slow: downloads the ONNX embedding model; deselected by default",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "I", "N", "UP", "B", "A", "C4",
+    "DTZ", "RET", "SIM", "ARG", "PTH", "PL", "RUF",
+]
+ignore = [
+    "E501",
+    "PLR0913",
+    "PLR2004",
+    "SIM108",
+    "PLC0415",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+"tests/*" = ["S101", "ARG001", "ARG002"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["trails"]
+combine-as-imports = true
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.ty.environment]
+python-version = "3.12"
+
+[tool.ty.src]
+include = ["src", "tests"]

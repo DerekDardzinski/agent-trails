@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>priors-mem — the knowledge graph</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#2c313d;
+    --ink:#e6e8ee; --dim:#98a0b3; --faint:#6b7488;
+    --goal:#e0a458; --hyp:#8ab4f8; --exp:#7ec699; --claim:#c792ea; --log:#7f8798;
+    --struct:#5f8dd3; --interp:#c792ea; --retr:#e5776f; --ev:#4db6ac;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+  .wrap{max-width:1180px;margin:0 auto;padding:32px 24px 96px}
+  h1{font-size:26px;margin:0 0 6px;font-weight:650;letter-spacing:-.2px}
+  h2{font-size:19px;margin:44px 0 4px;font-weight:600;letter-spacing:-.1px}
+  h3{font-size:15px;margin:24px 0 6px;font-weight:600;color:var(--ink)}
+  p{margin:8px 0;color:var(--dim);max-width:80ch}
+  p.tight{margin:4px 0}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em;
+       background:#22262f;padding:1px 5px;border-radius:4px;color:#dfe4ee}
+  .sub{color:var(--faint);font-size:13.5px;margin:0 0 20px}
+  .rule{height:1px;background:var(--line);margin:34px 0 0}
+
+  .bar{display:flex;gap:14px;align-items:center;flex-wrap:wrap;
+       background:var(--panel);border:1px solid var(--line);border-radius:10px;
+       padding:12px 16px;margin:18px 0 6px}
+  .bar span.lbl{font-size:13px;color:var(--dim)}
+  .tog{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .tog button{background:transparent;border:0;color:var(--dim);font:inherit;font-size:13px;
+              padding:7px 14px;cursor:pointer}
+  .tog button.on{background:#2b3040;color:#fff}
+  .note{font-size:13px;color:var(--faint)}
+
+  .grid{display:grid;gap:14px;margin-top:14px}
+  .g2{grid-template-columns:repeat(2,1fr)}
+  .g3{grid-template-columns:repeat(3,1fr)}
+  @media(max-width:900px){.g2,.g3{grid-template-columns:1fr}}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .card h4{margin:0 0 2px;font-size:14.5px;font-weight:650;display:flex;align-items:center;gap:8px}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block;flex:none}
+  .card .why{font-size:12.5px;color:var(--faint);margin:0 0 10px}
+  .fields{list-style:none;margin:0;padding:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
+  .fields li{padding:3px 0;border-bottom:1px dashed #262b36;color:#cfd5e2;display:flex;gap:8px}
+  .fields li:last-child{border-bottom:0}
+  .fields .fname{min-width:150px;color:#e6e8ee}
+  .fields .fnote{color:var(--faint);font-family:inherit;font-size:12px}
+  .tag{font-size:10.5px;letter-spacing:.04em;text-transform:uppercase;
+       border:1px solid var(--line);border-radius:20px;padding:1px 7px;color:var(--faint)}
+  .tag.latch{border-color:#6a5330;color:#e0a458}
+  .tag.append{border-color:#2f5348;color:#7ec699}
+  .tag.new{border-color:#4a3a63;color:#c792ea}
+  .tag.gone{border-color:#5c3436;color:#e5776f}
+
+  figure{margin:18px 0 0}
+  figcaption{font-size:12.5px;color:var(--faint);margin-top:8px}
+  svg{display:block;width:100%;height:auto;background:var(--panel2);
+      border:1px solid var(--line);border-radius:10px}
+  svg text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+  .n-lbl{font-size:13px;font-weight:650;fill:#0f1115}
+  .n-sub{font-size:10.5px;fill:#0f1115;opacity:.72}
+  .e-lbl{font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .e-note{font-size:9.5px;fill:var(--faint)}
+
+  table{width:100%;border-collapse:collapse;margin-top:12px;font-size:13px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--faint);font-weight:600;font-size:11.5px;text-transform:uppercase;letter-spacing:.05em}
+  td.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;white-space:nowrap}
+  tr.dead td{opacity:.45}
+
+  .legend{display:flex;gap:18px;flex-wrap:wrap;font-size:12.5px;color:var(--dim);margin:10px 0 0}
+  .legend i{display:inline-block;width:22px;height:0;border-top-width:2px;border-top-style:solid;
+            vertical-align:middle;margin-right:6px}
+
+  .call{border-left:3px solid var(--struct);background:#161b24;
+        border-radius:0 8px 8px 0;padding:12px 16px;margin:16px 0}
+  .call.warn{border-left-color:var(--retr);background:#1d1618}
+  .call h4{margin:0 0 4px;font-size:13.5px;font-weight:650}
+  .call p{margin:2px 0;font-size:13.5px}
+
+  .test{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+        padding:16px 18px;margin-top:14px}
+  .test .q{font-size:15px;font-weight:600;margin:0 0 10px}
+  .test .arm{display:flex;gap:12px;padding:7px 0;font-size:13.5px;color:var(--dim)}
+  .test .arm b{flex:none;width:52px;color:var(--ink)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>priors-mem — the knowledge graph</h1>
+<p class="sub">What each node holds, what each edge carries, who reads it, and where a reasoning
+lives. Read this beside the design doc; it shows structure, not policy.</p>
+
+<div class="bar">
+  <span class="lbl">Vocabulary</span>
+  <span class="tog">
+    <button id="b-cur" onclick="setV('cur')">before pmem-cp0</button>
+    <button id="b-new" class="on" onclick="setV('new')">as built today</button>
+  </span>
+  <span class="note">Defaults to the vocabulary as built. Toggle back to see what each value
+    was called before <code>pmem-cp0</code>.</span>
+</div>
+
+<div class="rule"></div>
+
+<h2>1 &nbsp;Five kinds of record, and what each holds</h2>
+<p>Every record shares seven fields. The rest are per kind. <span class="tag latch">latched</span>
+means <code>freeze</code> makes it immutable; <span class="tag append">append-only</span> means
+entries are added and never rewritten.</p>
+
+<div class="card" style="margin-top:14px">
+  <h4>shared by every record</h4>
+  <p class="why">One representation of a title and one of a subject list. A composite record
+    nests this rather than flattening it — <code>goal.record.id</code> is the id.</p>
+  <ul class="fields">
+    <li><span class="fname">id</span><span class="fnote">per-kind prefix + 16 hex</span></li>
+    <li><span class="fname">kind</span><span class="fnote">goal | hypothesis | experiment | claim | log</span></li>
+    <li><span class="fname">title</span><span class="fnote">one line; a log entry has none</span></li>
+    <li><span class="fname">subjects[]</span><span class="fnote">free tags — this is what makes a record findable</span></li>
+    <li><span class="fname">author</span><span class="fnote">OS user; recorded, nothing depends on it</span></li>
+    <li><span class="fname">created_at</span><span class="fnote">write-ordered sequence</span></li>
+    <li><span class="fname">body</span><span class="fnote">free prose</span></li>
+  </ul>
+</div>
+
+<div class="grid g2">
+  <div class="card">
+    <h4><span class="dot" style="background:var(--goal)"></span>goal</h4>
+    <p class="why">One per campaign. The framing a human confirmed and the plan that decides success.</p>
+    <ul class="fields">
+      <li><span class="fname">framing</span><span class="fnote"><span class="tag latch">latched</span></span></li>
+      <li><span class="fname">analysis_plan</span><span class="fnote"><span class="tag latch">latched</span></span></li>
+      <li><span class="fname">data</span><span class="fnote"><span class="tag latch">latched</span> dataset + per-split digests</span></li>
+      <li><span class="fname">result[]</span><span class="fnote"><span class="tag append">append-only</span> each with citation</span></li>
+      <li><span class="fname">status</span><span class="fnote">active | achieved | unresolved</span></li>
+      <li><span class="fname">frozen_at</span><span class="fnote">what the latch keys on</span></li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4><span class="dot" style="background:var(--hyp)"></span>hypothesis</h4>
+    <p class="why">A claimed <em>mechanism</em> behind an observable's current value — not an intervention.</p>
+    <ul class="fields">
+      <li><span class="fname">mechanism</span><span class="fnote">where it should operate, and where it should not</span></li>
+      <li><span class="fname">status</span><span class="fnote">proposed | <span class="v" data-cur="lead" data-new="provisional">lead</span> | supported | excluded | retired</span></li>
+    </ul>
+    <p class="why" style="margin-top:10px">Never edited into a different hypothesis. A revision is a
+      new record linked <code>refines</code>, standing beside the original.</p>
+  </div>
+</div>
+
+<div class="grid g2">
+  <div class="card">
+    <h4><span class="dot" style="background:var(--exp)"></span>experiment</h4>
+    <p class="why">The schedulable unit. Four kinds: <code>apparatus</code>,
+      <code><span class="v" data-cur="probe" data-new="exploratory">probe</span></code>,
+      <code>confirmatory</code>, <code>replication</code>.</p>
+    <ul class="fields">
+      <li><span class="fname">experiment_kind</span><span class="fnote">write-once</span></li>
+      <li><span class="fname">design</span><span class="fnote"><span class="tag latch">latched</span></span></li>
+      <li><span class="fname">analysis_plan</span><span class="fnote"><span class="tag latch">latched</span> absent for apparatus</span></li>
+      <li><span class="fname">procedure</span><span class="fnote"><span class="tag latch">latched</span> split, arms, seeds, n, filter</span></li>
+      <li><span class="fname">frozen_observables</span><span class="fnote"><span class="tag latch">latched</span> definition version per observable</span></li>
+      <li><span class="fname">frozen_harness_hash</span><span class="fnote"><span class="tag latch">latched</span></span></li>
+      <li><span class="fname">frozen_apparatus_id</span><span class="fnote"><span class="tag latch">latched</span> ← the baseline pin</span></li>
+      <li><span class="fname">provenance[]</span><span class="fnote"><span class="tag append">append-only</span> one entry per attempt</span></li>
+      <li><span class="fname">score_report[]</span><span class="fnote"><span class="tag append">append-only</span> location + digest</span></li>
+      <li><span class="fname">result[]</span><span class="fnote"><span class="tag append">append-only</span> verdict + cited values</span></li>
+      <li><span class="fname"><span class="v" data-cur="battery_results" data-new="acceptance_results">battery_results</span>[]</span><span class="fnote"><span class="tag append">append-only</span> apparatus only</span></li>
+      <li><span class="fname">status</span><span class="fnote">draft | approved | running | closed | void</span></li>
+      <li><span class="fname">frozen_at</span><span class="fnote"></span></li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4><span class="dot" style="background:var(--claim)"></span>claim</h4>
+    <p class="why"><b>This is where accumulated judgment lives.</b> Findable by subject and by
+      meaning, gated on admission, and its evidence is dereferenced and hashed on write.</p>
+    <ul class="fields">
+      <li><span class="fname">claim_type</span><span class="fnote">finding | literature | gap | <span class="v" data-cur="method-note" data-new="method_note">method-note</span></span></li>
+      <li><span class="fname">description</span><span class="fnote">what is claimed</span></li>
+      <li><span class="fname">outcome</span><span class="fnote">what was <em>observed</em></span></li>
+      <li><span class="fname">methods</span><span class="fnote">how</span></li>
+      <li><span class="fname">learnings</span><span class="fnote">what it is <em>taken to mean</em></span></li>
+      <li><span class="fname">scope</span><span class="fnote">the conditions under which it holds</span></li>
+    </ul>
+    <div class="call warn" style="margin:12px 0 0">
+      <h4>outcome and learnings never merge</h4>
+      <p>Observation versus interpretation. A verified evidence pointer lends its authority to
+        <code>outcome</code> and none to <code>learnings</code>. Merging them would let the
+        unverifiable half borrow credibility from a digest.</p>
+    </div>
+  </div>
+</div>
+
+<div class="card" style="margin-top:14px">
+  <h4>the verdict, which lives inside <code>result[]</code></h4>
+  <p class="why">One per arm. What the agent read off the harness — never something the store
+    derives. The five are a <b>CLOSED SET the store now refuses outside of</b>. It does not decide
+    what the verdict should be; it refuses a word in no vocabulary, because the hypothesis status
+    rule is driven entirely off these words and the one place the code reads a verdict compares it
+    against <code>void</code> alone — so before this landed, a misspelling read as a real
+    conclusion and let the experiment verify as evidence for a finding.</p>
+  <ul class="fields">
+    <li><span class="fname v" data-cur="rejected" data-new="null_rejected">rejected</span><span class="fnote">the null fell in the predicted direction and no guardrail regressed — the intervention worked</span></li>
+    <li><span class="fname v" data-cur="excluded" data-new="effect_ruled_out">excluded</span><span class="fnote">the interval lies entirely inside the minimum effect — an effect that would matter is ruled out</span></li>
+    <li><span class="fname">inconclusive</span><span class="fnote">the interval spans the minimum effect — the experiment could not tell</span></li>
+    <li><span class="fname">guardrail_failed</span><span class="fnote">the primary moved by degrading something that matters</span></li>
+    <li><span class="fname">void</span><span class="fnote">no interpretable measurement; never counted as a negative result</span></li>
+  </ul>
+  <p class="why" style="margin-top:10px">The gap between the middle two is what makes a negative
+    result usable: failing to reject is not evidence against a mechanism unless the test could have
+    detected the effect. An apparatus experiment has no verdict at all — its outcome is the
+    <span class="v" data-cur="battery_results" data-new="acceptance_results">battery_results</span> list.</p>
+</div>
+
+<div class="card" style="margin-top:14px">
+  <h4><span class="dot" style="background:var(--log)"></span>log</h4>
+  <p class="why">The audit trail and every human decision. Addressed by its <code>target</code>,
+    never retrievable by subject — a campaign writes hundreds, and a subject query returning
+    machine audit rows beside findings would be useless.</p>
+  <ul class="fields">
+    <li><span class="fname">target</span><span class="fnote">the record this attaches to</span></li>
+    <li><span class="fname">log_kind</span><span class="fnote">note | amendment | <span class="v" data-cur="mutation" data-new="transition">mutation</span> | check</span></li>
+    <li><span class="fname">tag</span><span class="fnote">three values gate a command: methodology-review, review-skipped, validity</span></li>
+    <li><span class="fname">body</span><span class="fnote">the text</span></li>
+  </ul>
+</div>
+
+<div class="rule"></div>
+
+<h2>2 &nbsp;The edges</h2>
+<p>Colour is the category, and the category is the whole argument: an edge either does
+  <em>bookkeeping a machine walks</em>, or asserts <em>meaning a later agent must understand</em>,
+  or changes <em>what a query returns</em>.</p>
+<div class="legend">
+  <span><i style="border-color:var(--struct)"></i>structural — walked by <code>ready</code> or shown as a marker</span>
+  <span><i style="border-color:var(--interp)"></i>interpretive — carries a reason</span>
+  <span><i style="border-color:var(--retr)"></i>retrieval-affecting — changes the result set</span>
+  <span><i style="border-color:var(--ev);border-top-style:dashed"></i>not an edge — evidence or log target</span>
+</div>
+
+<figure>
+<svg viewBox="0 0 1080 640" role="img" aria-label="The record graph">
+  <defs>
+    <marker id="a-s" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 z" fill="#5f8dd3"/></marker>
+    <marker id="a-i" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 z" fill="#c792ea"/></marker>
+    <marker id="a-r" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 z" fill="#e5776f"/></marker>
+    <marker id="a-e" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 z" fill="#4db6ac"/></marker>
+  </defs>
+
+  <!-- nodes -->
+  <g>
+    <rect x="430" y="24" width="200" height="52" rx="9" fill="#e0a458"/>
+    <text class="n-lbl" x="530" y="46" text-anchor="middle">goal</text>
+    <text class="n-sub" x="530" y="62" text-anchor="middle">framing · plan · data · result</text>
+  </g>
+  <g>
+    <rect x="120" y="180" width="200" height="52" rx="9" fill="#8ab4f8"/>
+    <text class="n-lbl" x="220" y="202" text-anchor="middle">hypothesis</text>
+    <text class="n-sub" x="220" y="218" text-anchor="middle">mechanism · status</text>
+  </g>
+  <g>
+    <rect x="740" y="180" width="210" height="52" rx="9" fill="#8ab4f8" opacity=".55"/>
+    <text class="n-lbl" x="845" y="202" text-anchor="middle">hypothesis (rival)</text>
+    <text class="n-sub" x="845" y="218" text-anchor="middle">the one being ruled out</text>
+  </g>
+  <g>
+    <rect x="120" y="360" width="200" height="52" rx="9" fill="#7ec699"/>
+    <text class="n-lbl" x="220" y="382" text-anchor="middle">experiment</text>
+    <text class="n-sub" x="220" y="398" text-anchor="middle">frozen design · result · verdict</text>
+  </g>
+  <g>
+    <rect x="430" y="360" width="200" height="52" rx="9" fill="#7ec699" opacity=".55"/>
+    <text class="n-lbl" x="530" y="382" text-anchor="middle">experiment (earlier)</text>
+    <text class="n-sub" x="530" y="398" text-anchor="middle">apparatus, or a prerequisite</text>
+  </g>
+  <g>
+    <rect x="740" y="470" width="210" height="52" rx="9" fill="#c792ea"/>
+    <text class="n-lbl" x="845" y="492" text-anchor="middle">claim</text>
+    <text class="n-sub" x="845" y="508" text-anchor="middle">outcome · learnings · scope</text>
+  </g>
+  <g>
+    <rect x="430" y="470" width="200" height="52" rx="9" fill="#c792ea" opacity=".55"/>
+    <text class="n-lbl" x="530" y="492" text-anchor="middle">claim (other)</text>
+    <text class="n-sub" x="530" y="508" text-anchor="middle">an earlier finding</text>
+  </g>
+  <g>
+    <rect x="120" y="560" width="200" height="46" rx="9" fill="#7f8798"/>
+    <text class="n-lbl" x="220" y="580" text-anchor="middle">log entry</text>
+    <text class="n-sub" x="220" y="595" text-anchor="middle">note · amendment · check</text>
+  </g>
+
+  <!-- structural -->
+  <path d="M320,196 L430,66" fill="none" stroke="#5f8dd3" stroke-width="1.8" marker-end="url(#a-s)"/>
+  <text class="e-lbl" x="352" y="128" fill="#5f8dd3">belongs_to</text>
+
+  <path d="M220,360 L220,232" fill="none" stroke="#5f8dd3" stroke-width="1.8" marker-end="url(#a-s)"/>
+  <text class="e-lbl" x="228" y="300" fill="#5f8dd3">belongs_to</text>
+
+  <path d="M320,372 L430,372" fill="none" stroke="#5f8dd3" stroke-width="1.8" marker-end="url(#a-s)"/>
+  <text class="e-lbl" x="330" y="364" fill="#5f8dd3">depends_on</text>
+  <text class="e-note" x="330" y="390"><tspan class="v" data-cur="artifact" data-new="needs_artifact">artifact</tspan> | <tspan class="v" data-cur="outcome" data-new="needs_result">outcome</tspan></text>
+
+  <path d="M320,400 C400,440 460,432 530,412" fill="none" stroke="#5f8dd3" stroke-width="1.8" marker-end="url(#a-s)"/>
+  <text class="e-lbl" x="392" y="452" fill="#5f8dd3">derived_from</text>
+  <text class="e-note" x="392" y="466">replication → its parent</text>
+
+  <path d="M148,180 C110,120 150,96 200,120 C240,140 230,168 224,180" fill="none"
+        stroke="#5f8dd3" stroke-width="1.8" marker-end="url(#a-s)"/>
+  <text class="e-lbl" x="60" y="112" fill="#5f8dd3">refines</text>
+  <text class="e-note" x="60" y="126">revision, both stand</text>
+
+  <path d="M596,360 C640,300 660,300 630,76" fill="none" stroke="#5f8dd3" stroke-width="1.8"
+        stroke-dasharray="1 0" marker-end="url(#a-s)"/>
+  <text class="e-lbl" x="648" y="240" fill="#5f8dd3">supersedes</text>
+  <text class="e-note" x="648" y="254">goal→goal, exp→exp</text>
+
+  <!-- interpretive -->
+  <path d="M320,206 L740,206" fill="none" stroke="#c792ea" stroke-width="1.8" marker-end="url(#a-i)"
+        opacity=".9"/>
+  <text class="e-lbl" x="470" y="198" fill="#c792ea">discriminates_against</text>
+  <text class="e-note" x="470" y="228">written FROM the experiment — the design built to rule the rival out</text>
+  <path d="M240,360 C300,300 300,240 320,214" fill="none" stroke="#c792ea" stroke-width="1.2"
+        stroke-dasharray="3 3" opacity=".5"/>
+
+  <path d="M740,496 L630,496" fill="none" stroke="#c792ea" stroke-width="1.8" marker-end="url(#a-i)"/>
+  <text class="e-lbl" x="646" y="488" fill="#c792ea">contradicts</text>
+  <text class="e-note" x="646" y="516">+ why, + which kind of conflict</text>
+
+  <!-- retrieval -->
+  <path d="M800,470 C700,440 640,424 630,404" fill="none" stroke="#e5776f" stroke-width="2"
+        marker-end="url(#a-r)"/>
+  <text class="e-lbl" x="666" y="440" fill="#e5776f"><tspan class="v" data-cur="presupposes" data-new="not_interpretable_without">presupposes</tspan></text>
+  <text class="e-note" x="666" y="454">the ONE edge that pulls a record into a result</text>
+
+  <!-- evidence + log -->
+  <path d="M840,470 C820,444 700,420 632,400" fill="none" stroke="#4db6ac" stroke-width="1.8"
+        stroke-dasharray="5 4" marker-end="url(#a-e)" opacity=".85"/>
+  <text class="e-lbl" x="742" y="404" fill="#4db6ac">evidence</text>
+  <text class="e-note" x="742" y="418">verified on write — not a link</text>
+
+  <path d="M220,560 L220,412" fill="none" stroke="#4db6ac" stroke-width="1.6"
+        stroke-dasharray="5 4" marker-end="url(#a-e)" opacity=".85"/>
+  <text class="e-lbl" x="120" y="500" fill="#4db6ac">target</text>
+  <text class="e-note" x="120" y="514">attaches to any record</text>
+</svg>
+<figcaption>Two arrows into an experiment look similar and are not: a <em>link</em> is an
+  unchecked assertion between records, while <em>evidence</em> is dereferenced and hashed on write —
+  the store confirms the experiment exists, is closed and is not void before the pointer is marked
+  verified.</figcaption>
+</figure>
+
+<h3>Every edge, with who reads it</h3>
+<table>
+  <thead><tr><th>edge</th><th>from → to</th><th>category</th><th>carries</th><th>read by</th></tr></thead>
+  <tbody>
+    <tr><td class="mono">belongs_to</td><td>hypothesis→goal, experiment→hypothesis or goal</td>
+        <td>structural</td><td>—</td><td><code>ready --goal-id</code></td></tr>
+    <tr><td class="mono">depends_on</td><td>experiment→earlier experiment</td><td>structural</td>
+        <td>qualifier: <span class="v" data-cur="artifact" data-new="needs_artifact">artifact</span> or <span class="v" data-cur="outcome" data-new="needs_result">outcome</span></td>
+        <td><code>ready</code>; cycles refused on write</td></tr>
+    <tr><td class="mono">supersedes</td><td>goal→goal, experiment→experiment</td><td>structural</td>
+        <td>—</td><td><code>ready</code> resolves through it; reads show <code>superseded_by</code></td></tr>
+    <tr><td class="mono">refines</td><td>hypothesis→hypothesis</td><td>structural</td><td>—</td>
+        <td><b>nothing today</b> — should show <code>refined_by</code></td></tr>
+    <tr><td class="mono">derived_from</td><td>replication→confirmatory</td><td>structural</td><td>—</td>
+        <td><b>nothing today</b> — should show a replication count</td></tr>
+    <tr><td class="mono">contradicts</td><td>claim→claim</td><td>interpretive</td>
+        <td><span class="tag new">new</span> reasoning + conflict kind</td>
+        <td>retrieval flags the pair when both are present</td></tr>
+    <tr><td class="mono">discriminates_against</td><td>experiment→rival hypothesis</td><td>interpretive</td>
+        <td><span class="tag new">new</span> reasoning</td><td><b>nothing today</b></td></tr>
+    <tr><td class="mono"><span class="v" data-cur="presupposes" data-new="not_interpretable_without">presupposes</span></td>
+        <td>the record that can't be read alone → the one that must come along</td>
+        <td>retrieval</td><td>—</td><td>retrieval closure, transitive</td></tr>
+    <tr class="dead"><td class="mono">supports</td><td>anything→anything</td><td>—</td><td>—</td>
+        <td><span class="tag gone">deleted</span> nothing, and nothing should</td></tr>
+  </tbody>
+</table>
+
+<div class="call">
+  <h4>Why <code>supports</code> goes</h4>
+  <p>Experiment-supports-hypothesis is <em>already recorded</em>: a hypothesis's
+    <code>supported</code> status is derived from the verdicts of the experiments linked
+    <code>belongs_to</code> it. A <code>supports</code> edge would be a second spelling of a fact
+    the store already holds. And claim-supports-claim buys nothing actionable — both claims are
+    independently findable by subject, so they surface together anyway, and missing a supporter
+    costs an agent nothing. Missing a <em>contradictor</em> makes it overconfident, which is why
+    that one stays.</p>
+</div>
+
+<div class="rule"></div>
+
+<h2>3 &nbsp;The one edge that changes what comes back</h2>
+<p><code class="v" data-cur="presupposes" data-new="not_interpretable_without">presupposes</code>
+  is the only edge that adds records to a result. Everything else either steers a machine or gets
+  shown as a marker on something already returned.</p>
+
+<figure>
+<svg viewBox="0 0 1080 300" role="img" aria-label="Retrieval closure">
+  <text x="24" y="30" class="e-lbl" fill="#98a0b3">query: “reranking error rate”</text>
+
+  <rect x="24" y="52" width="290" height="66" rx="9" fill="#c792ea"/>
+  <text class="n-lbl" x="40" y="76">clm-a3f8 · finding</text>
+  <text class="n-sub" x="40" y="94">outcome: error_rate −0.4 pp</text>
+  <text class="n-sub" x="40" y="108">matched · score 0.81</text>
+
+  <path d="M314,86 L470,86" fill="none" stroke="#e5776f" stroke-width="2" marker-end="url(#a-r)"/>
+  <text class="e-lbl" x="330" y="76" fill="#e5776f"><tspan class="v" data-cur="presupposes" data-new="not_interpretable_without">presupposes</tspan></text>
+
+  <rect x="470" y="52" width="330" height="66" rx="9" fill="#7ec699"/>
+  <text class="n-lbl" x="486" y="76">exp-4b19 · apparatus</text>
+  <text class="n-sub" x="486" y="94">dispersion of the same observable: 9.5 pp</text>
+  <text class="n-sub" x="486" y="108">NOT matched · score 0.0 · included_as_context_for clm-a3f8</text>
+
+  <text x="24" y="168" class="e-lbl" fill="#98a0b3">what the agent concludes</text>
+
+  <rect x="24" y="188" width="500" height="86" rx="9" fill="none" stroke="#5c3436" stroke-width="1.5"/>
+  <text class="n-lbl" x="44" y="212" fill="#e5776f">without the edge</text>
+  <text class="n-sub" x="44" y="232" fill="#98a0b3">“reranking made things slightly worse — drop it”</text>
+  <text class="n-sub" x="44" y="250" fill="#98a0b3">reads a −0.4 pp move as a real regression,</text>
+  <text class="n-sub" x="44" y="264" fill="#98a0b3">and abandons a direction on noise</text>
+
+  <rect x="556" y="188" width="500" height="86" rx="9" fill="none" stroke="#2f5348" stroke-width="1.5"/>
+  <text class="n-lbl" x="576" y="212" fill="#7ec699">with the edge</text>
+  <text class="n-sub" x="576" y="232" fill="#98a0b3">“the instrument can’t resolve anything under 9.5 pp;</text>
+  <text class="n-sub" x="576" y="250" fill="#98a0b3">−0.4 pp is silence, not a regression”</text>
+  <text class="n-sub" x="576" y="264" fill="#98a0b3">changes the observable instead of the hypothesis</text>
+</svg>
+<figcaption>Four properties an agent must know: the closure is transitive with no depth limit; a
+  cycle is absorbed silently rather than raised (unlike <code>ready</code>, where a cycle is an
+  error); it runs <em>after</em> the caller's limit, so a result set can legitimately exceed it; and
+  a pulled-in record arrives with score 0.0 — an agent that reads one as a query match treats it as
+  evidence the query found.</figcaption>
+</figure>
+
+<div class="call">
+  <h4>The admission test, since nothing can enforce it</h4>
+  <p>Write this edge when a competent reader would draw a <b>wrong conclusion</b> from the first
+    record alone, and the second is what prevents it. Not merely related, not merely useful —
+    wrong without it. Over-applied, it makes every query more expensive and less readable,
+    because the presupposed record is returned past the caller's limit, transitively.</p>
+</div>
+
+<div class="rule"></div>
+
+<h2>4 &nbsp;Where a reasoning lives</h2>
+<p>Two places, and the choice is not a matter of taste. An edge's reasoning is cheap, always
+  written in the same call, and reachable only by someone already holding one endpoint. A claim is
+  findable by subject, carries a scope, is gated on admission, and its evidence is verified.</p>
+
+<div class="test">
+  <p class="q">Would a future agent want to find this holding <em>neither</em> endpoint?</p>
+  <div class="arm"><b>yes →</b><span>It is a <b>claim</b>. Subject-tagged, retrievable by meaning,
+    <code>scope</code> records the conditions it holds under, evidence pointers at the experiments
+    are dereferenced and verified on write. The edge's reasoning then just names the claim.</span></div>
+  <div class="arm"><b>no →</b><span>It is the <b>edge's reasoning</b>. One line, legible only beside
+    that pair, so the graph is not mute. “H2 supports F1 because F1's effect was measured on the
+    same subpopulation H2 predicts” — nobody will ever search for that.</span></div>
+</div>
+
+<p class="tight" style="margin-top:14px">This is the same test the design already draws between a
+  log entry and a claim: <em>the difference is what finds it</em>. And it explains the audit
+  finding cleanly — three of the interpretive edges are read by nothing today because they
+  <em>carry</em> nothing.</p>
+
+<div class="call warn">
+  <h4>Why judgment belongs in claims, not edges</h4>
+  <p><b>Findability.</b> At the moment that matters — an agent about to propose a hypothesis — it
+    holds a subject and nothing else. Retrieval covers goal, hypothesis, experiment and claim. An
+    edge is reachable only if you already hold an endpoint, so reasoned edges are knowledge you can
+    only find if you already knew where to look.</p>
+  <p><b>The quality gate.</b> A <code>finding</code> is admitted only against seven criteria —
+    confirmatory, plan frozen first, test split, replicated, no guardrail regression, not void,
+    scope recorded. An edge is gated by nothing. Make edges the carrier of takeaways and you have
+    built a second, ungated channel for exactly the content that gate exists for.</p>
+  <p><b>Transfer.</b> A claim states a mechanism and the conditions it holds under. An edge states
+    a relation between two specific artifacts. Retrieval by correspondence of mechanism transfers;
+    retrieval by surface similarity does not.</p>
+</div>
+
+<h3>The link row, before and after</h3>
+<div class="grid g2">
+  <div class="card">
+    <h4>before pmem-cp0</h4>
+    <p class="why">Four columns, three of them ids and an enum. No id, no author, no time, no
+      reason — the least accountable row in a store whose whole premise is provenance.</p>
+    <ul class="fields">
+      <li><span class="fname">from_id</span></li><li><span class="fname">to_id</span></li>
+      <li><span class="fname">link_type</span></li>
+      <li><span class="fname">qualifier</span><span class="fnote">'' for everything but depends_on</span></li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>as built today <span class="tag new">landed</span></h4>
+    <p class="why">Free while the database was being recreated anyway. Retrofitting it later is
+      now possible rather than impossible: an existing database is upgraded in place on open by
+      a runner that observes the schema, so a column can be added without deleting a populated
+      store.</p>
+    <ul class="fields">
+      <li><span class="fname">id</span><span class="fnote">so a note can target a link</span></li>
+      <li><span class="fname">from_id</span></li><li><span class="fname">to_id</span></li>
+      <li><span class="fname">link_type</span></li>
+      <li><span class="fname">qualifier</span><span class="fnote">+ conflict kind on contradicts</span></li>
+      <li><span class="fname">reasoning</span><span class="fnote">free text — interpretation, unverified</span></li>
+      <li><span class="fname">author</span></li>
+      <li><span class="fname">created_at</span><span class="fnote">so a re-assertion resolves latest-wins</span></li>
+    </ul>
+  </div>
+</div>
+
+<h3>Classifying a contradiction</h3>
+<p>Prose an agent must interpret, plus a value it can branch on. Three of these mean
+  <em>reconcile the records</em>; one means <em>the science is unsettled</em>.</p>
+<table>
+  <thead><tr><th>qualifier</th><th>meaning</th><th>what the agent does next</th></tr></thead>
+  <tbody>
+    <tr><td class="mono">scope</td><td>they hold under different conditions</td><td>narrow a scope statement — apparent conflict</td></tr>
+    <tr><td class="mono">measure</td><td>different observable or definition version</td><td>not comparable; re-freeze or re-measure</td></tr>
+    <tr><td class="mono">data</td><td>different dataset or split</td><td>not comparable</td></tr>
+    <tr><td class="mono">direct</td><td>same conditions, same measure, opposite result</td><td><b>design a discriminating experiment</b></td></tr>
+  </tbody>
+</table>
+
+<div class="rule"></div>
+
+<h2>5 &nbsp;A worked campaign</h2>
+<p>The same graph with real records in it — a campaign trying to cut an error rate, and what a
+  different agent finds five months later.</p>
+
+<figure>
+<svg viewBox="0 0 1080 560" role="img" aria-label="Worked example">
+  <rect x="380" y="20" width="300" height="46" rx="9" fill="#e0a458"/>
+  <text class="n-lbl" x="530" y="42" text-anchor="middle">goal-f996 · cut error rate 200 bp</text>
+  <text class="n-sub" x="530" y="57" text-anchor="middle">plan frozen when the human confirmed it</text>
+
+  <rect x="60" y="130" width="250" height="46" rx="9" fill="#8ab4f8"/>
+  <text class="n-lbl" x="185" y="152" text-anchor="middle">hyp-2c41 · reranking</text>
+  <text class="n-sub" x="185" y="167" text-anchor="middle">status: <tspan class="v" data-cur="lead" data-new="provisional">lead</tspan></text>
+
+  <rect x="760" y="130" width="260" height="46" rx="9" fill="#8ab4f8" opacity=".55"/>
+  <text class="n-lbl" x="890" y="152" text-anchor="middle">hyp-9d02 · window size</text>
+  <text class="n-sub" x="890" y="167" text-anchor="middle">the competing explanation</text>
+
+  <rect x="380" y="240" width="300" height="46" rx="9" fill="#7ec699" opacity=".7"/>
+  <text class="n-lbl" x="530" y="262" text-anchor="middle">exp-4b19 · apparatus</text>
+  <text class="n-sub" x="530" y="277" text-anchor="middle">10 null runs → dispersion 9.5 pp · closed</text>
+
+  <rect x="60" y="240" width="250" height="46" rx="9" fill="#7ec699"/>
+  <text class="n-lbl" x="185" y="262" text-anchor="middle">exp-91f7 · confirmatory</text>
+  <text class="n-sub" x="185" y="277" text-anchor="middle">verdict: inconclusive</text>
+
+  <rect x="60" y="380" width="250" height="46" rx="9" fill="#c792ea"/>
+  <text class="n-lbl" x="185" y="402" text-anchor="middle">clm-a3f8 · finding</text>
+  <text class="n-sub" x="185" y="417" text-anchor="middle">−0.4 pp · scope: single-turn</text>
+
+  <rect x="380" y="380" width="300" height="46" rx="9" fill="#c792ea" opacity=".7"/>
+  <text class="n-lbl" x="530" y="402" text-anchor="middle">clm-71bd · <tspan class="v" data-cur="method-note" data-new="method_note">method-note</tspan></text>
+  <text class="n-sub" x="530" y="417" text-anchor="middle">“anything under 9.5 pp is unresolvable”</text>
+
+  <rect x="760" y="380" width="260" height="46" rx="9" fill="#c792ea" opacity=".55"/>
+  <text class="n-lbl" x="890" y="402" text-anchor="middle">clm-5e30 · finding</text>
+  <text class="n-sub" x="890" y="417" text-anchor="middle">+3.1 pp · scope: multi-turn</text>
+
+  <rect x="60" y="490" width="250" height="42" rx="9" fill="#7f8798"/>
+  <text class="n-lbl" x="185" y="510" text-anchor="middle">log-c8a1 · validity note</text>
+  <text class="n-sub" x="185" y="524" text-anchor="middle">what let exp-91f7 close</text>
+
+  <!-- edges -->
+  <path d="M185,130 L400,66" fill="none" stroke="#5f8dd3" stroke-width="1.6" marker-end="url(#a-s)"/>
+  <text class="e-lbl" x="236" y="100" fill="#5f8dd3">belongs_to</text>
+  <path d="M185,240 L185,176" fill="none" stroke="#5f8dd3" stroke-width="1.6" marker-end="url(#a-s)"/>
+  <text class="e-lbl" x="193" y="212" fill="#5f8dd3">belongs_to</text>
+  <path d="M530,240 L530,66" fill="none" stroke="#5f8dd3" stroke-width="1.6" marker-end="url(#a-s)"/>
+  <text class="e-lbl" x="538" y="160" fill="#5f8dd3">belongs_to</text>
+  <path d="M310,252 L380,252" fill="none" stroke="#5f8dd3" stroke-width="1.6" marker-end="url(#a-s)"/>
+  <text class="e-lbl" x="300" y="234" fill="#5f8dd3">depends_on</text>
+  <text class="e-note" x="300" y="300"><tspan class="v" data-cur="artifact" data-new="needs_artifact">artifact</tspan> — needs the harness, not the answer</text>
+
+  <path d="M310,142 L760,142" fill="none" stroke="#c792ea" stroke-width="1.6" marker-end="url(#a-i)" opacity=".8"/>
+  <text class="e-lbl" x="440" y="134" fill="#c792ea">discriminates_against</text>
+  <text class="e-note" x="440" y="120">reasoning: “varies rerank depth with the window held fixed”</text>
+
+  <path d="M310,392 C620,340 700,300 680,286" fill="none" stroke="#4db6ac" stroke-width="1.6"
+        stroke-dasharray="5 4" marker-end="url(#a-e)"/>
+  <text class="e-lbl" x="352" y="356" fill="#4db6ac">evidence: experiment</text>
+  <text class="e-note" x="352" y="370">verified — exists, closed, not void</text>
+
+  <path d="M240,380 C300,352 330,320 380,290" fill="none" stroke="#e5776f" stroke-width="2" marker-end="url(#a-r)"/>
+  <text class="e-lbl" x="120" y="340" fill="#e5776f"><tspan class="v" data-cur="presupposes" data-new="not_interpretable_without">presupposes</tspan></text>
+
+  <path d="M760,404 L680,404" fill="none" stroke="#c792ea" stroke-width="1.8" marker-end="url(#a-i)"/>
+  <path d="M310,416 C560,470 640,440 760,416" fill="none" stroke="#c792ea" stroke-width="1.8" marker-end="url(#a-i)"/>
+  <text class="e-lbl" x="470" y="470" fill="#c792ea">contradicts · qualifier: scope</text>
+  <text class="e-note" x="470" y="484">reasoning: “opposite signs, but one is single-turn and one multi-turn”</text>
+
+  <path d="M185,490 L185,426" fill="none" stroke="#4db6ac" stroke-width="1.5"
+        stroke-dasharray="5 4" marker-end="url(#a-e)" opacity=".8"/>
+  <text class="e-lbl" x="196" y="462" fill="#4db6ac">target</text>
+</svg>
+<figcaption>Five months later a different agent searches <code>reranking</code>. It gets both
+  findings and the method note by subject. The contradiction between them is flagged because both
+  are present, and its qualifier says <code>scope</code> — so the agent narrows a scope statement
+  instead of designing an experiment. The apparatus experiment arrives beside the −0.4 pp finding
+  even though the query never matched it.</figcaption>
+</figure>
+
+<div class="rule"></div>
+
+<h2>6 &nbsp;What retrieval returns, and what it hides</h2>
+<table>
+  <thead><tr><th>kind</th><th>findable by subject and meaning?</th><th>why</th></tr></thead>
+  <tbody>
+    <tr><td class="mono">goal · hypothesis · experiment · claim</td><td>yes</td>
+        <td>knowledge is addressed by <em>what it is about</em>, not by which campaign produced it</td></tr>
+    <tr><td class="mono">log</td><td>never</td>
+        <td>addressed by its target; a campaign writes hundreds and they would drown findings</td></tr>
+    <tr><td class="mono"><span class="v" data-cur="probe" data-new="exploratory">probe</span> experiments</td><td>excluded by default</td>
+        <td>cannot be cited, so returning one invites a citation in every sense that matters</td></tr>
+    <tr><td class="mono">void records</td><td>excluded by default</td>
+        <td>not a result — an agent that reads one and reasons from it has cited it</td></tr>
+    <tr><td class="mono">superseded records</td><td>returned, marked</td>
+        <td>reads carry <code>superseded_by</code> so the reader knows a newer one exists</td></tr>
+    <tr><td class="mono">refined records</td><td>returned, marked</td>
+        <td>reads carry <code>refined_by</code> — a refinement stands BESIDE the original rather than replacing it</td></tr>
+    <tr><td class="mono">confirmatory experiments</td><td>returned with a replication count</td>
+        <td>a finding needs replication, so one returned without the count is materially incomplete</td></tr>
+  </tbody>
+</table>
+<p class="note" style="margin-top:10px">A flag includes the excluded two for deliberate review of
+  provisional work.</p>
+
+<div class="rule"></div>
+
+<h2>7 &nbsp;What is not a record</h2>
+<div class="grid g3">
+  <div class="card">
+    <h4><span class="dot" style="background:var(--ev)"></span>evidence</h4>
+    <p class="why">Typed pointers hanging off a claim. Dereferenced and hashed <em>on write</em> —
+      a model may propose one, only a mechanical check may mark it verified.</p>
+    <ul class="fields">
+      <li><span class="fname">evidence_kind</span><span class="fnote">code · document · artifact · search · experiment</span></li>
+      <li><span class="fname">payload</span><span class="fnote">per-kind JSON</span></li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4><span class="dot" style="background:var(--ev)"></span>verification</h4>
+    <p class="why">One row per dereference. <b>No row means the check never ran</b> — a different
+      statement from a check that found nothing.</p>
+    <ul class="fields">
+      <li><span class="fname">outcome</span><span class="fnote">holds · mismatch · absent · unresolvable</span></li>
+      <li><span class="fname">policy_version</span><span class="fnote">a pass means nothing if the rule can drift</span></li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4><span class="dot" style="background:#3d4454"></span>subject · tag_alias · embedding</h4>
+    <p class="why">The retrieval machinery. Aliases fold two tags meaning the same thing, which is
+      the failure that otherwise splits a corpus in half.</p>
+  </div>
+</div>
+
+<div class="rule"></div>
+<p class="note" style="margin-top:22px">Toggle at the top of the page swaps every renamed value.
+  Nothing here is enforced except the freeze latch, append-only records and links, the verified
+  write path, the citation fields, two record-existence preconditions, a gap claim needing search
+  evidence, and a refused dependency cycle. Everything else is a rule an agent follows, and the
+  store's job is to make a violation visible afterward.</p>
+
+</div>
+<script>
+  function setV(mode){
+    document.querySelectorAll('.v').forEach(function(el){
+      var t = mode === 'new' ? el.getAttribute('data-new') : el.getAttribute('data-cur');
+      if (t !== null) el.textContent = t;
+    });
+    document.getElementById('b-cur').classList.toggle('on', mode === 'cur');
+    document.getElementById('b-new').classList.toggle('on', mode === 'new');
+  }
+  setV('new');
+</script>
+</body>
+</html>

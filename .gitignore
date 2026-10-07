@@ -1,0 +1,33 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+dist/
+*.egg-info/
+.ruff_cache/
+.pytest_cache/
+
+.kiro/
+.serena/
+*.bak
+
+# Beads / Dolt
+.dolt/
+*.db
+.beads-credential-key
+.beads/issues.jsonl
+.beads/*.jsonl
+
+# Local model cache (never commit ONNX weights)
+models/
+.beads/issues.jsonl
+.beads/*.jsonl
+# bd worktree
+builder-trs-1/
+builder-*/
+cp0-1/
+# bd worktree
+cp0-2/
+
+# Local-only operational and test records
+.local-docs/
