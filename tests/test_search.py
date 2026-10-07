@@ -240,6 +240,45 @@ def test_a_paraphrase_is_found_by_the_vector_ranker_alone(
     )
 
 
+def test_title_keyword_plus_semantic_match_uses_the_full_nonempty_body(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches a title keyword suppressing the selected semantic chunk even though no body
+    keyword supplies a centered excerpt."""
+    engine = _Engine(near=("Cats", "felines"))
+    monkeypatch.setattr(engine_seam, "build_engine", lambda: engine)
+    body = "complete body selected by vector"
+    record_id = _write(store, "Cats", body)
+    embed_records(store, engine, [record_id])
+
+    hit = _search(store, query="cats and felines").hits[0]
+
+    assert hit.id == record_id
+    assert hit.matched_by == ["keyword", "semantic"]
+    assert [match.model_dump() for match in hit.keyword_matches] == [
+        {"term": "cats", "field": "title"}
+    ]
+    assert hit.excerpt == body
+
+
+def test_empty_body_semantic_match_has_no_excerpt(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches the title-only embedding chunk leaking into excerpt when the record body is
+    empty and vector retrieval alone found the record."""
+    engine = _Engine(near=("Blank source", "querysignal"))
+    monkeypatch.setattr(engine_seam, "build_engine", lambda: engine)
+    record_id = _write(store, "Blank source", "")
+    embed_records(store, engine, [record_id])
+
+    hit = _search(store, query="querysignal").hits[0]
+
+    assert hit.id == record_id
+    assert hit.matched_by == ["semantic"]
+    assert hit.keyword_matches == []
+    assert hit.excerpt is None
+
+
 def test_a_semantic_match_uses_the_selected_chunk_without_public_diagnostics(
     store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
