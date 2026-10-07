@@ -101,9 +101,11 @@ digest is flagged) and returns field, line and detector, never the matched text.
 - **NO response model uses a pydantic serialization alias.** fastmcp honours an alias and the
   CLI's `model_dump(mode="json")` ignores it, so the two surfaces would emit different keys.
 - **SEARCH HITS ARE COMPACT PREVIEWS, NOT RECORDS.** `SearchHit` carries identity, lifecycle,
-  latest work status, tags, matched methods, located keyword fields, and at most 240 characters of
-  body excerpt. It does not carry a `Record`, full body, status history, provenance, rank, cosine,
-  or chunk number. `retrieval.Ranked` keeps diagnostics internally; `show` returns the full record.
+  latest work status, tags, matched methods, located keyword fields, and one body excerpt when
+  known. A body-keyword hit gets a window of at most 240 characters centered on its first match; a
+  semantic hit without a body-keyword match gets the complete selected embedding chunk. It does
+  not carry a `Record`, full body, status history, provenance, rank, cosine, or chunk number.
+  `retrieval.Ranked` keeps diagnostics internally; `show` returns the full record.
   A `work_status` filter returns current versions unless `include_history=true`; searches without
   `work_status` continue to include superseded versions.
 - Vocabularies (`ENTRY_TYPES`, `WORK_STATUSES`, `ENTRY_TYPE_PREFIXES`, `RELATIONS`, the id

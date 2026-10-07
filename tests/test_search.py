@@ -79,18 +79,22 @@ def test_keyword_finds_a_body_word_and_a_capitalized_title_word(store: Store) ->
 
 
 def test_a_body_keyword_excerpt_is_centered_bounded_and_whitespace_collapsed(
-    store: Store,
+    store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Catches a body excerpt that drops the match or either available side, exceeds the
-    public cap, counts clipping markers outside it, or preserves authored whitespace runs."""
+    """Catches a body keyword plus semantic match returning the full chunk instead of the
+    centered bounded window, or preserving authored whitespace runs."""
+    engine = _Engine(near=("P99", "p99"))
+    monkeypatch.setattr(engine_seam, "build_engine", lambda: engine)
     left = " ".join(f"left{index}" for index in range(30))
     right = " ".join(f"right{index}" for index in range(40))
     record_id = _write(store, "Latency result", f"{left}\n\tP99   {right}")
+    embed_records(store, engine, [record_id])
 
     result = _search(store, query="p99")
     hit = result.hits[0]
 
     assert hit.id == record_id
+    assert hit.matched_by == ["keyword", "semantic"]
     assert hit.keyword_matches[0].model_dump() == {"term": "p99", "field": "body"}
     assert hit.excerpt is not None
     assert hit.excerpt.startswith("...") and hit.excerpt.endswith("...")
@@ -243,7 +247,8 @@ def test_a_semantic_match_uses_the_selected_chunk_without_public_diagnostics(
     selected chunk, or retrieval score and chunk diagnostics leaking into the public hit."""
     engine = _Engine(near=("zebra", "striped"))
     monkeypatch.setattr(engine_seam, "build_engine", lambda: engine)
-    body = "\n\n".join([" ".join(["alpha"] * 150), " ".join(["beta"] * 150), "a zebra " * 75])
+    selected = ("a zebra selected chunk. " * 20).strip()
+    body = "\n\n".join([" ".join(["alpha"] * 150), " ".join(["beta"] * 150), selected])
     long_id = _write(store, "Long", body)
     embed_records(store, engine, [long_id])
 
@@ -254,13 +259,41 @@ def test_a_semantic_match_uses_the_selected_chunk_without_public_diagnostics(
 
     assert hit.id == long_id
     assert hit.matched_by == ["semantic"]
-    assert hit.excerpt is not None
-    assert hit.excerpt.startswith("a zebra a zebra")
+    assert hit.excerpt == selected
+    assert len(hit.excerpt) > 240
     assert "alpha" not in hit.excerpt and "beta" not in hit.excerpt
-    assert len(hit.excerpt) <= 240
     assert {"rank", "rankers", "cosine", "chunk", "chunk_index"}.isdisjoint(dumped)
     assert lines[3] == "  matched by: semantic"
     assert lines[4] == f"  excerpt: {hit.excerpt}"
+
+
+def test_ten_semantic_full_chunks_stay_below_the_approved_response_target(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches semantic hits regaining the 240-character clip or ten representative full
+    chunks exceeding the user-approved structured-response target."""
+    engine = _Engine(near=("unrelated", "context"))
+    monkeypatch.setattr(engine_seam, "build_engine", lambda: engine)
+    body_by_id = {}
+    for index in range(10):
+        body = " ".join([f"context{index}"] * 80)
+        record_id = _write(
+            store,
+            f"Stored entry {index}",
+            body,
+            project="chunk-size-measurement",
+        )
+        body_by_id[record_id] = body
+    embed_records(store, engine, list(body_by_id))
+
+    result = _search(store, query="unrelated semantic request")
+    payload = result.model_dump_json().encode("utf-8")
+
+    assert len(result.hits) == 10
+    assert all(hit.matched_by == ["semantic"] for hit in result.hits)
+    assert all(hit.excerpt == body_by_id[hit.id] for hit in result.hits)
+    assert all(len(hit.excerpt or "") == 719 for hit in result.hits)
+    assert len(payload) < 13_000
 
 
 def test_a_tag_filter_that_hides_a_match_reports_it(store: Store) -> None:

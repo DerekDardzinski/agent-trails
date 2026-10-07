@@ -107,10 +107,11 @@ format back. A file whose header names an existing id publishes a superseding re
 Each operation is one async function under `src/trails/ops/`, registered on both surfaces from
 the same signature and docstring. Every result renders as text: the CLI prints it (or the model
 as JSON with `--json`), and MCP returns the text together with the model as structured content.
-Search hits contain compact record metadata and a body excerpt of at most 240 characters when the
-matching passage is known; they omit the full body, status history, provenance, and retrieval
-scores. Use `show` to read the complete record. A writing operation ends with a `Next:` line
-naming the `show()` call for the record it wrote.
+Search hits contain compact record metadata and a body excerpt when the matching passage is
+known. A body-keyword hit gets a window of at most 240 characters centered on its first match; a
+semantic hit without a body-keyword match gets the complete selected embedding chunk. Hits omit
+status history, provenance, and retrieval scores. Use `show` to read the complete record. A writing
+operation ends with a `Next:` line naming the `show()` call for the record it wrote.
 
 The MCP server's default toolset is the nine agent operations: `prime`, `search`, `show`,
 `lineage`, `publish`, `set_work_status`, `link`, `retire` and `export`.

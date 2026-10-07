@@ -302,3 +302,24 @@ def test_search_schema_explains_work_status_history_behavior(store: Store) -> No
         "that the default current-version work-status search excludes. Searches without "
         "work_status continue to return superseded records and label them."
     )
+
+
+def test_search_description_distinguishes_keyword_windows_from_semantic_chunks(
+    store: Store,
+) -> None:
+    """Catches the agent-facing tool description retaining the former universal 240-character
+    cap after semantic-only hits begin returning complete selected chunks."""
+    server = mcp_surface.build_mcp_server(store.db_path)
+
+    async def go() -> str:
+        async with Client(server) as client:
+            tools = {tool.name: tool.description for tool in await client.list_tools()}
+            return tools["search"] or ""
+
+    description = asyncio.run(go())
+    assert (
+        "A body-keyword match shows a window of at most 240 characters centered on the first match."
+    ) in description
+    assert (
+        "A semantic match with no body-keyword match shows the complete selected embedding chunk."
+    ) in description

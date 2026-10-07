@@ -97,7 +97,7 @@ async def search(  # noqa: PLR0917 — every parameter is an operation parameter
 
     Use instead: show, once you have an id; prime, for an overview; lineage, for what a record was built on.
 
-    Returns: one compact preview per record with its id, entry type, title, project, creation time, lifecycle, latest work status, tags, which search methods matched it, any located title or body keyword matches, a body excerpt of at most 240 characters when one is known, and the show() call that opens it. Full bodies and retrieval scores remain outside search; use show for the complete record. The similarity search contributes at most its 10 nearest records with cosine at least 0.25 internally; exact strings and non-stopword keyword matches have no cosine floor. When nothing matches, it lists the filters applied and what removing each one would find. Its one broader retry drops every restrictive filter and includes retired records, and never repeats the same call. After that retry finds nothing relevant, stop: the store does not hold it.
+    Returns: one compact preview per record with its id, entry type, title, project, creation time, lifecycle, latest work status, tags, which search methods matched it, any located title or body keyword matches, and a body excerpt when one is known. A body-keyword match shows a window of at most 240 characters centered on the first match. A semantic match with no body-keyword match shows the complete selected embedding chunk. Full records and retrieval scores remain outside search; use show for the complete record. The similarity search contributes at most its 10 nearest records with cosine at least 0.25 internally; exact strings and non-stopword keyword matches have no cosine floor. When nothing matches, it lists the filters applied and what removing each one would find. Its one broader retry drops every restrictive filter and includes retired records, and never repeats the same call. After that retry finds nothing relevant, stop: the store does not hold it.
     """
     if limit < 1:
         raise UsageError(f"limit must be at least 1, not {limit}")
@@ -252,7 +252,7 @@ def _excerpt(
     if vector_match.chunk_index >= len(chunks):
         return None
     passage = chunks[vector_match.chunk_index].removeprefix(f"{record.title}\n\n")
-    return _clip_from_start(passage)
+    return _collapse_whitespace(passage) or None
 
 
 def _collapse_whitespace(text: str) -> str:
@@ -296,20 +296,6 @@ def _word_end_inward(text: str, match_end: int, end: int) -> int:
         return end
     boundary = text.rfind(" ", match_end, end)
     return boundary if boundary >= match_end else end
-
-
-def _clip_from_start(text: str) -> str | None:
-    collapsed = _collapse_whitespace(text)
-    if not collapsed:
-        return None
-    if len(collapsed) <= SEARCH_EXCERPT_CHARS:
-        return collapsed
-    end = SEARCH_EXCERPT_CHARS - len(_ELLIPSIS)
-    if collapsed[end] != " " and collapsed[end - 1] != " ":
-        boundary = collapsed.rfind(" ", 0, end)
-        if boundary > 0:
-            end = boundary
-    return collapsed[:end].rstrip() + _ELLIPSIS
 
 
 def _state(
