@@ -1,15 +1,9 @@
-"""Every text rendering of a reading result, in one module.
-
-Each function formats data a result model already holds. Nothing here reads the store or
-explains why records are semantically similar.
-"""
+"""Every text rendering of a reading result, in one module."""
 
 from __future__ import annotations
 
 import json
 from typing import TYPE_CHECKING, Any
-
-from trails.vocab import PROJECT_CONTEXT_TEMPLATE
 
 if TYPE_CHECKING:
     from trails.models import Record
@@ -19,16 +13,17 @@ if TYPE_CHECKING:
         PathStatus,
         PrimeEntry,
         PrimeResult,
+        ProjectSearchHit,
         RelatedRecord,
         SearchHit,
         SearchResult,
+        ShownProject,
         ShownRecord,
         ShowResult,
     )
 
 
 def lifecycle(record: Record) -> str:
-    """current, superseded by <id>, or retired."""
     if record.retired:
         return "retired"
     if record.superseded_by is not None:
@@ -37,7 +32,6 @@ def lifecycle(record: Record) -> str:
 
 
 def record_line(record: Record) -> str:
-    """One-line record identity, lifecycle, work status, and verification date."""
     line = (
         f"{record.id}  {record.entry_type}  {record.title}  {lifecycle(record)} "
         f"· work {record.work_status}"
@@ -47,40 +41,46 @@ def record_line(record: Record) -> str:
     return line
 
 
-def call(name: str, *positional: Any, **arguments: Any) -> str:
-    """A tool call as an agent would write it: `show("rec-1", detail="full")`.
-
-    Values are JSON, so strings are quoted and escaped. A keyword argument that is None, an
-    empty string, an empty list or False is omitted.
-    """
+def call(operation: str, *positional: Any, **arguments: Any) -> str:
     parts = [_value(value) for value in positional]
     parts += [
         f"{key}={_value(value)}"
         for key, value in arguments.items()
         if value is not None and value is not False and value not in ("", [])
     ]
-    return f"{name}({', '.join(parts)})"
+    return f"{operation}({', '.join(parts)})"
 
 
 def next_line(hints: list[str]) -> str:
-    """The final line of every reading response."""
     return "Next: " + " · ".join(hints)
 
 
-def search_text(result: SearchResult) -> str:
-    """State line, one compact preview per hit or the no-match report, then Next:."""
+def search_text(result: SearchResult) -> str:  # noqa: PLR0912 — project and record sections
     lines = [result.state]
+    if result.project_hits:
+        lines.append("project matches:")
+        for hit in result.project_hits:
+            lines += _project_hit_lines(hit)
+        hidden = result.project_total - len(result.project_hits)
+        if hidden > 0:
+            lines.append(
+                f"  {hidden} more project matches; {call('prime')} starts the project index"
+            )
+    if result.hits:
+        lines.append("record matches:")
     for hit in result.hits:
-        lifecycle = hit.lifecycle
-        if lifecycle == "superseded" and hit.superseded_by is not None:
-            lifecycle += f" by {hit.superseded_by}"
-        lines.append(
-            f"{hit.id}  {hit.entry_type}  {hit.title}  {lifecycle} · work {hit.work_status}"
-        )
-        details = []
-        if hit.project is not None:
-            details.append(f"project: {hit.project}")
-        details.append(f"created: {hit.created_at.date().isoformat()}")
+        status = hit.lifecycle
+        if status == "superseded" and hit.superseded_by is not None:
+            status += f" by {hit.superseded_by}"
+        lines.append(f"{hit.id}  {hit.entry_type}  {hit.title}  {status} · work {hit.work_status}")
+        details = [f"created: {hit.created_at.date().isoformat()}"]
+        if hit.projects:
+            details.insert(
+                0,
+                "projects: " + ", ".join(f"{item.id} ({item.name})" for item in hit.projects),
+            )
+        else:
+            details.insert(0, "projects: unscoped")
         lines.append("  " + " · ".join(details))
         matched = _matched(hit)
         if matched:
@@ -88,9 +88,9 @@ def search_text(result: SearchResult) -> str:
         if hit.excerpt is not None:
             lines.append(f"  excerpt: {hit.excerpt}")
         lines.append(f"  → {call('show', hit.id)}")
-    if result.total == 0:
+    if result.total == 0 and result.project_total == 0:
         if result.filters:
-            applied = ", ".join(f"{k}={_shown(v)}" for k, v in result.filters.items())
+            applied = ", ".join(f"{key}={_shown(value)}" for key, value in result.filters.items())
             lines.append(f"filters applied: {applied}")
         for name, count, first in result.relaxed:
             noun = "match" if count == 1 else "matches"
@@ -104,61 +104,72 @@ def search_text(result: SearchResult) -> str:
     return "\n".join(lines)
 
 
+def _project_hit_lines(hit: ProjectSearchHit) -> list[str]:
+    framing = hit.framing_title or "no framing recorded"
+    lines = [f"  {hit.id}  {hit.name} · {framing} · updated {hit.updated_at.date().isoformat()}"]
+    matched = _matched_project(hit)
+    if matched:
+        lines.append(f"    matched by: {matched}")
+    if hit.excerpt is not None:
+        lines.append(f"    excerpt: {hit.excerpt}")
+    lines.append(f"    → {call('prime', project=hit.id)}")
+    return lines
+
+
 SUMMARY_LINES = 12
 _UNREACHABLE = frozenset({"absent", "changed"})
 _DETAILS = ("summary", "full", "provenance")
 
 
 def show_text(result: ShowResult) -> str:
-    """One unchanged single-record view, or ordered record blocks and one Next for an array."""
     if not result.multiple:
-        return _shown_record_text(result.records[0], result.detail, include_next=True)
+        if result.records:
+            return _shown_record_text(result.records[0], result.detail, include_next=True)
+        return _shown_project_text(result.projects[0], result.detail, include_next=True)
 
     lines = [
-        f"state: {len(result.records)} records found · {len(result.missing)} not found · "
-        f"detail {result.detail}"
+        f"state: {len(result.records)} records and {len(result.projects)} projects found · "
+        f"{len(result.missing)} not found · detail {result.detail}"
     ]
     if result.missing:
         lines.append("not found: " + ", ".join(result.missing))
-    for item in result.records:
-        lines += ["", *_shown_record_text(item, result.detail, include_next=False).splitlines()]
-
-    found_ids = [item.record.id for item in result.records]
-    hints: list[str] = []
-    for item in result.records:
-        record = item.record
-        if item.contradicted_by:
-            hints.append(
-                f"{item.contradicted_by} contradict {record.id}: "
-                + call("search", links=f"contradicts:{record.id}")
-            )
-        if record.superseded_by is not None:
-            hints.append(f"{record.id} was replaced: {call('show', record.superseded_by)}")
-    if found_ids:
-        for level in _DETAILS:
-            if level != result.detail:
-                hints.append(
-                    call("show", found_ids, detail=level)
-                    if level != "summary"
-                    else call("show", found_ids)
-                )
-        hints.append(call("lineage", found_ids[0]))
-    else:
+    records = {item.record.id: item for item in result.records}
+    projects = {item.project.id: item for item in result.projects}
+    for requested in result.requested:
+        if requested in records:
+            block = _shown_record_text(records[requested], result.detail, include_next=False)
+        elif requested in projects:
+            block = _shown_project_text(projects[requested], result.detail, include_next=False)
+        else:
+            continue
+        lines += ["", *block.splitlines()]
+    found_ids = [item for item in result.requested if item in records or item in projects]
+    hints = [
+        call("show", found_ids, detail=level) if level != "summary" else call("show", found_ids)
+        for level in _DETAILS
+        if level != result.detail
+    ]
+    first_record = next((item for item in result.requested if item in records), None)
+    if first_record is not None:
+        hints.append(call("lineage", first_record))
+    if not hints:
         hints.append("search(query=...)")
     lines.append(next_line(hints))
     return "\n".join(lines)
 
 
-def _shown_record_text(  # noqa: PLR0912 — three explicit detail modes plus navigation
-    item: ShownRecord, detail: str, *, include_next: bool
-) -> str:
-    """The established single-record text, optionally without its navigation line."""
+def _shown_record_text(item: ShownRecord, detail: str, *, include_next: bool) -> str:
     record = item.record
     lines = [
-        f"state: {record.id} · lifecycle {lifecycle(record)} · work {record.work_status} · "
-        f"detail {detail}",
+        f"state: {record.id} · lifecycle {lifecycle(record)} · work {record.work_status} · detail {detail}",
         record_line(record),
         f"tags: {', '.join(record.tags) if record.tags else 'none'}",
+        "projects: "
+        + (
+            ", ".join(f"{project.id} ({project.name})" for project in record.projects)
+            if record.projects
+            else "unscoped"
+        ),
     ]
     if detail != "summary":
         lines += _work_status_history(record)
@@ -172,64 +183,120 @@ def _shown_record_text(  # noqa: PLR0912 — three explicit detail modes plus na
         lines += _artifacts(item.artifacts)
     elif detail == "full":
         lines += record.body.splitlines()
+        lines += _membership_history(item)
     else:
         lines.append("code:" if item.captures else "code: none captured")
-        store = item.capture_store
         for capture_status in item.captures:
             capture = capture_status.capture
             lines.append(
-                f"  {capture.repo_path} @ {capture.captured_sha} · "
-                f"{capture_status.reachability.status}"
+                f"  {capture.repo_path} @ {capture.captured_sha} · {capture_status.reachability.status}"
             )
             lines.append(
-                f"    read files: git --git-dir={store} show {capture.captured_sha}:<path>"
+                f"    read files: git --git-dir={item.capture_store} show {capture.captured_sha}:<path>"
             )
             if capture.dirty and capture.head_sha is not None:
                 lines.append(
                     f"    uncommitted changes, while {capture.repo_path} exists: "
-                    f"GIT_ALTERNATE_OBJECT_DIRECTORIES={store}/objects git -C "
+                    f"GIT_ALTERNATE_OBJECT_DIRECTORIES={item.capture_store}/objects git -C "
                     f"{capture.repo_path} diff {capture.head_sha} {capture.captured_sha}"
                 )
         lines += _artifacts(item.artifacts)
-        if record.project is None:
-            lines.append("project paths: none, the record has no project")
-        elif not item.project_registered:
-            lines.append(
-                f"project paths: project {record.project} is not registered: "
-                f"register_project(name={_value(record.project)}, paths=[...])"
-            )
-        else:
-            lines += project_path_lines(item.project_paths)
+        lines += _record_project_path_lines(item)
         value = json.dumps(record.value, ensure_ascii=False) if record.value is not None else "none"
         lines.append(f"value: {value}")
 
-    if not include_next:
-        return "\n".join(lines)
-    hints: list[str] = []
-    if item.contradicted_by:
-        hints.append(
-            f"{item.contradicted_by} contradict this · "
-            + call("search", links=f"contradicts:{record.id}")
+    if include_next:
+        hints: list[str] = []
+        if item.contradicted_by:
+            hints.append(
+                f"{item.contradicted_by} contradict this · "
+                + call("search", links=f"contradicts:{record.id}")
+            )
+        if record.superseded_by is not None:
+            hints.append(
+                f"superseded by {record.superseded_by} · {call('show', record.superseded_by)}"
+            )
+        unreachable = sum(
+            1 for artifact in item.artifacts if artifact.reachability.status in _UNREACHABLE
         )
-    if record.superseded_by is not None:
-        hints.append(f"superseded by {record.superseded_by} · {call('show', record.superseded_by)}")
-    unreachable = sum(
-        1 for artifact in item.artifacts if artifact.reachability.status in _UNREACHABLE
-    )
-    if unreachable:
-        hints.append(f"{unreachable} artifacts absent or changed")
-    hints += [
-        call("show", record.id, detail=level) if level != "summary" else call("show", record.id)
-        for level in _DETAILS
-        if level != detail
-    ]
-    hints.append(call("lineage", record.id))
-    lines.append(next_line(hints))
+        if unreachable:
+            hints.append(f"{unreachable} artifacts absent or changed")
+        hints += [
+            call("show", record.id, detail=level) if level != "summary" else call("show", record.id)
+            for level in _DETAILS
+            if level != detail
+        ]
+        hints.append(call("lineage", record.id))
+        lines.append(next_line(hints))
     return "\n".join(lines)
 
 
+def _shown_project_text(item: ShownProject, detail: str, *, include_next: bool) -> str:
+    project = item.project
+    lines = [
+        f"state: project {project.id} · {project.name} · detail {detail}",
+        f"created {item.created_at.isoformat()} by {item.created_by} on {item.created_on_host}",
+        f"current records: {item.current_record_count}",
+    ]
+    if detail == "summary":
+        lines.append(
+            "framing: "
+            + (
+                f"version {item.current_framing.version}: {item.current_framing.title}"
+                if item.current_framing is not None
+                else "no framing recorded"
+            )
+        )
+        lines.append(f"paths: {len(item.paths)}")
+    elif detail == "full":
+        lines += _framing_history(item)
+    else:
+        lines += project_path_lines(item.paths)
+    if include_next:
+        hints = [call("prime", project=project.id)]
+        hints += [
+            call("show", project.id, detail=level)
+            if level != "summary"
+            else call("show", project.id)
+            for level in _DETAILS
+            if level != detail
+        ]
+        lines.append(next_line(hints))
+    return "\n".join(lines)
+
+
+def _framing_history(item: ShownProject) -> list[str]:
+    if not item.framing_history:
+        return ["framing history: none recorded"]
+    lines = ["framing history:"]
+    for framing in item.framing_history:
+        line = (
+            f"  version {framing.version} · {framing.created_at.isoformat()} · "
+            f"{framing.author} · {framing.title}"
+        )
+        if framing.reason is not None:
+            line += f" · {framing.reason}"
+        lines.append(line)
+        lines += [f"    {body_line}" for body_line in framing.body.splitlines()]
+    return lines
+
+
+def _membership_history(item: ShownRecord) -> list[str]:
+    if not item.membership_history:
+        return ["project membership history: none"]
+    lines = ["project membership history:"]
+    for event in item.membership_history:
+        line = (
+            f"  {event.created_at.isoformat()} · {event.project.id} ({event.project.name}) · "
+            f"sequence {event.sequence} · {event.action} · {event.author}"
+        )
+        if event.reason is not None:
+            line += f" · {event.reason}"
+        lines.append(line)
+    return lines
+
+
 def project_path_lines(paths: list[PathStatus]) -> list[str]:
-    """`project paths:` then one line per registered path, or `project paths: none`."""
     if not paths:
         return ["project paths: none"]
     lines = ["project paths:"]
@@ -243,8 +310,23 @@ def project_path_lines(paths: list[PathStatus]) -> list[str]:
     return lines
 
 
+def _record_project_path_lines(item: ShownRecord) -> list[str]:
+    if not item.record.projects:
+        return ["project paths: none, the record is unscoped"]
+    if not item.project_paths:
+        return ["project paths: none"]
+    lines = ["project paths:"]
+    for status in item.project_paths:
+        line = f"  {status.project.id} ({status.project.name}) · {status.path.path}"
+        if status.path.label:
+            line += f"  {status.path.label}"
+        if status.path.access_instructions:
+            line += f" · access: {status.path.access_instructions}"
+        lines.append(f"{line} · {status.state}")
+    return lines
+
+
 def lineage_text(result: LineageResult) -> str:
-    """State line, the record, one line per ancestor and descendant, Next: line."""
     record = result.record
     lines = [
         f"state: {record.id} · {len(result.ancestors)} ancestors · "
@@ -258,33 +340,74 @@ def lineage_text(result: LineageResult) -> str:
                 f"  {label} · {item.relation} · {item.depth} {steps}  {record_line(item.record)}"
             )
     first = [*result.ancestors, *result.descendants]
-    if first:
-        lines.append(next_line([call("show", first[0].record.id)]))
-    else:
-        lines.append(next_line([call("search", query=record.title)]))
+    lines.append(
+        next_line(
+            [call("show", first[0].record.id)] if first else [call("search", query=record.title)]
+        )
+    )
     return "\n".join(lines)
 
 
 def prime_text(result: PrimeResult) -> str:
-    """The current state, grouped by entry type, with the links that determine scientific state."""
     if result.store_error is not None:
         return "\n".join([f"state: store unavailable: {result.store_error}", "Next: version()"])
-    scope = f"project {result.project}" if result.project is not None else "whole store"
+    if result.project is None:
+        shown_from = result.offset + 1 if result.projects else 0
+        shown_to = result.offset + len(result.projects)
+        lines = [
+            f"state: {result.project_total} projects · showing {shown_from}-{shown_to} · "
+            f"{result.unscoped_count} current unscoped records"
+        ]
+        if not result.projects:
+            lines.append("projects: none registered")
+        for item in result.projects:
+            framing = item.framing_title or "no framing recorded"
+            lines.append(
+                f"{item.project.id}  {item.project.name} · {framing} · "
+                f"{item.record_count} current · {item.open_count} open · "
+                f"last activity {item.last_activity.isoformat()}"
+            )
+            lines.append(f"  → {call('prime', project=item.project.id)}")
+        hints = []
+        if shown_to < result.project_total:
+            hints.append(
+                f"{result.project_total - shown_to} more projects · "
+                + call("prime", limit=result.limit, offset=shown_to)
+            )
+        hints += ["register_project(name=..., paths=[...], framing=...)", "search(query=...)"]
+        lines.append(next_line(hints))
+        return "\n".join(lines)
+
+    project = result.project
     lines = [
-        f"state: {scope} · {result.current_count} current records · "
+        f"state: project {project.id} · {project.name} · {result.current_count} current records · "
         f"{result.replaced_count} replaced by newer versions · {result.retired_count} retired"
     ]
-    if result.project is not None:
-        if not result.registered:
-            lines.append(
-                f"project {result.project} is not registered: "
-                f"register_project(name={_value(result.project)}, paths=[...])"
+    lines += project_path_lines(result.paths)
+    lines += ["", "framing:"]
+    if result.framing is None:
+        lines.append("  no framing recorded")
+    else:
+        framing = result.framing
+        line = (
+            f"  version {framing.version} · {framing.created_at.isoformat()} · "
+            f"{framing.author} · {framing.title}"
+        )
+        if framing.reason is not None:
+            line += f" · {framing.reason}"
+        lines.append(line)
+        lines += [f"    {body_line}" for body_line in framing.body.splitlines()]
+        lines.append(
+            "  revise: "
+            + call(
+                "update_project",
+                project=project.id,
+                framing={"title": framing.title, "body": "..."},
+                base_version=framing.version,
+                reason="...",
             )
-        else:
-            lines += project_path_lines(result.paths)
-    lines += _project_context_lines(result.project_contexts, whole_store=result.project is None)
-    lines += _problem_statement_lines(result.problem_statements, whole_store=result.project is None)
-
+        )
+    lines += _problem_statement_lines(result.problem_statements)
     ordered = [name for name in _PRIME_GROUP_ORDER if name in result.groups]
     ordered += sorted(name for name in result.groups if name not in _PRIME_GROUP_ORDER)
     for kind in ordered:
@@ -292,26 +415,13 @@ def prime_text(result: PrimeResult) -> str:
         lines += ["", f"{_group_label(kind)} ({len(entries)} current):"]
         for entry in entries:
             lines += _prime_entry_lines(kind, entry)
-
     shown = [entry.record.id for kind in ordered for entry in result.groups[kind]]
-    replacement = next(
-        (
-            entry.record.id
-            for kind in ordered
-            for entry in result.groups[kind]
-            if _replaces(entry.record) is not None
-        ),
-        None,
-    )
-    lines += ["", "Next:"]
+    hints = []
     if shown:
-        lines.append(f"  read full records: {call('show', shown, detail='full')}")
-    if replacement is not None:
-        lines.append(f"  inspect replacement history: {call('lineage', replacement)}")
-    if result.project is not None:
-        lines.append(f"  find anything else: search(project={_value(result.project)}, query=...)")
-    else:
-        lines.append("  find anything else: search(query=...)")
+        hints.append(f"read full records: {call('show', shown, detail='full')}")
+    hints.append(f"find anything else: {call('search', projects=[project.id], query='...')}")
+    hints.append(f"framing history: {call('show', project.id, detail='full')}")
+    lines += ["", next_line(hints)]
     return "\n".join(lines)
 
 
@@ -339,46 +449,13 @@ _GROUP_LABELS = {
 }
 
 
-def _project_context_lines(records: list[Record], *, whole_store: bool) -> list[str]:
-    label = f"project contexts ({len(records)} current):" if whole_store else "project context:"
-    lines = ["", label]
-    if not records:
-        return [*lines, "  none recorded"]
-    for position, record in enumerate(records):
-        if position:
-            lines.append("")
-        lines += [
-            f"  project: {record.project or 'none'}",
-            f"  record id: {record.id}",
-            f"  lifecycle: {lifecycle(record)}",
-            f"  work status: {record.work_status}",
-            f"  read full record: {call('show', record.id)}",
-        ]
-        if record.body == PROJECT_CONTEXT_TEMPLATE:
-            lines.append("  template only, nothing recorded")
-        elif not record.body:
-            lines.append("  empty")
-        else:
-            lines += ["", record.body]
-    return lines
-
-
-def _problem_statement_lines(records: list[Record], *, whole_store: bool) -> list[str]:
+def _problem_statement_lines(records: list[Record]) -> list[str]:
     lines = ["", f"problem statements ({len(records)} current):"]
     if not records:
         return [*lines, "  none recorded"]
     for record in records:
-        if whole_store:
-            lines += [
-                f"  project: {record.project or 'none'}",
-                f"  record id: {record.id}",
-                f"  title: {record.title}",
-                f"  work status: {record.work_status}",
-            ]
-        else:
-            lines.append(f"  {record.id}  {record.title} · work {record.work_status}")
-        if record.body:
-            lines += [f"    {line}" for line in record.body.splitlines()]
+        lines.append(f"  {record.id}  {record.title} · work {record.work_status}")
+        lines += [f"    {line}" for line in record.body.splitlines()]
     return lines
 
 
@@ -391,10 +468,11 @@ def _prime_entry_lines(kind: str, entry: PrimeEntry) -> list[str]:
             if entry.verifications
             else "not verified"
         )
-        if entry.builds_on:
-            facts.append("builds on " + ", ".join(_target(item) for item in entry.builds_on))
-        else:
-            facts.append("builds on nothing")
+        facts.append(
+            "builds on " + ", ".join(_target(item) for item in entry.builds_on)
+            if entry.builds_on
+            else "builds on nothing"
+        )
     elif kind == "hypothesis":
         results = [item.record for item in entry.incoming_results if item.relation == "builds_on"]
         facts.append(
@@ -410,19 +488,14 @@ def _prime_entry_lines(kind: str, entry: PrimeEntry) -> list[str]:
         )
     if replaced := _replaces(record):
         facts.append(f"replaces {replaced}")
-    line = f"  {record.id}  {record.title}"
-    if facts:
-        line += " · " + " · ".join(facts)
-    lines = [line]
+    lines = [f"  {record.id}  {record.title} · " + " · ".join(facts)]
     if kind == "hypothesis":
         for link in entry.incoming_results:
-            if link.relation not in {"cites", "contradicts"}:
-                continue
-            verb = "cited by" if link.relation == "cites" else "contradicted by"
-            lines.append(
-                f"    {verb}: {link.record.id} (result; {link.relation} does not count as a "
-                "test, use builds_on)"
-            )
+            if link.relation in {"cites", "contradicts"}:
+                verb = "cited by" if link.relation == "cites" else "contradicted by"
+                lines.append(
+                    f"    {verb}: {link.record.id} (result; {link.relation} does not count as a test, use builds_on)"
+                )
     return lines
 
 
@@ -446,10 +519,7 @@ def _group_label(kind: str) -> str:
 def _work_status_history(record: Record) -> list[str]:
     lines = ["work status history:"]
     for event in record.work_status_history:
-        line = (
-            f"  {event.sequence}  {event.work_status} · {event.changed_at.isoformat()} · "
-            f"{event.author}"
-        )
+        line = f"  {event.sequence}  {event.work_status} · {event.changed_at.isoformat()} · {event.author}"
         if event.reason is not None:
             line += f" · {event.reason}"
         lines.append(line)
@@ -476,12 +546,28 @@ def _matched(hit: SearchHit) -> str:
     for method in hit.matched_by:
         if method != "keyword":
             parts.append(method)
-            continue
-        if not hit.keyword_matches:
+        elif not hit.keyword_matches:
             parts.append("keyword")
-            continue
-        locations = ", ".join(f'"{match.term}" in {match.field}' for match in hit.keyword_matches)
-        parts.append(f"keyword {locations}")
+        else:
+            locations = ", ".join(
+                f'"{match.term}" in {match.field}' for match in hit.keyword_matches
+            )
+            parts.append(f"keyword {locations}")
+    return " · ".join(parts)
+
+
+def _matched_project(hit: ProjectSearchHit) -> str:
+    parts: list[str] = []
+    for method in hit.matched_by:
+        if method != "keyword":
+            parts.append(method)
+        elif not hit.keyword_matches:
+            parts.append("keyword")
+        else:
+            locations = ", ".join(
+                f'"{match.term}" in {match.field}' for match in hit.keyword_matches
+            )
+            parts.append(f"keyword {locations}")
     return " · ".join(parts)
 
 

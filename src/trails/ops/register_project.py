@@ -4,7 +4,7 @@ NOTE: no `from __future__ import annotations` in this package. See `ops/__init__
 """
 
 import socket
-from contextlib import suppress
+import unicodedata
 from pathlib import Path
 from typing import Annotated
 
@@ -12,48 +12,62 @@ from pydantic import Field
 
 from trails import engine as engine_seam, vector
 from trails.errors import ValidationError
-from trails.models import ProjectPath, RecordDraft
+from trails.models import Project, ProjectFramingDraft, ProjectPath, ProjectRef
 from trails.ops import context
 from trails.ops._marks import Operation
 from trails.ops._project_types import RegisterProjectResult
 from trails.reachability import is_uri, path_state
 from trails.secret_scan import scan_for_secrets
-from trails.store import Store
-from trails.vocab import PROJECT_CONTEXT_TEMPLATE
 
-OPERATION = Operation(toolset="full", read_only=False, destructive=False, idempotent=True)
+OPERATION = Operation(toolset="agent", read_only=False, destructive=False, idempotent=True)
 
 
 async def register_project(
     name: Annotated[
-        str, Field(description="Short project name used in every record's project field.")
+        str,
+        Field(
+            description=(
+                "Unique one-line human name for a stable body of work. A repeated exact name "
+                "returns the same generated project id."
+            )
+        ),
     ],
     paths: Annotated[
         list[ProjectPath],
         Field(
             description=(
-                'Places the project uses, each {"path": ..., "label": ..., '
-                '"access_instructions": ...}: code repositories, data directories, s3:// '
-                "prefixes. A path already registered is updated."
+                'Initial places the project uses, each {"path": ..., "label": ..., '
+                '"access_instructions": ...}: repositories, data directories, or URIs. '
+                "Use update_project for later changes."
             )
         ),
     ] = [],  # noqa: B006 — contracted default; never mutated
-    remove_paths: Annotated[
-        list[str],
-        Field(description="Registered paths to remove from the project, exactly as listed."),
-    ] = [],  # noqa: B006 — contracted default; never mutated
+    framing: Annotated[
+        ProjectFramingDraft | None,
+        Field(
+            description=(
+                "Optional project purpose and motivation: a one-line title plus why the "
+                "project exists, who it serves, long-term success, and what is out of scope. "
+                "Put operational knowledge in paths or ordinary records instead."
+            )
+        ),
+    ] = None,
 ) -> RegisterProjectResult:
-    """Register a project, or add, update or remove its paths. Creates nothing on disk: a project is a name, the paths it uses with a label and how to reach each, and a project-context record with empty headings, created when the project has none.
+    """Register stable project identity, paths, and optional purpose framing in one transaction.
 
-    Use this when: work starts on something that will span sessions, prime reports the project is not registered, or the project starts using another repository, data directory or bucket.
+    Use this when: creating a stable body of work. Repeating the same registration returns the
+    existing project without changing it. For an existing project, different framing or a
+    nonempty path list that does not exactly match all current paths refuses with an
+    update_project call.
 
-    Use instead: publish, to add records to a project; export and publish(from_file=...), to fill in or revise the project context.
+    Use instead: update_project, to change paths or framing after registration; publish, to
+    record knowledge in zero or more projects; set_projects, to change an existing record's
+    memberships without revising its content.
 
-    Returns: the project's paths with whether each exists on this machine, the project context's record id, and warnings for a local path that does not exist or a possible secret in a label or access instructions.
+    Returns: the stable project id and name, all current paths, the framing version written or
+    recognized as a retry, the current framing version, deterministic near-name notes, and path,
+    embedding, or possible-secret warnings.
     """
-    name = name.strip()
-    if not name:
-        raise ValidationError("project name is empty")
     host = socket.gethostname()
     given: list[ProjectPath] = []
     for item in paths:
@@ -61,7 +75,7 @@ async def register_project(
         if not is_uri(location):
             try:
                 location = str(Path(location).expanduser())
-            except RuntimeError as exc:  # expanduser on an unknown user, as in "~nosuchuser/x"
+            except RuntimeError as exc:
                 raise ValidationError(f"cannot expand {item.path}: {exc}") from exc
         given.append(
             item.model_copy(
@@ -73,8 +87,16 @@ async def register_project(
         )
 
     store = context.store()
-    project, created = store.write_project(name, host, given, remove_paths)
+    outcome = store.write_project(
+        name,
+        host,
+        given,
+        [],
+        framing=framing,
+        intent="register",
+    )
 
+    notes = _near_name_notes(outcome.project, store.list_projects()) if outcome.created else []
     warnings: list[str] = []
     for item in given:
         state = path_state(item)
@@ -83,66 +105,91 @@ async def register_project(
             warnings.append(f"{item.path}: not checked ({kind})")
         elif state == "missing":
             warnings.append(f"{item.path} does not exist on {item.host}")
-    findings = scan_for_secrets(
-        {
-            f"{item.path} {part}": text
-            for item in given
-            for part, text in (
-                ("label", item.label),
-                ("access_instructions", item.access_instructions),
-            )
-        }
-    )
+    fields = {
+        f"{item.path} {part}": text
+        for item in given
+        for part, text in (
+            ("label", item.label),
+            ("access_instructions", item.access_instructions),
+        )
+    }
+    if framing is not None:
+        fields.update({"framing.title": framing.title, "framing.body": framing.body})
     warnings += [
         f"possible secret: {finding.detector} in {finding.field} line {finding.line}"
-        for finding in findings
+        for finding in scan_for_secrets(fields)
     ]
 
-    project_context_id = _current_project_context(store, name)
-    project_context_created = project_context_id is None
-    if project_context_id is None:
-        project_context = RecordDraft(
-            entry_type="project-context",
-            work_status="open",
-            title=name,
-            body=PROJECT_CONTEXT_TEMPLATE,
-            tags=[],
-            project=name,
-        )
-        project_context_id = store.write_record(project_context).record.id
-        _embed_quietly(store, project_context_id)
+    if outcome.framing_created and outcome.framing is not None:
+        try:
+            engine = engine_seam.build_engine()
+            if engine.is_available():
+                vector.embed_project_framings(store, engine, [(outcome.project, outcome.framing)])
+        except Exception as exc:  # framing is durable; report post-write embedding failure
+            warnings.append(
+                f"the framing was written but not embedded for similarity search: {exc}"
+            )
 
     return RegisterProjectResult(
-        project=project.name,
-        created=created,
-        paths=[(item, path_state(item)) for item in project.paths],
-        project_context_id=project_context_id,
-        project_context_created=project_context_created,
+        project=ProjectRef(id=outcome.project.id, name=outcome.project.name),
+        created=outcome.created,
+        changed=outcome.changed,
+        paths=[(item, path_state(item)) for item in outcome.project.paths],
+        framing=outcome.framing,
+        framing_created=outcome.framing_created,
+        current_framing_version=outcome.current_framing_version,
+        notes=notes,
         warnings=warnings,
     )
 
 
-def _embed_quietly(store: Store, record_id: str) -> None:
-    """Embed the new project context for similarity search, as publish embeds every record it writes.
+def _near_name_notes(created: Project, projects: list[Project]) -> list[str]:
+    """At most three deterministic, nonblocking near-name notes."""
+    source = _folded(created.name)
+    compact = _compact(source)
+    candidates: list[tuple[int, str, str, Project]] = []
+    for project in projects:
+        if project.id == created.id:
+            continue
+        other = _folded(project.name)
+        distance = _levenshtein(source, other)
+        threshold = max(1, min(3, round(max(len(source), len(other)) * 0.1)))
+        if compact == _compact(other) or distance <= threshold:
+            candidates.append(
+                (0 if compact == _compact(other) else distance, other, project.id, project)
+            )
+    return [
+        f"similar registered project: {project.id} · {project.name}"
+        for _distance, _normal, _id, project in sorted(candidates)[:3]
+    ]
 
-    THE PROJECT CONTEXT IS DURABLE by now, so nothing here may raise, for the reason publish gives. A
-    failure leaves the project context unembedded, which lint's unembedded category and search's state
-    line both report, and `embed` repairs.
-    """
-    with suppress(Exception):
-        engine = engine_seam.build_engine()
-        if engine.is_available():
-            vector.embed_record(store, engine, record_id)
 
-
-def _current_project_context(store: Store, name: str) -> str | None:
-    """The newest project context of the project that nothing supersedes, or None."""
-    rows = store.query(
-        "SELECT r.id FROM record r "
-        "WHERE r.entry_type = 'project-context' AND r.project = ? AND NOT EXISTS ("
-        "SELECT 1 FROM link l WHERE l.relation = 'supersedes' AND l.target_id = r.id) "
-        "AND NOT EXISTS (SELECT 1 FROM retirement x WHERE x.record_id = r.id) "
-        "ORDER BY r.created_at DESC LIMIT 1",
-        [name],
+def _folded(value: str) -> str:
+    return "".join(
+        character
+        for character in unicodedata.normalize("NFKD", value.casefold())
+        if not unicodedata.combining(character)
     )
-    return str(rows[0]["id"]) if rows else None
+
+
+def _compact(value: str) -> str:
+    return "".join(character for character in value if character.isalnum())
+
+
+def _levenshtein(first: str, second: str) -> int:
+    """Exact edit distance using one row of memory."""
+    if len(first) < len(second):
+        first, second = second, first
+    previous = list(range(len(second) + 1))
+    for row, left in enumerate(first, start=1):
+        current = [row]
+        for column, right in enumerate(second, start=1):
+            current.append(
+                min(
+                    current[-1] + 1,
+                    previous[column] + 1,
+                    previous[column - 1] + (left != right),
+                )
+            )
+        previous = current
+    return previous[-1]

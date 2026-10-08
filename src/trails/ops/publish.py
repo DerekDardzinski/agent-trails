@@ -26,9 +26,11 @@ async def publish(  # noqa: PLR0912, PLR0915, PLR0917 — operation orchestratio
         EntryType | None,
         Field(
             description=(
-                "What this record is: project-context, problem-statement, hypothesis, "
-                "procedure, result, verification, fact, insight, decision, report or note. "
-                "Required unless from_file supplies it."
+                "What this record is: problem-statement, hypothesis, procedure, result, "
+                "verification, fact, insight, decision, report or note. Use decision for a "
+                "rule or choice and its reason, procedure for steps someone can follow and "
+                "verify, and fact for a statement about data or an environment. Required "
+                "unless from_file supplies it."
             )
         ),
     ] = None,
@@ -62,9 +64,15 @@ async def publish(  # noqa: PLR0912, PLR0915, PLR0917 — operation orchestratio
             )
         ),
     ] = [],  # noqa: B006 — contracted default; never mutated
-    project: Annotated[
-        str | None,
-        Field(description="Project name, as shown by prime or given to register_project."),
+    projects: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "Project ids or exact unique names for this record. For a new record, omitted "
+                "means unscoped. For a superseding record, omitted inherits current memberships; "
+                "an explicit list replaces them, and [] intentionally makes it unscoped."
+            )
+        ),
     ] = None,
     value: Annotated[
         dict[str, Any] | None,
@@ -152,7 +160,7 @@ async def publish(  # noqa: PLR0912, PLR0915, PLR0917 — operation orchestratio
         Field(
             description=(
                 "Path to a file written by export. The file supplies entry_type, work_status, "
-                "title, body, tags, project, value, links and artifacts; leave those parameters "
+                "title, body, tags, projects, value, links and artifacts; leave those parameters "
                 "empty. When the file's header names an existing id, the new record supersedes "
                 "it and the "
                 "header must include a reason line. repos, exclude and allow_large may be "
@@ -176,14 +184,18 @@ async def publish(  # noqa: PLR0912, PLR0915, PLR0917 — operation orchestratio
             "title": title,
             "body": body,
             "tags": tags,
-            "project": project,
+            "projects": projects,
             "value": value,
             "links": links,
             "artifacts": artifacts,
             "supersedes": supersedes,
             "reason": reason,
         }
-        clashing = [name for name, argument in given.items() if argument]
+        clashing = [
+            name
+            for name, argument in given.items()
+            if argument or (name == "projects" and argument is not None)
+        ]
         if clashing:
             raise ValidationError(
                 f"from_file supplies {', '.join(clashing)}; leave those parameters empty"
@@ -211,7 +223,7 @@ async def publish(  # noqa: PLR0912, PLR0915, PLR0917 — operation orchestratio
             title=title,
             body=body,
             tags=tags,
-            project=project,
+            projects=projects,
             value=value,
             links=links,
             artifacts=artifacts,
@@ -222,6 +234,9 @@ async def publish(  # noqa: PLR0912, PLR0915, PLR0917 — operation orchestratio
     if (exclude or allow_large) and not repos:
         raise ValidationError("exclude and allow_large apply to repos; pass repos too")
     store = context.store()
+    if draft.projects is not None:
+        resolved_projects = store.resolve_projects(draft.projects)
+        draft = draft.model_copy(update={"projects": [item.id for item in resolved_projects]})
     store.validate_record_draft(draft)
     target_ids = list(dict.fromkeys(link.target_id for link in draft.links))
     link_targets = store.get_records(target_ids)
@@ -233,6 +248,12 @@ async def publish(  # noqa: PLR0912, PLR0915, PLR0917 — operation orchestratio
             store.get_record(draft.supersedes)
         except RecordNotFoundError as exc:
             raise ValidationError(f"no existing record has id {draft.supersedes}") from exc
+        current = store.superseding_tip(draft.supersedes)
+        if current is not None:
+            raise ValidationError(
+                f"{draft.supersedes} is already superseded; current version is {current}; "
+                f"supersede {current} instead"
+            )
 
     repo_paths = _distinct_repos(repos)
     capture_store = capture.store_path(store.db_path)
@@ -260,15 +281,20 @@ async def publish(  # noqa: PLR0912, PLR0915, PLR0917 — operation orchestratio
             notices.extend(captured.warnings)
 
     draft = draft.model_copy(update={"id": record_id, "code": [*draft.code, *captures]})
-    if draft.supersedes is None:
-        replaced = None
-        outcome = store.write_record(draft)
-    else:
-        # The warning and the superseding write see one database state. In particular, a
-        # verification stamp cannot land after the read and disappear from the warning.
-        with dolt.exclusive(store.db_path):
-            replaced = store.get_record(draft.supersedes)
+    try:
+        if draft.supersedes is None:
+            replaced = None
             outcome = store.write_record(draft)
+        else:
+            # The warning and the superseding write see one database state. In particular, a
+            # verification stamp cannot land after the read and disappear from the warning.
+            with dolt.exclusive(store.db_path):
+                replaced = store.get_record(draft.supersedes)
+                outcome = store.write_record(draft)
+    except ValidationError:
+        if plans and record_id is not None and record_id not in store.get_records([record_id]):
+            capture.discard_unpublished_refs(capture_store, record_id)
+        raise
     record_id = outcome.record.id
     warnings = [
         f"possible secret: {finding.detector} in {finding.field} line {finding.line}"
@@ -296,6 +322,9 @@ async def publish(  # noqa: PLR0912, PLR0915, PLR0917 — operation orchestratio
 
     return PublishResult(
         record_id=record_id,
+        entry_type=outcome.record.entry_type,
+        work_status=outcome.record.work_status,
+        projects=outcome.record.projects,
         superseded_id=draft.supersedes,
         embedded=embedded,
         captures=summaries,

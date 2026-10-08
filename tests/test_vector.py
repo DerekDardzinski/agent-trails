@@ -192,18 +192,20 @@ def test_parse_nearest_with_no_depth_returns_nothing() -> None:
 def test_the_unembedded_count_is_nonzero_and_scoped_to_a_project(store: Store) -> None:
     """labbook-79y.6 items 12 and 18. Catches a count that is always 0, and a project's
     state line reporting another project's unembedded records."""
+    p = store.write_project("p", "host", [], []).project.id
+    q = store.write_project("q", "host", [], []).project.id
     store.write_record(
-        RecordDraft(entry_type="note", work_status="closed", title="In p", project="p")
+        RecordDraft(entry_type="note", work_status="closed", title="In p", projects=[p])
     )
     store.write_record(
-        RecordDraft(entry_type="note", work_status="closed", title="In q", project="q")
+        RecordDraft(entry_type="note", work_status="closed", title="In q", projects=[q])
     )
     store.write_record(
-        RecordDraft(entry_type="note", work_status="closed", title="Also q", project="q")
+        RecordDraft(entry_type="note", work_status="closed", title="Also q", projects=[q])
     )
 
-    def count(project: str | None) -> int:
-        statement = vector.unembedded_statement(MODEL_ID, project)
+    def count(projects: list[str]) -> int:
+        statement = vector.unembedded_statement(MODEL_ID, projects)
         return int(dolt.read_rows(store.db_path, statement)[0]["n"])
 
-    assert (count(None), count("p"), count("q")) == (3, 1, 2)
+    assert (count([]), count([p]), count([q])) == (3, 1, 2)

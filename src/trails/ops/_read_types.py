@@ -1,7 +1,5 @@
 """What the reading operations return: search, show, lineage and prime.
 
-Each result renders through `trails.render`, the one module that formats reading text.
-
 NOTE: no `from __future__ import annotations` in this package. See `ops/__init__.py`.
 """
 
@@ -11,17 +9,32 @@ from typing import Any, Literal
 from pydantic import BaseModel
 
 from trails import render
-from trails.models import ArtifactRef, CodeCapture, ProjectPath, Record
+from trails.models import (
+    ArtifactRef,
+    CodeCapture,
+    ProjectFramingVersion,
+    ProjectMembershipEvent,
+    ProjectPath,
+    ProjectRef,
+    Record,
+)
 from trails.ops.types import RenderedResult
 from trails.reachability import PathState, Reachability
 from trails.vocab import Detail, EntryType, Relation, WorkStatus
 
 
 class KeywordMatch(BaseModel):
-    """One natural-language query term found in a searchable record text field."""
+    """One natural-language query term found in a searchable record field."""
 
     term: str
     field: Literal["title", "body"]
+
+
+class ProjectKeywordMatch(BaseModel):
+    """One natural-language query term found in a searchable current-project field."""
+
+    term: str
+    field: Literal["name", "framing_title", "framing_body"]
 
 
 class SearchHit(BaseModel):
@@ -30,7 +43,7 @@ class SearchHit(BaseModel):
     id: str
     entry_type: EntryType
     title: str
-    project: str | None
+    projects: list[ProjectRef]
     created_at: datetime
     lifecycle: Literal["current", "superseded", "retired"]
     superseded_by: str | None
@@ -41,20 +54,34 @@ class SearchHit(BaseModel):
     excerpt: str | None
 
 
+class ProjectSearchHit(BaseModel):
+    """A separately ranked project match from identity or current framing."""
+
+    id: str
+    name: str
+    framing_version: int | None
+    framing_title: str | None
+    matched_by: list[Literal["keyword", "exact", "semantic"]]
+    keyword_matches: list[ProjectKeywordMatch]
+    excerpt: str | None
+    updated_at: datetime
+
+
 class SearchResult(RenderedResult):
-    """One page of search results, or the report of why nothing matched."""
+    """One record page plus at most three separately ranked project matches."""
 
     state: str
     hits: list[SearchHit]
     total: int
+    project_hits: list[ProjectSearchHit]
+    project_total: int
     offset: int
-    filters: dict[str, Any]  # the filter arguments as received, only those given
-    relaxed: list[tuple[str, int, str | None]]  # (filter, matches without it, "<id>, <tag>")
-    tag_aliases: dict[str, list[str]]  # each listed tag -> the other tags it also matches
+    filters: dict[str, Any]
+    relaxed: list[tuple[str, int, str | None]]
+    tag_aliases: dict[str, list[str]]
     next: list[str]
 
     def render_text(self) -> str:
-        """State line, results or the no-match report, Next: line."""
         return render.search_text(self)
 
 
@@ -62,28 +89,28 @@ class RelatedRecord(BaseModel):
     """A record reached over one link, or over several for lineage."""
 
     relation: Relation
-    direction: Literal["in", "out"]  # "out": this record links to it; "in": it links here
-    depth: int  # links followed to reach it; 1 for a direct link
+    direction: Literal["in", "out"]
+    depth: int
     record: Record
 
 
 class ArtifactStatus(BaseModel):
-    """An artifact reference and whether it can be read now."""
-
     ref: ArtifactRef
     reachability: Reachability
 
 
 class CaptureStatus(BaseModel):
-    """A code capture and whether its commit still resolves."""
-
     capture: CodeCapture
     reachability: Reachability
 
 
 class PathStatus(BaseModel):
-    """A registered project path and whether it exists on this machine."""
+    path: ProjectPath
+    state: PathState
 
+
+class ProjectPathStatus(BaseModel):
+    project: ProjectRef
     path: ProjectPath
     state: PathState
 
@@ -92,72 +119,91 @@ class ShownRecord(BaseModel):
     """One record prepared at the requested show detail."""
 
     record: Record
-    outgoing: list[RelatedRecord]  # summary only
-    incoming: list[RelatedRecord]  # summary only
-    artifacts: list[ArtifactStatus]  # summary and provenance
-    captures: list[CaptureStatus]  # provenance only
+    outgoing: list[RelatedRecord]
+    incoming: list[RelatedRecord]
+    artifacts: list[ArtifactStatus]
+    captures: list[CaptureStatus]
     capture_store: str
-    project_registered: bool
-    project_paths: list[PathStatus]  # provenance only
+    project_paths: list[ProjectPathStatus]
+    membership_history: list[ProjectMembershipEvent]
     contradicted_by: int
 
 
+class ShownProject(BaseModel):
+    """One exact project prepared at the requested detail."""
+
+    project: ProjectRef
+    created_at: datetime
+    created_by: str
+    created_on_host: str
+    paths: list[PathStatus]
+    current_framing: ProjectFramingVersion | None
+    framing_history: list[ProjectFramingVersion]
+    current_record_count: int
+
+
 class ShowResult(RenderedResult):
-    """One or several records at one level of detail, and any requested ids not found."""
+    """Exact records and projects at one detail level, plus missing identifiers."""
 
     requested: list[str]
-    records: list[ShownRecord]  # first-occurrence request order
+    records: list[ShownRecord]
+    projects: list[ShownProject]
     missing: list[str]
     detail: Detail
-    multiple: bool  # the caller supplied an array, even when it had one id
+    multiple: bool
 
     def render_text(self) -> str:
-        """The single-record form stays compact; arrays have one block per record and one Next."""
         return render.show_text(self)
 
 
 class LineageResult(RenderedResult):
-    """What a record was built on and what was built on it."""
-
     record: Record
     ancestors: list[RelatedRecord]
     descendants: list[RelatedRecord]
 
     def render_text(self) -> str:
-        """State line, one line per related record, Next: line."""
         return render.lineage_text(self)
 
 
 class PrimeRelation(BaseModel):
-    """A current record linked to a prime entry, with the relation it used."""
-
     relation: Relation
     record: Record
 
 
 class PrimeEntry(BaseModel):
-    """One current record and the connections prime explains beside it."""
-
     record: Record
-    builds_on: list[Record]  # outgoing builds_on targets, including replaced targets
-    incoming_results: list[PrimeRelation]  # current results using builds_on/cites/contradicts
-    verifications: list[Record]  # current verification records building on this result
+    builds_on: list[Record]
+    incoming_results: list[PrimeRelation]
+    verifications: list[Record]
+
+
+class ProjectIndexEntry(BaseModel):
+    """One bounded whole-store orientation row."""
+
+    project: ProjectRef
+    framing_title: str | None
+    record_count: int
+    open_count: int
+    last_activity: datetime
 
 
 class PrimeResult(RenderedResult):
-    """The current state of one project, or of the whole store."""
+    """The whole-store project index or one project's complete current orientation."""
 
-    project: str | None
-    registered: bool  # False only when a named project is not registered
-    paths: list[PathStatus]  # named project's registered paths
+    project: ProjectRef | None
+    projects: list[ProjectIndexEntry]
+    project_total: int
+    offset: int
+    limit: int
+    unscoped_count: int
+    paths: list[PathStatus]
+    framing: ProjectFramingVersion | None
     current_count: int
     replaced_count: int
     retired_count: int
-    project_contexts: list[Record]
     problem_statements: list[Record]
-    groups: dict[str, list[PrimeEntry]]  # entry type -> newest-first current records
+    groups: dict[str, list[PrimeEntry]]
     store_error: str | None
 
     def render_text(self) -> str:
-        """State, project context, problem statements, grouped records, connections, next calls."""
         return render.prime_text(self)

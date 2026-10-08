@@ -31,7 +31,7 @@ READ_KEYS = frozenset(
         "work_status",
         "title",
         "tags",
-        "project",
+        "projects",
         "value",
         "links",
         "artifacts",
@@ -57,7 +57,7 @@ class RecordFile(BaseModel):
 def to_markdown(record: Record) -> str:
     """Render a record as Markdown with TOML front matter between `+++` lines.
 
-    Front-matter keys written: id, entry_type, work_status, title, tags, project, value, links
+    Front-matter keys written: id, entry_type, work_status, title, tags, projects, value, links
     (list of {relation, target_id}), and artifacts (list of ArtifactRef fields). The body follows the
     closing `+++`. Code captures are not written to the file; they are provenance, and a
     record published from the file carries only the code captured by that publish call.
@@ -70,9 +70,15 @@ def to_markdown(record: Record) -> str:
         f"work_status = {_string(record.work_status)}",
         f"title = {_string(record.title)}",
         f"tags = [{', '.join(_string(tag) for tag in record.tags)}]",
+        "projects = ["
+        + ", ".join(_string(project.id) for project in record.projects)
+        + "]"
+        + (
+            " # " + "; ".join(project.name for project in record.projects)
+            if record.projects
+            else ""
+        ),
     ]
-    if record.project is not None:
-        lines.append(f"project = {_string(record.project)}")
     if record.value is not None:
         lines.append(f"value = {_string(json.dumps(record.value, sort_keys=True))}")
     # A `supersedes` link is NOT written. Publishing the file supersedes THIS record, through
@@ -128,7 +134,7 @@ def from_markdown(text: str) -> RecordFile:
             "work_status",
             "title",
             "tags",
-            "project",
+            "projects",
             "links",
             "artifacts",
         )

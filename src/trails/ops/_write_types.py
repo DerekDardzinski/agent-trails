@@ -9,9 +9,9 @@ NOTE: no `from __future__ import annotations` in this package. See `ops/__init__
 import shlex
 
 from trails.capture import human_size
-from trails.models import CaptureSummary
+from trails.models import CaptureSummary, ProjectRef
 from trails.ops.types import RenderedResult
-from trails.vocab import Relation, WorkStatus
+from trails.vocab import EntryType, Relation, WorkStatus
 
 
 def _next_show(record_id: str) -> str:
@@ -22,6 +22,9 @@ class PublishResult(RenderedResult):
     """A published record."""
 
     record_id: str
+    entry_type: EntryType
+    work_status: WorkStatus
+    projects: list[ProjectRef]
     superseded_id: str | None
     embedded: bool
     captures: list[CaptureSummary]
@@ -34,11 +37,13 @@ class PublishResult(RenderedResult):
         The two printf commands are printed for the user's repository and never run: trails
         writes nothing there.
         """
-        line = f"published {self.record_id}"
+        line = f"published {self.record_id} · {self.entry_type} · work {self.work_status}"
         if self.superseded_id is not None:
             line += f", superseding {self.superseded_id}"
         line += " · embedded" if self.embedded else " · not embedded"
         lines = [line]
+        scope = ", ".join(f"{item.id} ({item.name})" for item in self.projects) or "unscoped"
+        lines.append(f"projects: {scope}")
         for item in self.captures:
             text = (
                 f"captured {item.repo_path} @ {item.captured_sha[:12]}: {item.changed_files} "

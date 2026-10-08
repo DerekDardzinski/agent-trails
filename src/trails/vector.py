@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from trails import dolt
 from trails.embeddings import MODEL_ID, EmbeddingEngine
 from trails.errors import ValidationError
+from trails.models import Project, ProjectFramingVersion
 from trails.store import Store
 
 # One engine exists. An arbitrary model LABEL is refused, because it would write MiniLM
@@ -218,15 +219,129 @@ def parse_nearest(rows: Sequence[dict[str, Any]], depth: int) -> list[VectorMatc
     return matches
 
 
-def unembedded_statement(model_id: str, project: str | None = None) -> str:
-    """The count, as column `n`, of records with no chunk row for `model_id`.
-
-    Counted within `project` when given, so the number agrees with lint's unembedded
-    category for that project; over the whole store otherwise.
-    """
-    scope = f" AND r.project = {dolt.sql_literal(project)}" if project is not None else ""
+def unembedded_statement(
+    model_id: str, projects: Sequence[str] = (), unscoped: bool = False
+) -> str:
+    """Count records without this model's chunks inside the requested current scope."""
+    scope_parts: list[str] = []
+    if projects:
+        ids = ", ".join(dolt.sql_literal(project_id) for project_id in projects)
+        scope_parts.append(
+            "EXISTS (SELECT 1 FROM record_project_event membership WHERE "
+            "membership.record_id = r.id AND membership.project_id IN ("
+            f"{ids}) AND membership.action = 'add' AND NOT EXISTS (SELECT 1 FROM "
+            "record_project_event newer WHERE newer.record_id = membership.record_id AND "
+            "newer.project_id = membership.project_id AND newer.sequence > membership.sequence))"
+        )
+    if unscoped:
+        scope_parts.append(
+            "NOT EXISTS (SELECT 1 FROM record_project_event membership WHERE "
+            "membership.record_id = r.id AND membership.action = 'add' AND NOT EXISTS ("
+            "SELECT 1 FROM record_project_event newer WHERE newer.record_id = "
+            "membership.record_id AND newer.project_id = membership.project_id AND "
+            "newer.sequence > membership.sequence))"
+        )
+    scope = f" AND ({' OR '.join(scope_parts)})" if scope_parts else ""
     return (
         "SELECT COUNT(*) AS n FROM record r WHERE NOT EXISTS (SELECT 1 FROM "
         "record_chunk_embedding e WHERE e.record_id = r.id AND e.model_id = "
         f"{dolt.sql_literal(model_id)}){scope}"
+    )
+
+
+class ProjectVectorMatch(BaseModel):
+    """One project's nearest chunk from its current framing version."""
+
+    project_id: str
+    version: int
+    cosine: float
+    chunk_index: int
+    chunk_count: int
+
+
+def embed_project_framings(
+    store: Store,
+    engine: EmbeddingEngine,
+    projects: Sequence[tuple[Project, ProjectFramingVersion]],
+    *,
+    model_id: str | None = None,
+) -> int:
+    """Embed supplied Project/ProjectFramingVersion pairs that lack rows for this model."""
+    if not projects or not engine.is_available():
+        return 0
+    selected_model = model_id or engine.model_id()
+    if selected_model not in KNOWN_MODEL_IDS:
+        known = ", ".join(sorted(KNOWN_MODEL_IDS))
+        raise ValidationError(
+            f"unknown embedding model {selected_model!r}; this engine can produce: {known}"
+        )
+    conditions = " OR ".join("(project_id = ? AND version = ?)" for _item in projects)
+    params: list[str | int] = [selected_model]
+    for project, framing in projects:
+        params.extend([project.id, framing.version])
+    existing = {
+        (str(row["project_id"]), int(row["version"]))
+        for row in store.query(
+            "SELECT DISTINCT project_id, version FROM project_framing_embedding "
+            f"WHERE model_id = ? AND ({conditions})",
+            params,
+        )
+    }
+    rows: list[tuple[str, int, int, str, Sequence[float]]] = []
+    for project, framing in projects:
+        if (project.id, framing.version) in existing:
+            continue
+        for index, text in enumerate(chunk_texts(engine, framing.title, framing.body)):
+            rows.append((project.id, framing.version, index, selected_model, engine.embed(text)))
+    return store.insert_project_framing_embeddings(rows)
+
+
+def project_nearest_statement(query_vector: Sequence[float], model_id: str) -> str:
+    """Current framing chunks of `model_id`, nearest first."""
+    vector = dolt.sql_literal(dolt.vector_literal(query_vector))
+    model = dolt.sql_literal(model_id)
+    return (
+        "SELECT e.project_id, e.version, e.chunk_index, f.created_at, "
+        f"DISTANCE(e.vec, STRING_TO_VECTOR({vector}), 'COSINE') AS distance, "
+        "(SELECT COUNT(*) FROM project_framing_embedding c WHERE c.project_id = "
+        "e.project_id AND c.version = e.version AND c.model_id = e.model_id) AS chunks "
+        "FROM project_framing_embedding e JOIN project_framing_version f ON "
+        "f.project_id = e.project_id AND f.version = e.version WHERE e.model_id = "
+        f"{model} AND NOT EXISTS (SELECT 1 FROM project_framing_version newer WHERE "
+        "newer.project_id = f.project_id AND newer.version > f.version) "
+        "ORDER BY distance ASC, e.project_id ASC, e.chunk_index ASC"
+    )
+
+
+def parse_project_nearest(rows: Sequence[dict[str, Any]], depth: int) -> list[ProjectVectorMatch]:
+    """The first `depth` projects from current-framing nearest rows."""
+    matches: list[ProjectVectorMatch] = []
+    seen: set[str] = set()
+    for row in rows:
+        project_id = str(row["project_id"])
+        if project_id in seen:
+            continue
+        seen.add(project_id)
+        matches.append(
+            ProjectVectorMatch(
+                project_id=project_id,
+                version=int(row["version"]),
+                cosine=1.0 - float(row["distance"]),
+                chunk_index=int(row["chunk_index"]),
+                chunk_count=int(row["chunks"]),
+            )
+        )
+        if len(matches) == depth:
+            break
+    return matches
+
+
+def unembedded_framing_statement(model_id: str) -> str:
+    """Count current framing versions without an embedding row for `model_id`."""
+    return (
+        "SELECT COUNT(*) AS n FROM project_framing_version f WHERE NOT EXISTS (SELECT 1 "
+        "FROM project_framing_version newer WHERE newer.project_id = f.project_id AND "
+        "newer.version > f.version) AND NOT EXISTS (SELECT 1 FROM "
+        "project_framing_embedding e WHERE e.project_id = f.project_id AND e.version = "
+        f"f.version AND e.model_id = {dolt.sql_literal(model_id)})"
     )

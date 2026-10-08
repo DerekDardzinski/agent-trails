@@ -35,13 +35,15 @@ CATEGORIES = (
     "missing-paths",
     "stale-procedures",
     "unembedded",
+    "unembedded-framing",
     "possible-secrets",
 )
 
 
 async def lint(
     project: Annotated[
-        str | None, Field(description="Project name. Omit to check the whole store.")
+        str | None,
+        Field(description="Stable project id or exact unique name. Omit for the whole store."),
     ] = None,
 ) -> LintResult:
     """List store problems for a project: likely duplicate tags, artifacts that changed or disappeared, captured commits that disappeared, capture-store refs with no record, registered project paths that do not exist, procedures never verified or stale, records without similarity embeddings, and possible secrets in record fields and project access instructions, by record, field and line. Changes nothing.
@@ -53,14 +55,24 @@ async def lint(
     Returns: one section per category, each item naming the record.
     """
     store = context.store()
-    if project is None:
+    resolved = store.resolve_project(project) if project is not None else None
+    if resolved is None:
         rows = store.query("SELECT id FROM record ORDER BY id")
+        projects = store.list_projects()
     else:
-        rows = store.query("SELECT id FROM record WHERE project = ? ORDER BY id", [project])
+        rows = store.query(
+            "SELECT r.id FROM record r WHERE EXISTS (SELECT 1 FROM record_project_event e "
+            "WHERE e.record_id = r.id AND e.project_id = ? AND e.action = 'add' AND NOT "
+            "EXISTS (SELECT 1 FROM record_project_event newer WHERE newer.record_id = "
+            "e.record_id AND newer.project_id = e.project_id AND newer.sequence > e.sequence)) "
+            "ORDER BY r.id",
+            [resolved.id],
+        )
+        selected = store.get_project(resolved.id)
+        projects = [selected] if selected is not None else []
     ids = [str(row["id"]) for row in rows]
     found = store.get_records(ids)
     records = [found[record_id] for record_id in ids if record_id in found]
-    projects = [p for p in store.list_projects() if project is None or p.name == project]
     capture_store = capture.store_path(store.db_path)
 
     categories: dict[str, list[LintItem]] = {
@@ -71,11 +83,11 @@ async def lint(
         "missing-paths": _missing_paths(projects),
         "stale-procedures": _stale_procedures(records),
         "unembedded": _unembedded(store, ids),
+        "unembedded-framing": _unembedded_framing(store, projects),
         "possible-secrets": _possible_secrets(records, projects),
     }
     return LintResult(
-        project=project,
-        registered=project is None or store.get_project(project) is not None,
+        project=resolved,
         categories={name: categories[name] for name in CATEGORIES},
     )
 
@@ -198,9 +210,42 @@ def _unembedded(store: Store, ids: Sequence[str]) -> list[LintItem]:
     ]
 
 
+def _unembedded_framing(store: Store, projects: Sequence[Project]) -> list[LintItem]:
+    """Current framing versions with no row for the current embedding model."""
+    selected = [project for project in projects if project.current_framing is not None]
+    if not selected:
+        return []
+    model = engine_seam.build_engine().model_id()
+    conditions = " OR ".join("(project_id = ? AND version = ?)" for _item in selected)
+    params: list[str | int] = [model]
+    for project in selected:
+        framing = project.current_framing
+        if framing is not None:
+            params.extend([project.id, framing.version])
+    embedded = {
+        (str(row["project_id"]), int(row["version"]))
+        for row in store.query(
+            "SELECT DISTINCT project_id, version FROM project_framing_embedding "
+            f"WHERE model_id = ? AND ({conditions})",
+            params,
+        )
+    }
+    return [
+        LintItem(
+            record_id=None,
+            detail=(
+                f"project {project.id} ({project.name}) framing version "
+                f"{project.current_framing.version}: no embedding for {model}"
+            ),
+        )
+        for project in selected
+        if project.current_framing is not None
+        and (project.id, project.current_framing.version) not in embedded
+    ]
+
+
 def _possible_secrets(records: Sequence[Record], projects: Sequence[Project]) -> list[LintItem]:
-    """Possible secrets in record fields and in project path labels and access instructions,
-    never the text."""
+    """Possible secrets in records, project framing, and path metadata, never the text."""
     items = []
     for record in records:
         fields = {"title": record.title, "body": record.body}
@@ -225,11 +270,14 @@ def _possible_secrets(records: Sequence[Record], projects: Sequence[Project]) ->
                 ("access_instructions", path.access_instructions),
             )
         }
+        if item.current_framing is not None:
+            fields["framing.title"] = item.current_framing.title
+            fields["framing.body"] = item.current_framing.body
         items += [
             LintItem(
                 record_id=None,
-                detail=f"project {item.name}: {finding.detector} in {finding.field} line "
-                f"{finding.line}",
+                detail=f"project {item.id} ({item.name}): {finding.detector} in "
+                f"{finding.field} line {finding.line}",
             )
             for finding in scan_for_secrets(fields)
         ]

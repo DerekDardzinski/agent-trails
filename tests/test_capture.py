@@ -19,7 +19,7 @@ import pytest
 
 from trails import capture, gitprobe
 from trails.errors import TrailsError, ValidationError
-from trails.models import Link
+from trails.models import Link, RecordDraft
 from trails.ops import context
 from trails.ops.publish import publish
 from trails.store import Store
@@ -561,6 +561,88 @@ def test_malformed_record_fields_are_refused_before_repository_capture(
     assert not _store(store).exists()
 
 
+def test_a_losing_supersession_race_discards_its_unpublished_capture_refs(
+    store: Store,
+    git_repo: Path,
+    git_cmd: Callable[..., str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches the final serialized guard leaving a capture ref for a record it refused."""
+    old = _run(store, title="old").record_id
+    original_capture = capture.capture_repo
+    winner: list[str] = []
+
+    def capture_then_compete(*args: Any, **kwargs: Any) -> Any:
+        outcome = original_capture(*args, **kwargs)
+        winner.append(
+            store.write_record(
+                RecordDraft(
+                    entry_type="note",
+                    work_status="closed",
+                    title="winner",
+                    supersedes=old,
+                    reason="won the race",
+                )
+            ).record.id
+        )
+        return outcome
+
+    monkeypatch.setattr(capture, "capture_repo", capture_then_compete)
+
+    with pytest.raises(ValidationError) as refused:
+        _run(
+            store,
+            title="loser",
+            supersedes=old,
+            reason="lost the race",
+            repos=[str(git_repo)],
+        )
+
+    refs = git_cmd(_store(store), "for-each-ref", "--format=%(refname)", "refs/research/")
+    assert len(winner) == 1
+    assert str(refused.value) == (
+        f"{old} is already superseded; current version is {winner[0]}; "
+        f"supersede {winner[0]} instead"
+    )
+    assert refs == ""
+    assert {row["title"] for row in store.query("SELECT id, title FROM record ORDER BY id")} == {
+        "old",
+        "winner",
+    }
+
+
+def test_a_post_land_exception_keeps_the_durable_record_capture_ref(
+    store: Store,
+    git_repo: Path,
+    git_cmd: Callable[..., str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches rollback deleting a capture pin after the corresponding record became durable."""
+    original_write = Store.write_record
+    landed: list[str] = []
+
+    def write_then_raise(bound_store: Store, draft: RecordDraft) -> Any:
+        outcome = original_write(bound_store, draft)
+        landed.append(outcome.record.id)
+        raise ValidationError("injected after durable write")
+
+    monkeypatch.setattr(Store, "write_record", write_then_raise)
+
+    with pytest.raises(ValidationError, match="injected after durable write"):
+        _run(store, title="durable", repos=[str(git_repo)])
+
+    assert len(landed) == 1
+    assert store.get_record(landed[0]).title == "durable"
+    assert (
+        git_cmd(
+            _store(store),
+            "rev-parse",
+            f"refs/research/{landed[0]}/0",
+        )
+        == store.get_record(landed[0]).code[0].captured_sha
+    )
+
+
 # ------------------------------------------------------------------ size check
 
 
@@ -726,7 +808,7 @@ def test_the_publish_result_reports_the_capture_and_the_commands_to_keep_paths_o
     assert (item.changed_files, item.changed_bytes) == (2, 11)
     assert item.largest == [("tracked.txt", 8), ("b.txt", 3)]
     lines = result.render_text().splitlines()
-    assert lines[1:5] == [
+    assert lines[2:6] == [
         f"captured {top} @ {item.captured_sha[:12]}: 2 changed files, 11 B; largest: "
         "tracked.txt 8 B, b.txt 3 B",
         "excluded from this capture: my data",

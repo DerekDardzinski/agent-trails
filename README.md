@@ -26,13 +26,13 @@ Every record has one explicit entry type and one caller-selected work status.
 
 ```
 id          type prefix + "-" + 5 lowercase base36 characters normally; 6 after repeated collisions
-entry_type  project-context, problem-statement, hypothesis, procedure, result,
-            verification, fact, insight, decision, report, or note
+entry_type  problem-statement, hypothesis, procedure, result, verification, fact,
+            insight, decision, report, or note
 work_status open when another action is expected on this exact record; closed otherwise
 title       one line, required
 body        Markdown
 tags        sorted, lowercase descriptive labels; an entry type is not a tag
-project     optional project name
+projects    zero or more stable project IDs with current human names
 author      the operating system user
 created_at  UTC
 value       optional JSON object: structured numbers or fields
@@ -42,8 +42,9 @@ code        captured commits of the repositories that produced the record, held 
             trails' own git store
 ```
 
-Generated id prefixes are `ctx-`, `prb-`, `hyp-`, `pro-`, `res-`, `ver-`, `fac-`, `ins-`,
-`dec-`, `rpt-`, and `note-`, matching the entry types above. Generation tries ten five-character
+Generated record id prefixes are `prb-`, `hyp-`, `pro-`, `res-`, `ver-`, `fac-`, `ins-`,
+`dec-`, `rpt-`, and `note-`, matching the entry types above. Projects use generated `prj-`
+ids. Generation tries ten five-character
 base36 candidates, then ten six-character candidates, checking the complete ID for a collision.
 The old `rec-` plus 16-hex form and the prior type-prefixed 16-hex form remain recognizable for
 archived identifiers but are not generated.
@@ -58,9 +59,11 @@ Four link relations: `builds_on`, `supersedes`, `contradicts`, `cites`.
 
 History is append-only. A revision is a new record linked `supersedes` onto the old one, with
 a required one-sentence `reason`; the old record then reports `superseded_by`. `retire` marks a
-record no longer true without replacing it. Work-status changes append events. Nothing updates
-or deletes a record or status event; a project registration's paths are metadata and are edited
-in place, with Dolt's history keeping every version.
+record no longer true without replacing it. Work-status and project-membership changes append
+events. A superseding publish inherits current memberships when `projects` is omitted; an explicit
+list replaces them, and `projects=[]` intentionally makes the revision unscoped. Nothing updates
+or deletes a record, status event, membership event, or framing version. Current project paths are
+metadata edited in place, with Dolt's history keeping every version.
 
 ## Code capture
 
@@ -79,12 +82,25 @@ again.
 
 ## Projects
 
-A project is metadata: a name, the paths it uses (repositories, data directories, s3://
-prefixes), each with a label and free-text access instructions, and a project-context record.
-The project context is the durable information a new agent needs before working in the project:
-its long-term goal, data, environments, code, conventions and open questions. It spans many
-initiatives and sessions. `register_project` creates nothing on disk and warns on a local path
-that does not exist.
+A project is a stable body of work, not a repository. `register_project` creates a generated
+`prj-` id for a unique one-line human name and records its creator, host, creation time, initial
+paths and optional initial framing. Repeating registration returns the existing project without
+mutating it. `update_project` applies later path or framing changes. Neither command creates
+anything at a registered path, and missing local paths produce warnings.
+
+Optional project framing is attached to the project. Its one-line title and Markdown body state
+purpose and motivation: why the project exists, who it serves, long-term success, and what is out
+of scope. Operational knowledge belongs in paths or ordinary records. Initial framing supplied
+at registration becomes version 1 without a base or reason. Later changed framing requires the
+current `base_version` and a reason; use base 0 to add the first framing after registration. The
+store writes `base_version + 1`. Unchanged title and body are a no-op, and path-only changes do
+not increment framing. Old versions and embeddings remain; current framing is searchable.
+
+Records belong to zero, one or several projects through append-only membership events.
+`publish(projects=[...])` writes initial memberships atomically. `set_projects` changes grouping
+later without changing the record. `prime()` lists a small project index page and current unscoped count; its default page holds 100
+projects because the measured 1,000-project JSON response without paging was 155,184 bytes.
+`prime(project=...)` shows one project's current framing, paths and records.
 
 ## A possible secret is a warning
 
@@ -97,8 +113,9 @@ manual database-history rewrite. A secret written in plain prose is not detected
 ## Record files
 
 A record exports to Markdown with TOML front matter between `+++` lines. The header includes the
-record's required `entry_type` and latest `work_status`; `publish(from_file=...)` reads the same
-format back. A file whose header names an existing id publishes a superseding record and needs a
+record's required `entry_type`, latest `work_status`, and an explicit `projects` list of stable
+IDs. Current project names appear in a TOML comment for readability and are not parsed as identity;
+`publish(from_file=...)` reads the IDs back. A file whose header names an existing id publishes a superseding record and needs a
 `reason` line in the header. TOML rather than YAML, because YAML silently coerces values such as
 `no` to false.
 
@@ -107,16 +124,15 @@ format back. A file whose header names an existing id publishes a superseding re
 Each operation is one async function under `src/trails/ops/`, registered on both surfaces from
 the same signature and docstring. Every result renders as text: the CLI prints it (or the model
 as JSON with `--json`), and MCP returns the text together with the model as structured content.
-Search hits contain compact record metadata and a body excerpt when the matching passage is
-known. A body-keyword hit gets a window of at most 240 characters centered on its first match; a
+Search returns separately ranked current-framing project matches before compact record hits.
+Project matches are capped at three and report `project_total`; record-only filters suppress them.
+Record hits contain compact metadata and a body excerpt when the matching passage is known. A body-keyword hit gets a window of at most 240 characters centered on its first match; a
 semantic hit without a body-keyword match gets the complete selected embedding chunk. Hits omit
-status history, provenance, and retrieval scores. Use `show` to read the complete record. A writing
-operation ends with a `Next:` line naming the `show()` call for the record it wrote.
+status history, provenance, and retrieval scores. Use `show` to read the complete record. A record-writing operation ends with a `Next:` line naming the `show()` call for the record it wrote.
 
-The MCP server's default toolset is the nine agent operations: `prime`, `search`, `show`,
-`lineage`, `publish`, `set_work_status`, `link`, `retire` and `export`.
-`trails-mcp --toolset full` adds `register_project`, `lint`, `alias`, `mark_verified`, `embed`
-and `version`. The CLI has every operation; `trails <name> --help` describes each.
+The MCP server's default toolset is the twelve agent operations: `prime`, `search`, `show`,
+`lineage`, `register_project`, `update_project`, `publish`, `set_projects`, `set_work_status`,
+`link`, `retire` and `export`. `trails-mcp --toolset full` adds `lint`, `alias`, `mark_verified`, `embed` and `version`. The CLI has every operation; `trails <name> --help` describes each.
 
 ## Concurrency
 

@@ -111,6 +111,8 @@ def test_publish_from_file_supersedes_the_exported_record_and_refuses_extra_argu
 
     with pytest.raises(ValidationError, match="from_file supplies title"):
         _run(store, publish, from_file=str(path), title="other")
+    with pytest.raises(ValidationError, match="from_file supplies projects"):
+        _run(store, publish, from_file=str(path), projects=[])
     revised = _run(store, publish, from_file=str(path))
 
     assert revised.superseded_id == original.id
@@ -179,7 +181,8 @@ def test_mcp_publish_returns_the_rendered_text_and_the_model(store: Store) -> No
     assert [block.text for block in result.content] == [model.render_text()]
     assert result.structured_content == model.model_dump(mode="json")
     assert model.render_text() == (
-        f'published {model.record_id} · not embedded\nNext: show("{model.record_id}")'
+        f"published {model.record_id} · note · work closed · not embedded\n"
+        f'projects: unscoped\nNext: show("{model.record_id}")'
     )
 
 
@@ -207,14 +210,20 @@ def test_cli_prints_text_by_default_and_json_with_the_flag(
     refused, _, err = _cli(capsys, ["link", record_id, "supersedes", record_id, *db])
 
     assert (code, json_code, refused) == (0, 0, 1)
-    assert text == f'published {record_id} · not embedded\nNext: show("{record_id}")\n'
+    assert text == (
+        f"published {record_id} · note · work closed · not embedded\n"
+        f'projects: unscoped\nNext: show("{record_id}")\n'
+    )
     assert sorted(json.loads(as_json)) == [
         "captures",
         "embedded",
+        "entry_type",
         "notes",
+        "projects",
         "record_id",
         "superseded_id",
         "warnings",
+        "work_status",
     ]
     assert err.startswith("error: link does not write supersedes")
 

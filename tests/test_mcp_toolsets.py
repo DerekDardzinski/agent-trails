@@ -174,7 +174,7 @@ def test_export_is_in_the_default_toolset(store: Store, monkeypatch: pytest.Monk
     assert "export" in _tools(store)
 
 
-def test_the_default_toolset_is_exactly_the_nine_agent_tools(
+def test_the_default_toolset_is_exactly_the_twelve_agent_tools(
     store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """labbook-79y.6 item 9, over the real registry. Silent failure: an operation's mark
@@ -187,10 +187,13 @@ def test_the_default_toolset_is_exactly_the_nine_agent_tools(
         "link",
         "prime",
         "publish",
+        "register_project",
         "retire",
         "search",
+        "set_projects",
         "set_work_status",
         "show",
+        "update_project",
     ]
 
 
@@ -222,14 +225,16 @@ def test_a_store_refusal_sets_the_mcp_error_flag_and_keeps_its_message(store: St
     async def go() -> Any:
         async with Client(server) as client:
             return await client.call_tool(
-                "show", {"record_id": "rec-0000000000000000"}, raise_on_error=False
+                "show", {"item_id": "rec-0000000000000000"}, raise_on_error=False
             )
 
     result = asyncio.run(go())
 
     assert result.is_error is True
-    assert result.structured_content == {"error": "no record has id 'rec-0000000000000000'"}
-    assert "no record has id" in result.content[0].text
+    assert result.structured_content == {
+        "error": "no record or project has id 'rec-0000000000000000'"
+    }
+    assert "no record or project has id" in result.content[0].text
 
 
 def test_show_array_is_exposed_through_mcp_with_partial_missing_ids(store: Store) -> None:
@@ -244,7 +249,7 @@ def test_show_array_is_exposed_through_mcp_with_partial_missing_ids(store: Store
     async def go() -> Any:
         async with Client(server) as client:
             return await client.call_tool(
-                "show", {"record_id": [missing, record.id], "detail": "full"}
+                "show", {"item_id": [missing, record.id], "detail": "full"}
             )
 
     result = asyncio.run(go())
@@ -252,7 +257,9 @@ def test_show_array_is_exposed_through_mcp_with_partial_missing_ids(store: Store
     assert result.is_error is False
     assert result.structured_content["missing"] == [missing]
     assert result.structured_content["records"][0]["record"]["id"] == record.id
-    assert result.content[0].text.startswith("state: 1 records found · 1 not found · detail full")
+    assert result.content[0].text.startswith(
+        "state: 1 records and 0 projects found · 1 not found · detail full"
+    )
 
 
 def test_publish_schema_exposes_entry_type_and_work_status_choices(store: Store) -> None:
@@ -266,7 +273,6 @@ def test_publish_schema_exposes_entry_type_and_work_status_choices(store: Store)
 
     properties = asyncio.run(go())
     assert properties["entry_type"]["anyOf"][0]["enum"] == [
-        "project-context",
         "problem-statement",
         "hypothesis",
         "procedure",
@@ -316,10 +322,34 @@ def test_search_description_distinguishes_keyword_windows_from_semantic_chunks(
             tools = {tool.name: tool.description for tool in await client.list_tools()}
             return tools["search"] or ""
 
-    description = asyncio.run(go())
+    description = " ".join(asyncio.run(go()).split())
     assert (
         "A body-keyword match shows a window of at most 240 characters centered on the first match."
     ) in description
     assert (
         "A semantic match with no body-keyword match shows the complete selected embedding chunk."
     ) in description
+
+
+def test_project_tools_separate_creation_from_mutation(store: Store) -> None:
+    """Catches update parameters leaking back into registration or update_project losing them."""
+    server = mcp_surface.build_mcp_server(store.db_path)
+
+    async def go() -> dict[str, set[str]]:
+        async with Client(server) as client:
+            tools = {tool.name: tool.inputSchema for tool in await client.list_tools()}
+            return {
+                name: set(tools[name]["properties"])
+                for name in ("register_project", "update_project")
+            }
+
+    properties = asyncio.run(go())
+    assert properties["register_project"] == {"name", "paths", "framing"}
+    assert properties["update_project"] == {
+        "project",
+        "paths",
+        "remove_paths",
+        "framing",
+        "base_version",
+        "reason",
+    }

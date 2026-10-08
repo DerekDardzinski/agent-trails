@@ -9,7 +9,14 @@ from typing import Any
 import pytest
 
 from trails.errors import RecordNotFoundError, ValidationError
-from trails.models import ArtifactRef, CodeCapture, Link, ProjectPath, RecordDraft
+from trails.models import (
+    ArtifactRef,
+    CodeCapture,
+    Link,
+    ProjectFramingDraft,
+    ProjectPath,
+    RecordDraft,
+)
 from trails.ops import context
 from trails.ops.lineage import lineage
 from trails.ops.show import show
@@ -26,6 +33,12 @@ def _call(store: Store, operation: Any, **arguments: Any) -> Any:
 def _write(store: Store, title: str, body: str = "", **fields: Any) -> str:
     fields.setdefault("entry_type", "note")
     fields.setdefault("work_status", "closed")
+    project = fields.pop("project", None)
+    if project is not None:
+        registered = (
+            store.get_project(project) or store.write_project(project, "host", [], []).project
+        )
+        fields["projects"] = [registered.id]
     return store.write_record(RecordDraft(title=title, body=body, **fields)).record.id
 
 
@@ -40,10 +53,10 @@ def test_summary_truncates_at_12_lines_and_lists_an_incoming_contradiction(store
         store, "Rebuttal", entry_type="note", links=[Link(relation="contradicts", target_id=claim)]
     )
 
-    lines = _call(store, show, record_id=claim).render_text().splitlines()
+    lines = _call(store, show, item_id=claim).render_text().splitlines()
 
     assert lines[0] == f"state: {claim} · lifecycle current · work closed · detail summary"
-    assert lines[3:16] == [*(f"line {n}" for n in range(1, 13)), "(3 more lines)"]
+    assert lines[4:17] == [*(f"line {n}" for n in range(1, 13)), "(3 more lines)"]
     assert f"  contradicts  {rebuttal}  note  Rebuttal  current · work closed" in lines
     assert lines[-1] == (
         f'Next: 1 contradict this · search(links="contradicts:{claim}") · '
@@ -64,8 +77,8 @@ def test_full_and_provenance_show_what_summary_leaves_out(store: Store) -> None:
         code=[CodeCapture(repo_path="/tmp/gone", head_sha=None, captured_sha=sha, dirty=True)],
     )
 
-    full = _call(store, show, record_id=record_id, detail="full").render_text().splitlines()
-    provenance = _call(store, show, record_id=record_id, detail="provenance").render_text()
+    full = _call(store, show, item_id=record_id, detail="full").render_text().splitlines()
+    provenance = _call(store, show, item_id=record_id, detail="provenance").render_text()
 
     assert "line 15" in full
     assert full[-1] == (
@@ -139,21 +152,19 @@ def test_lineage_stops_at_five_steps(store: Store) -> None:
     ]
 
 
-def test_provenance_tells_no_project_from_an_unregistered_one(store: Store) -> None:
-    """labbook-79y.6 item 12. Catches "project dir: none" for both cases, which hides that
-    the record names a project nobody registered."""
+def test_provenance_distinguishes_unscoped_from_a_registered_project_without_paths(
+    store: Store,
+) -> None:
+    """Catches unscoped records being rendered as though they belonged to a project."""
     loose = _write(store, "Loose")
     named = _write(store, "Named", project="ghost")
 
     def project_line(record_id: str) -> str:
-        text = _call(store, show, record_id=record_id, detail="provenance").render_text()
+        text = _call(store, show, item_id=record_id, detail="provenance").render_text()
         return next(line for line in text.splitlines() if line.startswith("project paths:"))
 
-    assert project_line(loose) == "project paths: none, the record has no project"
-    assert project_line(named) == (
-        'project paths: project ghost is not registered: register_project(name="ghost", '
-        "paths=[...])"
-    )
+    assert project_line(loose) == "project paths: none, the record is unscoped"
+    assert project_line(named) == "project paths: none"
 
 
 def test_summary_checks_existence_and_provenance_compares_digests_and_lists_paths(
@@ -166,7 +177,7 @@ def test_summary_checks_existence_and_provenance_compares_digests_and_lists_path
     data.write_text("a,b\n1,3\n")
     folder = tmp_path / "outputs"
     folder.mkdir()
-    store.write_project(
+    registered = store.write_project(
         "mint",
         "h",
         [
@@ -185,8 +196,8 @@ def test_summary_checks_existence_and_provenance_compares_digests_and_lists_path
         ],
     )
 
-    summary = _call(store, show, record_id=record_id).render_text().splitlines()
-    provenance = _call(store, show, record_id=record_id, detail="provenance").render_text()
+    summary = _call(store, show, item_id=record_id).render_text().splitlines()
+    provenance = _call(store, show, item_id=record_id, detail="provenance").render_text()
 
     assert (
         f"  reachable  {data} · {data} exists; its digest is compared by show detail "
@@ -197,8 +208,9 @@ def test_summary_checks_existence_and_provenance_compares_digests_and_lists_path
     assert any(line.startswith(f"  changed  {data} · ") for line in lines)
     start = lines.index("project paths:")
     assert lines[start + 1 : start + 3] == [
-        f"  {tmp_path}  analysis code · exists",
-        "  s3://bucket/mint/ · access: aws --profile ro · not checked",
+        f"  {registered.project.id} (mint) · {tmp_path}  analysis code · exists",
+        f"  {registered.project.id} (mint) · s3://bucket/mint/ · access: aws --profile ro "
+        "· not checked",
     ]
 
 
@@ -212,7 +224,7 @@ def test_provenance_prints_the_diff_command_for_a_dirty_capture(store: Store) ->
         code=[CodeCapture(repo_path="/r", head_sha=head, captured_sha=sha, dirty=True)],
     )
 
-    text = _call(store, show, record_id=record_id, detail="provenance").render_text()
+    text = _call(store, show, item_id=record_id, detail="provenance").render_text()
 
     objects = store.db_path / "captures.git" / "objects"
     assert (
@@ -228,13 +240,15 @@ def test_show_array_preserves_first_occurrence_order_and_labels_missing_ids(stor
     second = _write(store, "Second", "second body")
     missing = "rec-0000000000000000"
 
-    result = _call(store, show, record_id=[second, missing, first, second], detail="full")
+    result = _call(store, show, item_id=[second, missing, first, second], detail="full")
     text = result.render_text()
 
     assert result.requested == [second, missing, first]
     assert [item.record.id for item in result.records] == [second, first]
     assert result.missing == [missing]
-    assert text.splitlines()[0] == "state: 2 records found · 1 not found · detail full"
+    assert text.splitlines()[0] == (
+        "state: 2 records and 0 projects found · 1 not found · detail full"
+    )
     assert text.splitlines()[1] == f"not found: {missing}"
     assert text.index("second body") < text.index("first body")
     assert text.count("Next:") == 1
@@ -245,10 +259,10 @@ def test_show_missing_single_id_stays_an_error_and_empty_array_is_refused(store:
     list returning a plausible success with no records."""
     missing = "rec-0000000000000000"
 
-    with pytest.raises(RecordNotFoundError, match=f"no record has id '{missing}'"):
-        _call(store, show, record_id=missing)
-    with pytest.raises(ValidationError, match="at least one record id"):
-        _call(store, show, record_id=[])
+    with pytest.raises(RecordNotFoundError, match=f"no record or project has id '{missing}'"):
+        _call(store, show, item_id=missing)
+    with pytest.raises(ValidationError, match="at least one record or project id"):
+        _call(store, show, item_id=[])
 
 
 def test_show_separates_lifecycle_from_work_status_and_full_shows_history(store: Store) -> None:
@@ -256,8 +270,8 @@ def test_show_separates_lifecycle_from_work_status_and_full_shows_history(store:
     record_id = _write(store, "Testable claim", entry_type="hypothesis", work_status="open")
     store.set_work_status(record_id, "closed", "planned analysis completed")
 
-    summary = _call(store, show, record_id=record_id).render_text()
-    full = _call(store, show, record_id=record_id, detail="full").render_text()
+    summary = _call(store, show, item_id=record_id).render_text()
+    full = _call(store, show, item_id=record_id, detail="full").render_text()
 
     assert summary.splitlines()[0] == (
         f"state: {record_id} · lifecycle current · work closed · detail summary"
@@ -267,3 +281,32 @@ def test_show_separates_lifecycle_from_work_status_and_full_shows_history(store:
     assert "  0  open ·" in full
     assert "  1  closed ·" in full
     assert "planned analysis completed" in full
+
+
+def test_show_mixes_record_and_project_ids_and_full_lists_framing_history(store: Store) -> None:
+    project = store.write_project(
+        "Mixed",
+        "host",
+        [],
+        [],
+        framing=ProjectFramingDraft(title="First frame", body="First purpose."),
+    )
+    store.write_project(
+        "Mixed",
+        "host",
+        [],
+        [],
+        framing=ProjectFramingDraft(title="Second frame", body="Second purpose."),
+        base_version=1,
+        reason="Clarified.",
+    )
+    record = _write(store, "Record", "Record body", projects=[project.project.id])
+
+    result = _call(store, show, item_id=[project.project.id, record], detail="full")
+    text = result.render_text()
+
+    assert result.requested == [project.project.id, record]
+    assert [item.record.id for item in result.records] == [record]
+    assert [item.project.id for item in result.projects] == [project.project.id]
+    assert [item.version for item in result.projects[0].framing_history] == [2, 1]
+    assert text.index("Second purpose.") < text.index("Record body")

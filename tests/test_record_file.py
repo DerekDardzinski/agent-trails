@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 
 from trails.errors import ValidationError
-from trails.models import ArtifactRef, Link, Record, RecordDraft, WorkStatusEvent
+from trails.models import ArtifactRef, Link, ProjectRef, Record, RecordDraft, WorkStatusEvent
 from trails.record_file import from_markdown, to_markdown
 from trails.store import Store
 
@@ -31,7 +31,7 @@ def _record(**overrides: object) -> Record:
         "title": 'Sync "green" → red',
         "body": BODY,
         "tags": ["sync"],
-        "project": "mint-en-ca",
+        "projects": [ProjectRef(id="prj-a7k2m", name="mint-en-ca")],
         "author": "ddardzin",
         "created_at": datetime(2026, 10, 1, tzinfo=UTC),
         "value": {"did_estimate": -0.0041, "ci95": [-0.0093, 0.0011], "note": None, "n": 3},
@@ -58,7 +58,9 @@ def test_a_record_round_trips_through_its_file() -> None:
     fence, a JSON null in value that TOML cannot hold, and a trailing newline dropped."""
     record = _record()
 
-    parsed = from_markdown(to_markdown(record))
+    text = to_markdown(record)
+    assert 'projects = ["prj-a7k2m"] # mint-en-ca' in text
+    parsed = from_markdown(text)
     draft = parsed.draft
 
     assert (
@@ -67,7 +69,7 @@ def test_a_record_round_trips_through_its_file() -> None:
         draft.title,
         draft.body,
         draft.tags,
-        draft.project,
+        draft.projects,
         draft.value,
     ) == (
         record.entry_type,
@@ -75,7 +77,7 @@ def test_a_record_round_trips_through_its_file() -> None:
         record.title,
         record.body,
         record.tags,
-        record.project,
+        [project.id for project in record.projects],
         record.value,
     )
     assert draft.links == record.links
@@ -85,7 +87,7 @@ def test_a_record_round_trips_through_its_file() -> None:
 
 def test_an_exported_id_becomes_the_record_the_file_supersedes() -> None:
     """Catches a revised file publishing as an unrelated record rather than a revision."""
-    text = to_markdown(_record(links=[], artifacts=[], value=None, project=None))
+    text = to_markdown(_record(links=[], artifacts=[], value=None, projects=[]))
     edited = text.replace("+++\n", '+++\nreason = "step 3 changed"\n', 1)
 
     parsed = from_markdown(edited)
@@ -95,7 +97,7 @@ def test_an_exported_id_becomes_the_record_the_file_supersedes() -> None:
         "pro-0123456789abcdef",
         "step 3 changed",
     )
-    assert (parsed.draft.project, parsed.draft.value, parsed.draft.links) == (None, None, [])
+    assert (parsed.draft.projects, parsed.draft.value, parsed.draft.links) == ([], None, [])
 
 
 def test_a_hand_written_file_without_an_id_is_a_new_record_and_value_may_be_a_table() -> None:
@@ -194,9 +196,8 @@ def test_a_record_file_reports_missing_required_fields_before_type_validation() 
         from_markdown('+++\nentry_type = "bogus"\nwork_status = "waiting"\ntitle = "x"\n+++\n')
 
     assert str(missing_entry_type.value) == (
-        "front matter is missing entry_type; allowed values: project-context, "
-        "problem-statement, hypothesis, procedure, result, verification, fact, insight, "
-        "decision, report, note"
+        "front matter is missing entry_type; allowed values: problem-statement, hypothesis, "
+        "procedure, result, verification, fact, insight, decision, report, note"
     )
     assert str(missing_work_status.value) == (
         "front matter is missing work_status; allowed values: open, closed"

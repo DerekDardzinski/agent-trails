@@ -15,6 +15,7 @@ import subprocess
 import sys
 
 from trails import dolt
+from trails.models import RecordDraft
 from trails.store import Store
 
 _WORKER = """
@@ -32,6 +33,32 @@ store.write_record(
     )
 )
 print("written", flush=True)
+"""
+
+
+_SUCCESSOR_WORKER = """
+import sys
+from pathlib import Path
+from trails.errors import ValidationError
+from trails.models import RecordDraft
+from trails.store import Store
+
+store = Store(db_path=Path(sys.argv[1]))
+print("ready", flush=True)
+sys.stdin.readline()
+try:
+    record = store.write_record(
+        RecordDraft(
+            entry_type="note",
+            work_status="closed",
+            title=sys.argv[3],
+            supersedes=sys.argv[2],
+            reason="race",
+        )
+    ).record
+    print(f"written:{record.id}", flush=True)
+except ValidationError as exc:
+    print(f"refused:{exc}", flush=True)
 """
 
 
@@ -67,6 +94,52 @@ def test_a_writer_waits_for_a_lock_held_by_another_process(store: Store) -> None
 
     assert (worker.returncode, stderr, stdout.strip()) == (0, "", "written")
     assert store.query("SELECT title FROM record") == [{"title": "child write"}]
+
+
+def test_two_racing_successors_allow_exactly_one_to_land(store: Store) -> None:
+    """Catches a stale precheck letting two processes create current successors of one record."""
+    old = store.write_record(
+        RecordDraft(entry_type="note", work_status="closed", title="old")
+    ).record.id
+    workers = [
+        subprocess.Popen(
+            [sys.executable, "-c", _SUCCESSOR_WORKER, str(store.db_path), old, title],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for title in ("first", "second")
+    ]
+    inputs = []
+    try:
+        for worker in workers:
+            assert worker.stdout is not None
+            assert worker.stdin is not None
+            assert worker.stdout.readline().strip() == "ready"
+            inputs.append(worker.stdin)
+        for input_stream in inputs:
+            input_stream.write("write\n")
+            input_stream.flush()
+        completed = [worker.communicate(timeout=60) for worker in workers]
+    finally:
+        for worker in workers:
+            _stop(worker)
+
+    outputs = [stdout.strip() for stdout, _stderr in completed]
+    errors = [stderr for _stdout, stderr in completed]
+    written = [
+        output.removeprefix("written:") for output in outputs if output.startswith("written:")
+    ]
+    refused = [output for output in outputs if output.startswith("refused:")]
+
+    assert errors == ["", ""]
+    assert len(written) == len(refused) == 1
+    assert f"current version is {written[0]}" in refused[0]
+    assert store.query(
+        "SELECT source_id FROM link WHERE relation = 'supersedes' AND target_id = ?",
+        [old],
+    ) == [{"source_id": written[0]}]
 
 
 def _stop(worker: subprocess.Popen[str]) -> None:

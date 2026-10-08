@@ -56,6 +56,12 @@ def _at_cosine(value: float) -> list[float]:
 def _write(store: Store, title: str, body: str = "", **fields: Any) -> str:
     fields.setdefault("entry_type", "note")
     fields.setdefault("work_status", "closed")
+    project = fields.pop("project", None)
+    if project is not None:
+        registered = (
+            store.get_project(project) or store.write_project(project, "host", [], []).project
+        )
+        fields["projects"] = [registered.id]
     return store.write_record(RecordDraft(title=title, body=body, **fields)).record.id
 
 
@@ -75,7 +81,7 @@ def test_keyword_finds_a_body_word_and_a_capitalized_title_word(store: Store) ->
     assert _ids(result) == [by_title]
     assert result.hits[0].matched_by == ["keyword"]
     assert result.hits[0].excerpt is None
-    assert result.render_text().splitlines()[3] == '  matched by: keyword "green" in title'
+    assert result.render_text().splitlines()[4] == '  matched by: keyword "green" in title'
 
 
 def test_a_body_keyword_excerpt_is_centered_bounded_and_whitespace_collapsed(
@@ -159,7 +165,7 @@ def test_ten_large_records_produce_compact_structured_hits_without_body_tails(
         "id",
         "entry_type",
         "title",
-        "project",
+        "projects",
         "created_at",
         "lifecycle",
         "superseded_by",
@@ -175,6 +181,8 @@ def test_ten_large_records_produce_compact_structured_hits_without_body_tails(
         "state",
         "hits",
         "total",
+        "project_hits",
+        "project_total",
         "offset",
         "filters",
         "relaxed",
@@ -236,7 +244,8 @@ def test_a_paraphrase_is_found_by_the_vector_ranker_alone(
     assert _ids(result) == [cats]
     assert result.hits[0].matched_by == ["semantic"]
     assert result.render_text().splitlines()[0] == (
-        "state: embeddings ready (all-MiniLM-L6-v2/model_O4) · 0 unembedded · 1 match"
+        "state: embeddings ready (all-MiniLM-L6-v2/model_O4) · 0 unembedded records "
+        "· 0 project matches · 1 record matches"
     )
 
 
@@ -302,8 +311,8 @@ def test_a_semantic_match_uses_the_selected_chunk_without_public_diagnostics(
     assert len(hit.excerpt) > 240
     assert "alpha" not in hit.excerpt and "beta" not in hit.excerpt
     assert {"rank", "rankers", "cosine", "chunk", "chunk_index"}.isdisjoint(dumped)
-    assert lines[3] == "  matched by: semantic"
-    assert lines[4] == f"  excerpt: {hit.excerpt}"
+    assert lines[4] == "  matched by: semantic"
+    assert lines[5] == f"  excerpt: {hit.excerpt}"
 
 
 def test_ten_semantic_full_chunks_stay_below_the_approved_response_target(
@@ -340,11 +349,11 @@ def test_a_tag_filter_that_hides_a_match_reports_it(store: Store) -> None:
     which leaves an agent concluding the store holds nothing."""
     hidden = _write(store, "CUPED variance note", "use CUPED", entry_type="note")
 
-    text = _search(store, query="CUPED", tags=["decision"], project=None).render_text()
+    text = _search(store, query="CUPED", tags=["decision"]).render_text()
 
     assert text.splitlines() == [
         "state: embeddings unavailable: dependencies not installed · keyword and exact "
-        "matching only · 0 matches",
+        "matching only · 0 project matches · 0 record matches",
         "filters applied: tags=[decision]",
         f"without the tags filter: 1 match ({hidden}, note)",
         'tag aliases: none for "decision"',
@@ -412,7 +421,7 @@ def test_paging_reports_the_remaining_count_and_the_offset_call(store: Store) ->
     lines = _search(store, query="lift", limit=2).render_text().splitlines()
 
     assert lines[0].startswith("state:")
-    assert lines[-1] == 'Next: 1 more · search(query="lift", limit=2, offset=2)'
+    assert lines[-1] == 'Next: 1 more records · search(query="lift", limit=2, offset=2)'
 
 
 def test_date_bounds_are_inclusive_days_and_project_is_equality(store: Store) -> None:
@@ -422,12 +431,12 @@ def test_date_bounds_are_inclusive_days_and_project_is_equality(store: Store) ->
     here = _write(store, "Lift here", "lift", project="p1")
     _write(store, "Lift there", "lift", project="p2")
 
-    assert _ids(_search(store, query="lift", project="p1", until=today.isoformat())) == [here]
-    assert _ids(_search(store, query="lift", project="p1", since=today.isoformat())) == [here]
+    assert _ids(_search(store, query="lift", projects=["p1"], until=today.isoformat())) == [here]
+    assert _ids(_search(store, query="lift", projects=["p1"], since=today.isoformat())) == [here]
     day_before = (today - timedelta(days=1)).isoformat()
     day_after = (today + timedelta(days=1)).isoformat()
-    assert _ids(_search(store, query="lift", project="p1", until=day_before)) == []
-    assert _ids(_search(store, query="lift", project="p1", since=day_after)) == []
+    assert _ids(_search(store, query="lift", projects=["p1"], until=day_before)) == []
+    assert _ids(_search(store, query="lift", projects=["p1"], since=day_after)) == []
 
 
 def test_a_tag_filter_also_matches_the_tags_aliases(store: Store) -> None:
@@ -507,10 +516,11 @@ def test_the_state_line_counts_unembedded_records_in_the_filtered_project_only(
     _write(store, "Elsewhere", project="q")
     embed_records(store, engine, [inside])
 
-    state = _search(store, query="Inside", project="p").render_text().splitlines()[0]
+    state = _search(store, query="Inside", projects=["p"]).render_text().splitlines()[0]
 
     assert state == (
-        "state: embeddings ready (all-MiniLM-L6-v2/model_O4) · 0 unembedded · project p · 1 match"
+        "state: embeddings ready (all-MiniLM-L6-v2/model_O4) · 0 unembedded records "
+        "· projects p · 0 project matches · 1 record matches"
     )
 
 
@@ -569,7 +579,8 @@ def test_short_query_vector_only_results_must_clear_point_25(
 def test_no_match_hint_drops_the_project_and_never_repeats_the_same_call(store: Store) -> None:
     """Catches a failed project-scoped search suggesting the identical call, and an already
     broad search suggesting itself forever."""
-    scoped = _search(store, query="not-present", project="mint").render_text().splitlines()
+    store.write_project("mint", "host", [], [])
+    scoped = _search(store, query="not-present", projects=["mint"]).render_text().splitlines()
     broad = _search(store, query="not-present").render_text().splitlines()
     history = _search(store, query="not-present", include_history=True).render_text().splitlines()
 
@@ -592,7 +603,7 @@ def test_stopword_only_query_without_vector_search_returns_no_matches(
     _write(store, "Gamma", "unrelated words", project="q")
 
     whole = _search(store, query="what is the")
-    scoped = _search(store, query="how to", project="p")
+    scoped = _search(store, query="how to", projects=["p"])
 
     assert _ids(whole) == []
     assert _ids(scoped) == []
@@ -672,7 +683,6 @@ def test_every_record_id_prefix_is_recognized_as_an_exact_search_term() -> None:
     """Catches current or compatibility IDs falling through to fuzzy text search."""
     assert retrieval.looks_like_identifier("rec-0123456789abcdef") is True
     for prefix in (
-        "ctx",
         "prb",
         "hyp",
         "pro",
@@ -689,3 +699,23 @@ def test_every_record_id_prefix_is_recognized_as_an_exact_search_term() -> None:
         assert retrieval.looks_like_identifier(f"{prefix}-0123456789abcdef") is True
     assert retrieval.looks_like_identifier("other-0a1bz") is False
     assert retrieval.looks_like_identifier("rec-0a1bz") is False
+
+
+def test_project_filters_use_or_and_unscoped_uses_latest_membership_state(store: Store) -> None:
+    """Catches AND semantics, static membership reads, or unscoped excluding removed records."""
+    alpha = store.write_project("Alpha", "host", [], []).project.id
+    beta = store.write_project("Beta", "host", [], []).project.id
+    only_alpha = _write(store, "Alpha record", projects=[alpha])
+    only_beta = _write(store, "Beta record", projects=[beta])
+    shared = _write(store, "Shared record", projects=[alpha, beta])
+    loose = _write(store, "Loose record")
+    removed = _write(store, "Removed record", projects=[alpha])
+    store.set_projects(removed, [], [alpha], "No longer grouped.")
+
+    scoped = _search(store, projects=["Alpha", beta])
+    unscoped = _search(store, unscoped=True)
+    combined = _search(store, projects=[alpha, beta], unscoped=True)
+
+    assert set(_ids(scoped)) == {only_alpha, only_beta, shared}
+    assert set(_ids(unscoped)) == {loose, removed}
+    assert set(_ids(combined)) == {only_alpha, only_beta, shared, loose, removed}

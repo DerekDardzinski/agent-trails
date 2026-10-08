@@ -9,8 +9,11 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from tests.fakes import basis
 from trails import capture
+from trails.errors import ValidationError
 from trails.models import ArtifactRef, CodeCapture, ProjectPath, RecordDraft
 from trails.ops import context
 from trails.ops.lint import lint
@@ -33,6 +36,15 @@ def _file(directory: Path, text: str) -> ArtifactRef:
     path = directory / "out.csv"
     path.write_bytes(data)
     return ArtifactRef(location=str(path), digest=f"sha256:{hashlib.sha256(data).hexdigest()}")
+
+
+def _project_id(store: Store, name: str) -> str:
+    existing = store.get_project(name)
+    return (
+        existing.id
+        if existing is not None
+        else store.write_project(name, "host", [], []).project.id
+    )
 
 
 def _store_with(store: Store, repo: Path, git_cmd: Callable[..., str]) -> Path:
@@ -59,12 +71,12 @@ def test_lint_reports_every_category_on_a_store_built_to_trigger_each(
     captures = _store_with(store, repo, git_cmd)
     git_cmd(captures, "update-ref", f"refs/research/{ORPHAN}/0", "refs/heads/x")
     gone = repo / "no-such-dir"
-    store.write_project(
+    p = store.write_project(
         "p",
         "host",
         [ProjectPath(path=str(gone)), ProjectPath(path=str(repo), access_instructions=AWS_KEY)],
         [],
-    )
+    ).project.id
     changed = _file(repo, "a,b\n1,2\n")
     changed_path = Path(changed.location)
     changed_path.write_text("a,b\n1,3\n")
@@ -76,13 +88,17 @@ def test_lint_reports_every_category_on_a_store_built_to_trigger_each(
             work_status="closed",
             title="Lift",
             tags=["lift"],
-            project="p",
+            projects=[_project_id(store, "p")],
             artifacts=[changed],
         )
     ).record
     lifts = store.write_record(
         RecordDraft(
-            entry_type="result", work_status="closed", title="Lifts", tags=["lifts"], project="p"
+            entry_type="result",
+            work_status="closed",
+            title="Lifts",
+            tags=["lifts"],
+            projects=[_project_id(store, "p")],
         )
     ).record
     broken = store.write_record(
@@ -90,7 +106,7 @@ def test_lint_reports_every_category_on_a_store_built_to_trigger_each(
             work_status="closed",
             title="Broken",
             entry_type="note",
-            project="p",
+            projects=[_project_id(store, "p")],
             artifacts=[
                 ArtifactRef(location=str(missing), digest=None),
                 ArtifactRef(location="s3://bucket/key", digest=None),
@@ -104,10 +120,20 @@ def test_lint_reports_every_category_on_a_store_built_to_trigger_each(
         )
     ).record
     never = store.write_record(
-        RecordDraft(work_status="closed", title="Never", entry_type="procedure", project="p")
+        RecordDraft(
+            work_status="closed",
+            title="Never",
+            entry_type="procedure",
+            projects=[_project_id(store, "p")],
+        )
     ).record
     old = store.write_record(
-        RecordDraft(work_status="closed", title="Old", entry_type="procedure", project="p")
+        RecordDraft(
+            work_status="closed",
+            title="Old",
+            entry_type="procedure",
+            projects=[_project_id(store, "p")],
+        )
     ).record
     store.stamp_verified(old.id, "green", date(2020, 1, 2))
     scratch = store.write_record(
@@ -117,7 +143,7 @@ def test_lint_reports_every_category_on_a_store_built_to_trigger_each(
             title="Scratch",
             body=f"aws {AWS_KEY}\n",
             tags=["scratch"],
-            project="p",
+            projects=[_project_id(store, "p")],
         )
     ).record
     store.write_record(
@@ -126,7 +152,7 @@ def test_lint_reports_every_category_on_a_store_built_to_trigger_each(
             work_status="closed",
             title="Elsewhere",
             tags=["scratch"],
-            project="q",
+            projects=[_project_id(store, "q")],
         )
     )
 
@@ -161,9 +187,10 @@ def test_lint_reports_every_category_on_a_store_built_to_trigger_each(
             ]
         ),
         "unembedded": [(i, "no embedding for all-MiniLM-L6-v2/model_O4") for i in ids],
+        "unembedded-framing": [],
         "possible-secrets": [
             (scratch.id, "AWSKeyDetector in body line 1"),
-            (None, f"project p: AWSKeyDetector in {repo} access_instructions line 1"),
+            (None, f"project {p} (p): AWSKeyDetector in {repo} access_instructions line 1"),
         ],
     }
     assert AWS_KEY not in result.render_text()
@@ -190,7 +217,7 @@ def test_lint_reports_nothing_for_a_clean_store(
                 work_status="closed",
                 title="Lift",
                 tags=["lift"],
-                project="p",
+                projects=[_project_id(store, "p")],
                 artifacts=[
                     _file(repo, "a,b\n1,2\n"),
                     ArtifactRef(location="s3://bucket/key", digest=None),
@@ -207,11 +234,16 @@ def test_lint_reports_nothing_for_a_clean_store(
                 work_status="closed",
                 title="Lifts",
                 tags=["lifts"],
-                project="p",
+                projects=[_project_id(store, "p")],
             )
         ).record,
         store.write_record(
-            RecordDraft(work_status="closed", title="Sync", entry_type="procedure", project="p")
+            RecordDraft(
+                work_status="closed",
+                title="Sync",
+                entry_type="procedure",
+                projects=[_project_id(store, "p")],
+            )
         ).record,
     ]
     store.stamp_verified(records[2].id, "green", datetime.now().astimezone().date())
@@ -230,6 +262,7 @@ def test_lint_reports_nothing_for_a_clean_store(
         "missing-paths": 0,
         "stale-procedures": 0,
         "unembedded": 0,
+        "unembedded-framing": 0,
         "possible-secrets": 0,
     }
 
@@ -265,10 +298,7 @@ def test_a_clean_lint_says_no_problems_and_an_unknown_project_is_named(
     store.write_project("p", "host", [ProjectPath(path=str(tmp_path))], [])
 
     clean = _lint(store, "p")
-    unknown = _lint(store, "P ")
+    with pytest.raises(ValidationError, match="no registered project"):
+        _lint(store, "P ")
 
-    assert clean.render_text() == "lint: project p · no problems found"
-    assert unknown.render_text().splitlines()[-1] == (
-        "project P  is not registered, so its paths were not checked: "
-        'register_project(name="P ", paths=[...])'
-    )
+    assert clean.render_text().endswith("· no problems found")

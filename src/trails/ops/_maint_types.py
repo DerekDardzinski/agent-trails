@@ -9,6 +9,7 @@ from datetime import date
 
 from pydantic import BaseModel
 
+from trails.models import ProjectRef
 from trails.ops.types import RenderedResult
 
 
@@ -64,14 +65,15 @@ class MarkVerifiedResult(RenderedResult):
 
 
 class EmbedResult(RenderedResult):
-    """A backfill of similarity embeddings."""
+    """A backfill of record and current-framing similarity embeddings."""
 
-    available: bool  # False when the embedding runtime is not installed; nothing was written
-    records: int  # records that had no embedding for the current model
-    vectors: int  # embedding vectors written
+    available: bool
+    records: int
+    framing_versions: int
+    record_vectors: int
+    framing_vectors: int
 
     def render_text(self) -> str:
-        """The vector count, then a search hint."""
         if not self.available:
             return (
                 "embedding runtime not available: install the search extra "
@@ -79,7 +81,9 @@ class EmbedResult(RenderedResult):
             )
         return "\n".join(
             [
-                f"{self.vectors} embedding vectors written for {self.records} records",
+                f"{self.record_vectors} record vectors written for {self.records} records",
+                f"{self.framing_vectors} framing vectors written for "
+                f"{self.framing_versions} current framing versions",
                 "Next: search(...)",
             ]
         )
@@ -95,8 +99,7 @@ class LintItem(BaseModel):
 class LintResult(RenderedResult):
     """Store problems by category. Every category is present, empty when nothing was found."""
 
-    project: str | None
-    registered: bool  # False only when a project was named and is not registered
+    project: ProjectRef | None
     categories: dict[str, list[LintItem]]
 
     def render_text(self) -> str:
@@ -106,7 +109,11 @@ class LintResult(RenderedResult):
         registered says so on the LAST line, after the counts, because a report ending in "no
         problems found" reads as a clean project when the name may simply be misspelled.
         """
-        scope = f"project {self.project}" if self.project is not None else "whole store"
+        scope = (
+            f"project {self.project.id} ({self.project.name})"
+            if self.project is not None
+            else "whole store"
+        )
         found = sum(len(items) for items in self.categories.values())
         if found == 0:
             lines = [f"lint: {scope} · no problems found"]
@@ -117,9 +124,4 @@ class LintResult(RenderedResult):
                 for item in items:
                     call = f' · show("{item.record_id}")' if item.record_id is not None else ""
                     lines.append(f"  {item.detail}{call}")
-        if not self.registered:
-            lines.append(
-                f"project {self.project} is not registered, so its paths were not checked: "
-                f'register_project(name="{self.project}", paths=[...])'
-            )
         return "\n".join(lines)

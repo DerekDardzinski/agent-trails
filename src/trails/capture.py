@@ -115,6 +115,22 @@ def store_path(db_path: Path) -> Path:
     return db_path / STORE_DIR
 
 
+def discard_unpublished_refs(store: Path, record_id: str) -> None:
+    """Delete capture refs for one record ID that failed before its record was stored.
+
+    Callers must establish that no durable record has `record_id`. Objects remain in the bare
+    store until ordinary Git garbage collection; only the pins created for the failed publish
+    are removed.
+    """
+    if not store.exists():
+        return
+    prefix = f"refs/research/{record_id}/"
+    with gitprobe.git_lock(store):
+        refs = _run_store(store, "for-each-ref", "--format=%(refname)", prefix).splitlines()
+        for ref in refs:
+            _run_store(store, "update-ref", "-d", ref)
+
+
 def open_store(db_path: Path) -> Path:
     """The capture store, created with `git init --bare` on first use.
 

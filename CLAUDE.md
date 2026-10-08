@@ -37,19 +37,29 @@ nothing**: no verdicts, no statistics, no workflow, no gate. If you find yoursel
 rule that judges a record, stop; that is a misreading of the scope.
 
 A record has one explicit entry type, an id whose prefix matches that type plus five lowercase
-base36 characters normally and six after repeated collisions, an `open | closed` work status, title, Markdown body, descriptive tags, optional
-project, author (the OS user), created_at, an optional JSON `value`, artifact references and code
-captures. `vocab.ENTRY_TYPES` defines project-context, problem-statement, hypothesis, procedure,
-result, verification, fact, insight, decision, report and note. An entry type is never repeated in
-tags. `vocab.WORK_STATUSES` says only whether the caller expects another action on this exact
+base36 characters normally and six after repeated collisions, an `open | closed` work status,
+title, Markdown body, descriptive tags, zero or more stable project references, author (the OS
+user), created_at, an optional JSON `value`, artifact references and code captures.
+`vocab.ENTRY_TYPES` defines problem-statement, hypothesis, procedure, result, verification, fact,
+insight, decision, report and note. An entry type is never repeated in tags. `vocab.WORK_STATUSES` says only whether the caller expects another action on this exact
 record; it imposes no workflow conditions.
 
 Four link relations: `builds_on`, `supersedes`, `contradicts`, `cites`. History is append-only: a
 revision is a new record with a `supersedes` link and a required `reason`; `set_work_status`
 appends a reasoned status event after the initial publication; `retire` marks a record no longer
-true; nothing updates or deletes a record or status event. There is no deletion operation:
-removing a record from history requires a manual database-history rewrite by the user. A project
-registration's paths are metadata, edited in place.
+true; nothing updates or deletes a record, status event, membership event, or framing version.
+There is no deletion operation: removing a record from history requires a manual database-history
+rewrite by the user. Current project paths are metadata edited in place.
+
+A project has a generated `prj-` id, unique human name, provenance, current paths and optional
+append-only framing. `register_project` creates or returns without mutating existing state;
+`update_project` applies effective path and framing changes. Changed post-registration framing
+requires the current base version and a reason; base 0 adds the first framing, and unchanged
+framing is a no-op. Path-only changes do not increment framing. Records have zero-to-many project
+memberships through `record_project_event`; the latest event for each pair sets current state.
+`set_projects` appends effective changes. A superseding publish with `projects=None` inherits
+current memberships under the same exclusive lock; an explicit list replaces them and `[]`
+intentionally leaves the revision unscoped.
 
 trails writes only to its own data: the database, its locks, the model cache and the capture
 store `<db>/captures.git`. Read `docs/philosophy.md` before adding anything that writes. The
@@ -108,8 +118,8 @@ digest is flagged) and returns field, line and detector, never the matched text.
   `retrieval.Ranked` keeps diagnostics internally; `show` returns the full record.
   A `work_status` filter returns current versions unless `include_history=true`; searches without
   `work_status` continue to include superseded versions.
-- Vocabularies (`ENTRY_TYPES`, `WORK_STATUSES`, `ENTRY_TYPE_PREFIXES`, `RELATIONS`, the id
-  pattern, and `stale_days()`) are defined once in `src/trails/vocab.py`, which also generates
+- Vocabularies (`ENTRY_TYPES`, `WORK_STATUSES`, `PROJECT_ACTIONS`, `ENTRY_TYPE_PREFIXES`,
+  `RELATIONS`, the record and project id patterns, and `stale_days()`) are defined once in `src/trails/vocab.py`, which also generates
   the schema's ENUM columns.
 - `author` is the OS user, from `author.current_author()`. There is no `--author` flag.
 - The vector arm is the `search` extra. Everything must keep working when it is absent.
@@ -119,7 +129,8 @@ digest is flagged) and returns field, line and detector, never the matched text.
 - The record file (`record_file.py`) is Markdown with TOML front matter between `+++` lines.
   TOML, not YAML, because YAML coerces `no` to false. `value` is one TOML string holding JSON,
   because TOML has no null. An export omits the record's own `supersedes` link: publishing the
-  file supersedes the exported record.
+  file supersedes the exported record. Exported files always write explicit stable project IDs;
+  current names appear only in a TOML comment.
 - `reachability.py` reads local files and the capture store only, never a remote location; a
   URI, query or free text is `unresolvable`, which means not checked. `show` summary checks
   existence only; provenance and lint compare digests. A directory is `referenced`.
@@ -138,8 +149,7 @@ digest is flagged) and returns field, line and detector, never the matched text.
   SHARED. Measured on dolt 2.4.0: with writes alone locked, 8 x 50 writers failed 4 of 4
   runs; with reads locked shared as well, 400 of 400 in every run, about 52 s. No retries.
 - **Every read is a subprocess, and invocations are the cost** (about 70ms each). Reads are
-  batch-first: `Store.get_records` assembles any number of records in ONE invocation, nine
-  SELECTs through `dolt.read_result_sets` (dolt prints one JSON document per statement, `{}`
+  batch-first: `Store.get_records` assembles any number of records in ONE invocation, ten SELECTs through `dolt.read_result_sets` (dolt prints one JSON document per statement, `{}`
   for an empty set). A plain `write_record` performs one candidate-existence read, then one write
   invocation. The exclusive lock spans both so an older equal-timestamp row cannot be mistaken for
   this command landing before it reported failure.

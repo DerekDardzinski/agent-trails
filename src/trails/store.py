@@ -2,9 +2,8 @@
 
 The store stores, links and tracks records and decides nothing. It refuses exactly two things,
 both as ValidationError: malformed input, and an attempt to overwrite a record. Every record
-write is an INSERT; nothing here updates or deletes a record's rows. A project registration is
-metadata, not a record: its paths are added, updated and removed in place, and Dolt's own
-history keeps every earlier version.
+write is an INSERT; nothing updates or deletes record, framing, or membership history. Current
+project paths alone are mutable metadata, with older states retained in Dolt history.
 
 Three facts about Dolt shape almost every function here, all probed:
 
@@ -25,10 +24,12 @@ reports it in COLLATION_NAME.
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import re
 import secrets
+import unicodedata
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -43,9 +44,16 @@ from trails.models import (
     CodeCapture,
     Link,
     Project,
+    ProjectFramingDraft,
+    ProjectFramingVersion,
+    ProjectMembershipChange,
+    ProjectMembershipEvent,
     ProjectPath,
+    ProjectRef,
+    ProjectWriteOutcome,
     Record,
     RecordDraft,
+    SetProjectsOutcome,
     WorkStatusEvent,
     WriteOutcome,
 )
@@ -57,9 +65,13 @@ from trails.vocab import (
     ID_ATTEMPTS_PER_LENGTH,
     ID_LENGTHS,
     ID_PATTERN,
+    PROJECT_ACTIONS,
+    PROJECT_ID_PATTERN,
+    PROJECT_ID_PREFIX,
     RELATIONS,
     WORK_STATUSES,
     EntryType,
+    ProjectAction,
     Relation,
     WorkStatus,
     enum_column,
@@ -89,9 +101,12 @@ TABLES = (
     "code_capture",
     "link",
     "project",
+    "project_framing_embedding",
+    "project_framing_version",
     "project_path",
     "record",
     "record_chunk_embedding",
+    "record_project_event",
     "record_tag",
     "record_work_status",
     "retirement",
@@ -105,7 +120,6 @@ SCHEMA: tuple[str, ...] = (
         entry_type {enum_column(ENTRY_TYPES)} NOT NULL,
         title      VARCHAR({TITLE_CHARS}) {_TEXT} NOT NULL,
         body       LONGTEXT {_TEXT} NOT NULL,
-        project    VARCHAR({NAME_CHARS}) {_TEXT},
         author     VARCHAR(120) {_TEXT} NOT NULL,
         created_at DATETIME(6) NOT NULL,
         value      JSON,
@@ -119,20 +133,18 @@ SCHEMA: tuple[str, ...] = (
         PRIMARY KEY (record_id, tag)
     )""",
     f"""CREATE TABLE record_work_status (
-        record_id  VARCHAR(32) {_TEXT} NOT NULL,
-        sequence   INT NOT NULL,
+        record_id   VARCHAR(32) {_TEXT} NOT NULL,
+        sequence    INT NOT NULL,
         work_status {enum_column(WORK_STATUSES)} NOT NULL,
-        changed_at DATETIME(6) NOT NULL,
-        author     VARCHAR(120) {_TEXT} NOT NULL,
-        reason     TEXT {_TEXT},
+        changed_at  DATETIME(6) NOT NULL,
+        author      VARCHAR(120) {_TEXT} NOT NULL,
+        reason      TEXT {_TEXT},
         PRIMARY KEY (record_id, sequence)
     )""",
-    # The primary key is the natural key, which is what makes a duplicate link a no-op the
-    # database itself refuses rather than a second row.
     f"""CREATE TABLE link (
-        source_id  VARCHAR(32) {_TEXT} NOT NULL,
-        relation   {enum_column(RELATIONS)} NOT NULL,
-        target_id  VARCHAR(32) {_TEXT} NOT NULL,
+        source_id VARCHAR(32) {_TEXT} NOT NULL,
+        relation  {enum_column(RELATIONS)} NOT NULL,
+        target_id VARCHAR(32) {_TEXT} NOT NULL,
         created_at DATETIME(6) NOT NULL,
         PRIMARY KEY (source_id, relation, target_id)
     )""",
@@ -144,7 +156,6 @@ SCHEMA: tuple[str, ...] = (
         notes     TEXT {_TEXT} NOT NULL,
         PRIMARY KEY (record_id, position)
     )""",
-    # Keyed on (record_id, repo_path): one capture per repository per record.
     f"""CREATE TABLE code_capture (
         record_id    VARCHAR(32) {_TEXT} NOT NULL,
         repo_path    VARCHAR({PATH_CHARS}) {_TEXT} NOT NULL,
@@ -165,28 +176,56 @@ SCHEMA: tuple[str, ...] = (
         reason     TEXT {_TEXT} NOT NULL
     )""",
     f"""CREATE TABLE project (
-        name       VARCHAR({NAME_CHARS}) {_TEXT} PRIMARY KEY,
-        host       VARCHAR({HOST_CHARS}) {_TEXT} NOT NULL,
-        created_at DATETIME(6) NOT NULL
+        id              VARCHAR(32) {_TEXT} PRIMARY KEY,
+        name            VARCHAR({NAME_CHARS}) {_TEXT} NOT NULL UNIQUE,
+        created_at      DATETIME(6) NOT NULL,
+        created_by      VARCHAR(120) {_TEXT} NOT NULL,
+        created_on_host VARCHAR({HOST_CHARS}) {_TEXT} NOT NULL
     )""",
-    # path is compared EXACTLY, unlike every other text column: two paths differing only in
-    # case or accent are two places on a case-sensitive filesystem or in S3, and the primary
-    # key must agree with the exact comparison write_project makes.
     f"""CREATE TABLE project_path (
-        project             VARCHAR({NAME_CHARS}) {_TEXT} NOT NULL,
+        project_id          VARCHAR(32) {_TEXT} NOT NULL,
         path                VARCHAR({PATH_CHARS}) COLLATE utf8mb4_0900_bin NOT NULL,
         label               TEXT {_TEXT} NOT NULL,
         access_instructions TEXT {_TEXT} NOT NULL,
         host                VARCHAR({HOST_CHARS}) {_TEXT} NOT NULL,
-        PRIMARY KEY (project, path)
+        PRIMARY KEY (project_id, path)
     )""",
-    # The only vector write form Dolt accepts is STRING_TO_VECTOR('[0.9,0.1,...]').
+    f"""CREATE TABLE project_framing_version (
+        project_id VARCHAR(32) {_TEXT} NOT NULL,
+        version    INT NOT NULL,
+        title      VARCHAR({TITLE_CHARS}) {_TEXT} NOT NULL,
+        body       LONGTEXT {_TEXT} NOT NULL,
+        reason     TEXT {_TEXT},
+        author     VARCHAR(120) {_TEXT} NOT NULL,
+        created_at DATETIME(6) NOT NULL,
+        PRIMARY KEY (project_id, version),
+        FULLTEXT KEY ft_project_framing_title (title),
+        FULLTEXT KEY ft_project_framing_body (body)
+    )""",
+    f"""CREATE TABLE record_project_event (
+        record_id VARCHAR(32) {_TEXT} NOT NULL,
+        project_id VARCHAR(32) {_TEXT} NOT NULL,
+        sequence INT NOT NULL,
+        action {enum_column(PROJECT_ACTIONS)} NOT NULL,
+        reason TEXT {_TEXT},
+        author VARCHAR(120) {_TEXT} NOT NULL,
+        created_at DATETIME(6) NOT NULL,
+        PRIMARY KEY (record_id, project_id, sequence)
+    )""",
     f"""CREATE TABLE record_chunk_embedding (
         record_id   VARCHAR(32) {_TEXT} NOT NULL,
         chunk_index INT NOT NULL,
         model_id    VARCHAR(120) {_TEXT} NOT NULL,
         vec         VECTOR({EMBEDDING_DIMENSIONS}) NOT NULL,
         PRIMARY KEY (record_id, model_id, chunk_index)
+    )""",
+    f"""CREATE TABLE project_framing_embedding (
+        project_id  VARCHAR(32) {_TEXT} NOT NULL,
+        version     INT NOT NULL,
+        chunk_index INT NOT NULL,
+        model_id    VARCHAR(120) {_TEXT} NOT NULL,
+        vec         VECTOR({EMBEDDING_DIMENSIONS}) NOT NULL,
+        PRIMARY KEY (project_id, version, model_id, chunk_index)
     )""",
     f"""CREATE TABLE tag_alias (
         tag       VARCHAR({TAG_CHARS}) {_TEXT} PRIMARY KEY,
@@ -285,7 +324,7 @@ class Store:
         within = _placeholders(len(ids))
         statements = [
             _bind(
-                "SELECT id, entry_type, title, body, project, author, created_at, value, reason "
+                "SELECT id, entry_type, title, body, author, created_at, value, reason "
                 f"FROM record WHERE id IN ({within})",
                 ids,
             ),
@@ -322,6 +361,15 @@ class Store:
                 "ORDER BY record_id, sequence",
                 ids,
             ),
+            _bind(
+                "SELECT e.record_id, p.id AS project_id, p.name AS project_name "
+                "FROM record_project_event e JOIN project p ON p.id = e.project_id "
+                f"WHERE e.record_id IN ({within}) AND e.action = 'add' AND NOT EXISTS ("
+                "SELECT 1 FROM record_project_event newer WHERE newer.record_id = e.record_id "
+                "AND newer.project_id = e.project_id AND newer.sequence > e.sequence) "
+                "ORDER BY e.record_id, p.name, p.id",
+                ids,
+            ),
         ]
         (
             records,
@@ -333,6 +381,7 @@ class Store:
             retired,
             stamps,
             work_statuses,
+            memberships,
         ) = dolt.read_result_sets(self.db_path, statements)
 
         tags_by: dict[str, list[str]] = {}
@@ -391,6 +440,12 @@ class Store:
                 )
             )
 
+        membership_by: dict[str, list[ProjectRef]] = {}
+        for row in memberships:
+            membership_by.setdefault(str(row["record_id"]), []).append(
+                ProjectRef(id=str(row["project_id"]), name=str(row["project_name"]))
+            )
+
         assembled: dict[str, Record] = {}
         for row in records:
             record_id = str(row["id"])
@@ -404,7 +459,7 @@ class Store:
                 title=str(row["title"]),
                 body=str(row.get("body", "")),
                 tags=sorted(tags_by.get(record_id, [])),
-                project=_optional_str(row.get("project")),
+                projects=membership_by.get(record_id, []),
                 author=str(row["author"]),
                 created_at=_as_datetime(row["created_at"]),
                 value=_as_value(row.get("value")),
@@ -430,30 +485,94 @@ class Store:
             raise RecordNotFoundError(f"no record has id {record_id!r}")
         return found
 
-    def get_project(self, name: str) -> Project | None:
-        """The registered project with this name and its paths, or None."""
-        found = self._projects(name)
+    def get_project(self, value: str) -> Project | None:
+        """The registered project with this exact id or database-equal name, or None."""
+        found = self._projects(value)
         return found[0] if found else None
 
     def list_projects(self) -> list[Project]:
-        """Every registered project with its paths, by name."""
+        """Every registered project with paths and current framing, by name then id."""
         return self._projects(None)
 
-    def _projects(self, name: str | None) -> list[Project]:
-        """Projects and their paths in one dolt invocation; one project when `name` is given."""
-        where = _bind(" WHERE name = ?", [name]) if name is not None else ""
-        within = _bind(" WHERE project = ?", [name]) if name is not None else ""
-        projects, paths = dolt.read_result_sets(
+    def resolve_project(self, value: str) -> ProjectRef:
+        """Resolve one stable project id or exact unique name."""
+        return self.resolve_project_values([value])[0]
+
+    def resolve_project_values(self, values: Sequence[str]) -> list[ProjectRef]:
+        """Resolve ids or names in one read, preserving one result per input."""
+        requested = list(values)
+        if not requested:
+            return []
+        result_sets = dolt.read_result_sets(
             self.db_path,
             [
-                f"SELECT name, host, created_at FROM project{where} ORDER BY name",
-                "SELECT project, path, label, access_instructions, host FROM project_path"
-                f"{within} ORDER BY project, path",
+                _bind("SELECT id, name FROM project WHERE id = ? OR name = ?", [value, value])
+                for value in requested
+            ],
+        )
+        refs: list[ProjectRef] = []
+        known_rows: list[dict[str, Any]] | None = None
+        for value, rows in zip(requested, result_sets, strict=True):
+            if not rows:
+                if known_rows is None:
+                    known_rows = self._read("SELECT id, name FROM project ORDER BY name, id")
+                suggestions = _project_suggestions(value, known_rows)
+                close = (
+                    "; close registered projects: "
+                    + ", ".join(f"{item.id} ({item.name})" for item in suggestions)
+                    if suggestions
+                    else ""
+                )
+                raise ValidationError(
+                    f"no registered project has id or name {value!r}{close}; use a listed "
+                    f"stable id or run register_project(name={value!r}, paths=[...])"
+                )
+            refs.append(ProjectRef(id=str(rows[0]["id"]), name=str(rows[0]["name"])))
+        return refs
+
+    def resolve_projects(self, values: Sequence[str]) -> list[ProjectRef]:
+        """Resolve ids or names and deduplicate by stable id, preserving caller order."""
+        refs: list[ProjectRef] = []
+        seen: set[str] = set()
+        for ref in self.resolve_project_values(values):
+            if ref.id not in seen:
+                seen.add(ref.id)
+                refs.append(ref)
+        return refs
+
+    def _projects(self, value: str | None) -> list[Project]:
+        """Projects, paths, and current framing in one Dolt invocation."""
+        if value is None:
+            project_where = ""
+            path_where = ""
+            framing_where = ""
+        else:
+            project_where = _bind(" WHERE id = ? OR name = ?", [value, value])
+            path_where = _bind(
+                " WHERE project_id IN (SELECT id FROM project WHERE id = ? OR name = ?)",
+                [value, value],
+            )
+            framing_where = _bind(
+                " AND f.project_id IN (SELECT id FROM project WHERE id = ? OR name = ?)",
+                [value, value],
+            )
+        projects, paths, framings = dolt.read_result_sets(
+            self.db_path,
+            [
+                "SELECT id, name, created_at, created_by, created_on_host FROM project"
+                f"{project_where} ORDER BY name, id",
+                "SELECT project_id, path, label, access_instructions, host FROM project_path"
+                f"{path_where} ORDER BY project_id, path",
+                "SELECT f.project_id, f.version, f.title, f.body, f.reason, f.author, "
+                "f.created_at FROM project_framing_version f WHERE NOT EXISTS ("
+                "SELECT 1 FROM project_framing_version newer WHERE newer.project_id = "
+                "f.project_id AND newer.version > f.version)"
+                f"{framing_where} ORDER BY f.project_id",
             ],
         )
         by_project: dict[str, list[ProjectPath]] = {}
         for row in paths:
-            by_project.setdefault(str(row["project"]), []).append(
+            by_project.setdefault(str(row["project_id"]), []).append(
                 ProjectPath(
                     path=str(row["path"]),
                     label=str(row.get("label", "")),
@@ -461,15 +580,64 @@ class Store:
                     host=str(row.get("host", "")),
                 )
             )
+        framing_by = {str(row["project_id"]): _project_framing(row) for row in framings}
         return [
             Project(
+                id=str(row["id"]),
                 name=str(row["name"]),
-                host=str(row["host"]),
                 created_at=_as_datetime(row["created_at"]),
-                paths=by_project.get(str(row["name"]), []),
+                created_by=str(row["created_by"]),
+                created_on_host=str(row["created_on_host"]),
+                paths=by_project.get(str(row["id"]), []),
+                current_framing=framing_by.get(str(row["id"])),
             )
             for row in projects
         ]
+
+    def project_framing_history(self, project_id: str) -> list[ProjectFramingVersion]:
+        """Every framing version newest first for one exact project id."""
+        rows = self._read(
+            _bind(
+                "SELECT project_id, version, title, body, reason, author, created_at "
+                "FROM project_framing_version WHERE project_id = ? "
+                "ORDER BY version DESC",
+                [project_id],
+            )
+        )
+        return [_project_framing(row) for row in rows]
+
+    def project_membership_history(
+        self, record_ids: Sequence[str]
+    ) -> dict[str, list[ProjectMembershipEvent]]:
+        """Membership events newest time first, then project id and sequence."""
+        ids = list(dict.fromkeys(record_ids))
+        if not ids:
+            return {}
+        within = _placeholders(len(ids))
+        rows = self._read(
+            _bind(
+                "SELECT e.record_id, e.project_id, p.name AS project_name, e.sequence, "
+                "e.action, e.reason, e.author, e.created_at FROM record_project_event e "
+                "JOIN project p ON p.id = e.project_id "
+                f"WHERE e.record_id IN ({within}) ORDER BY e.created_at DESC, "
+                "e.project_id ASC, e.sequence DESC",
+                ids,
+            )
+        )
+        grouped: dict[str, list[ProjectMembershipEvent]] = {}
+        for row in rows:
+            grouped.setdefault(str(row["record_id"]), []).append(
+                ProjectMembershipEvent(
+                    record_id=str(row["record_id"]),
+                    project=ProjectRef(id=str(row["project_id"]), name=str(row["project_name"])),
+                    sequence=int(row["sequence"]),
+                    action=_as_project_action(row["action"]),
+                    reason=_optional_str(row.get("reason")),
+                    author=str(row["author"]),
+                    created_at=_as_datetime(row["created_at"]),
+                )
+            )
+        return grouped
 
     def alias_map(self) -> dict[str, str]:
         """tag -> canonical for every tag_alias row; consumed by retrieval.tag_equivalence.
@@ -532,6 +700,16 @@ class Store:
             f"{len(ID_LENGTHS) * ID_ATTEMPTS_PER_LENGTH} candidates"
         )
 
+    def _unused_project_id(self) -> str:
+        """Return the first unused bounded `prj-` candidate."""
+        for candidate in _project_id_candidates():
+            if not self._read(_bind("SELECT id FROM project WHERE id = ?", [candidate])):
+                return candidate
+        raise DoltError(
+            "failed to generate an unused project id after "
+            f"{len(ID_LENGTHS) * ID_ATTEMPTS_PER_LENGTH} candidates"
+        )
+
     def validate_record_draft(
         self, draft: RecordDraft
     ) -> tuple[str, list[str], str | None, str | None]:
@@ -572,6 +750,23 @@ class Store:
         missing = [target for target in targets if target not in existing]
         if missing:
             raise ValidationError(f"no existing record has id {', '.join(missing)}")
+        if draft.supersedes is not None:
+            current = self.superseding_tip(draft.supersedes)
+            if current is not None:
+                raise ValidationError(
+                    f"{draft.supersedes} is already superseded; current version is {current}; "
+                    f"supersede {current} instead"
+                )
+
+        if draft.projects is None:
+            project_refs = (
+                list(self.get_record(draft.supersedes).projects)
+                if draft.supersedes is not None
+                else []
+            )
+        else:
+            project_refs = self.resolve_projects(draft.projects)
+        project_refs = sorted(project_refs, key=lambda item: (item.name, item.id))
 
         findings = scan_for_secrets(
             {
@@ -603,7 +798,6 @@ class Store:
                         "entry_type": draft.entry_type,
                         "title": title,
                         "body": draft.body,
-                        "project": draft.project,
                         "author": author,
                         "created_at": created_at,
                         "value": value_text,
@@ -620,6 +814,21 @@ class Store:
                         "author": author,
                         "reason": None,
                     },
+                ),
+                *(
+                    _insert(
+                        "record_project_event",
+                        {
+                            "record_id": record_id,
+                            "project_id": project.id,
+                            "sequence": 0,
+                            "action": "add",
+                            "reason": None,
+                            "author": author,
+                            "created_at": created_at,
+                        },
+                    )
+                    for project in project_refs
                 ),
                 *(_insert("record_tag", {"record_id": record_id, "tag": tag}) for tag in tags),
                 *(
@@ -685,7 +894,7 @@ class Store:
             title=title,
             body=draft.body,
             tags=list(tags),
-            project=draft.project,
+            projects=project_refs,
             author=author,
             created_at=created_at,
             value=draft.value,
@@ -699,24 +908,25 @@ class Store:
         )
         return WriteOutcome(record=record, secret_findings=findings)
 
-    def write_project(
-        self, name: str, host: str, paths: Sequence[ProjectPath], remove_paths: Sequence[str]
-    ) -> tuple[Project, bool]:
-        """Register a project, or add, update and remove its paths, in one transaction.
+    def write_project(  # noqa: PLR0912, PLR0915, PLR0917 — one atomic registration boundary
+        self,
+        name: str,
+        host: str,
+        paths: Sequence[ProjectPath],
+        remove_paths: Sequence[str],
+        framing: ProjectFramingDraft | None = None,
+        base_version: int | None = None,
+        reason: str | None = None,
+        intent: Literal["upsert", "register", "update"] = "upsert",
+    ) -> ProjectWriteOutcome:
+        """Atomically create or update identity, paths, and optional framing.
 
-        A path in `paths` that is already registered is updated in place; a path in
-        `remove_paths` that is not registered is ignored. A call that changes nothing writes
-        nothing. Returns the project as stored afterwards, and whether the project row was
-        created by this call.
-
-        Raises:
-            ValidationError: empty name or path; a path both added and removed; a value longer
-                than its column.
+        `intent="register"` creates or returns without mutating an existing project;
+        `intent="update"` requires an existing project; internal `upsert` preserves the Store
+        helper used by tests. An unchanged framing writes no version. A recognized stale-base
+        retry returns before path mutations. Every read-decide-write path holds the exclusive lock.
         """
-        name = name.strip()
-        if not name:
-            raise ValidationError("project name is empty")
-        _require_length("project name", name, NAME_CHARS)
+        name = _validated_project_name(name)
         _require_length("project host", host, HOST_CHARS)
         for item in paths:
             if not item.path.strip():
@@ -728,47 +938,341 @@ class Store:
         both = sorted({item.path for item in paths} & set(remove_paths))
         if both:
             raise ValidationError(f"{', '.join(both)} is both in paths and in remove_paths")
+        if framing is None and (base_version is not None or reason is not None):
+            raise ValidationError("base_version and reason require framing")
+        framing_title, framing_body = _validated_framing(framing)
 
-        existing = self.get_project(name)
-        current = {item.path: item for item in existing.paths} if existing else {}
-        wanted = {item.path: item for item in paths}
-        changed = [item for path, item in wanted.items() if current.get(path) != item]
-        removed = [path for path in dict.fromkeys(remove_paths) if path in current]
-        statements: list[str] = []
-        if existing is None:
-            statements.append(
-                _insert("project", {"name": name, "host": host, "created_at": _now()})
+        with dolt.exclusive(self.db_path):
+            existing = self.get_project(name)
+            created = existing is None
+            project_id = existing.id if existing is not None else self._unused_project_id()
+            current = existing.current_framing if existing is not None else None
+            written_framing: ProjectFramingVersion | None = None
+            framing_created = False
+            normal_reason = reason.strip() if reason is not None else None
+
+            if intent == "update" and existing is None:
+                raise ValidationError(
+                    f"project {name!r} is not registered; run register_project(name={name!r})"
+                )
+            if intent == "register" and existing is not None:
+                if framing is not None and (
+                    current is None or not _same_framing(current, framing_title, framing_body)
+                ):
+                    base = current.version if current is not None else 0
+                    raise ValidationError(
+                        f"project {name!r} is already registered as {project_id}; use "
+                        f"update_project(project={project_id!r}, framing=..., "
+                        f"base_version={base}, reason=...)"
+                    )
+                current_paths = {item.path: item for item in existing.paths}
+                given_paths = {item.path: item for item in paths}
+                if paths and given_paths != current_paths:
+                    rendered_paths = [
+                        {
+                            key: value
+                            for key, value in (
+                                ("path", item.path),
+                                ("label", item.label),
+                                ("access_instructions", item.access_instructions),
+                            )
+                            if value
+                        }
+                        for item in given_paths.values()
+                    ]
+                    raise ValidationError(
+                        f"project {name!r} is already registered as {project_id}; use "
+                        f"update_project(project={project_id!r}, paths={rendered_paths!r})"
+                    )
+                return ProjectWriteOutcome(
+                    project=existing,
+                    created=False,
+                    changed=False,
+                    framing=current if framing is not None else None,
+                    framing_created=False,
+                    current_framing_version=(current.version if current is not None else None),
+                    retry=True,
+                )
+
+            if framing is not None:
+                write_framing = True
+                if current is None:
+                    if intent == "update":
+                        if base_version != 0:
+                            raise ValidationError(
+                                "adding the first framing needs base_version=0 and a reason"
+                            )
+                        if not normal_reason:
+                            raise ValidationError(
+                                "adding the first framing needs base_version=0 and a nonempty reason"
+                            )
+                        _require_text_bytes("framing reason", normal_reason)
+                    else:
+                        if base_version is not None or normal_reason:
+                            raise ValidationError(
+                                "the first framing version needs neither base_version nor reason"
+                            )
+                        normal_reason = None
+                    version = 1
+                else:
+                    same_current = _same_framing(current, framing_title, framing_body)
+                    if base_version is None:
+                        if same_current:
+                            if intent == "upsert":
+                                if existing is None:  # pragma: no cover
+                                    raise DoltError("framing exists without project identity")
+                                return ProjectWriteOutcome(
+                                    project=existing,
+                                    created=False,
+                                    changed=False,
+                                    framing=current,
+                                    framing_created=False,
+                                    current_framing_version=current.version,
+                                    retry=True,
+                                )
+                            write_framing = False
+                        else:
+                            raise ValidationError(
+                                f"updating framing needs base_version={current.version} and a reason"
+                            )
+                    elif base_version != current.version:
+                        landed_rows = self._read(
+                            _bind(
+                                "SELECT project_id, version, title, body, reason, author, "
+                                "created_at FROM project_framing_version WHERE project_id = ? "
+                                "AND version = ?",
+                                [project_id, base_version + 1],
+                            )
+                        )
+                        landed = _project_framing(landed_rows[0]) if landed_rows else None
+                        if landed is not None and _same_framing(
+                            landed, framing_title, framing_body
+                        ):
+                            if existing is None:  # pragma: no cover
+                                raise DoltError("framing exists without project identity")
+                            return ProjectWriteOutcome(
+                                project=existing,
+                                created=False,
+                                changed=False,
+                                framing=landed,
+                                framing_created=False,
+                                current_framing_version=current.version,
+                                retry=True,
+                            )
+                        raise ValidationError(
+                            f"framing base_version={base_version} is stale; current version is "
+                            f"{current.version}; retry with base_version={current.version} and "
+                            "the current framing edited from that version"
+                        )
+                    elif same_current:
+                        write_framing = False
+                    else:
+                        if not normal_reason:
+                            raise ValidationError("updating framing needs a nonempty reason")
+                        version = current.version + 1
+                        _require_text_bytes("framing reason", normal_reason)
+                if write_framing:
+                    written_framing = ProjectFramingVersion(
+                        project_id=project_id,
+                        version=version,
+                        title=framing_title,
+                        body=framing_body,
+                        reason=normal_reason,
+                        author=current_author(),
+                        created_at=_now(),
+                    )
+                    framing_created = True
+
+            current_paths = {item.path: item for item in existing.paths} if existing else {}
+            wanted = {item.path: item for item in paths}
+            changed = [item for path, item in wanted.items() if current_paths.get(path) != item]
+            removed = [path for path in dict.fromkeys(remove_paths) if path in current_paths]
+            statements: list[str] = []
+            if existing is None:
+                statements.append(
+                    _insert(
+                        "project",
+                        {
+                            "id": project_id,
+                            "name": name,
+                            "created_at": _now(),
+                            "created_by": current_author(),
+                            "created_on_host": host,
+                        },
+                    )
+                )
+            statements += [
+                _bind(
+                    "DELETE FROM project_path WHERE project_id = ? AND path = ?",
+                    [project_id, path],
+                )
+                for path in [*(item.path for item in changed), *removed]
+                if path in current_paths
+            ]
+            statements += [
+                _insert(
+                    "project_path",
+                    {
+                        "project_id": project_id,
+                        "path": item.path,
+                        "label": item.label,
+                        "access_instructions": item.access_instructions,
+                        "host": item.host,
+                    },
+                )
+                for item in changed
+            ]
+            if written_framing is not None:
+                statements.append(
+                    _insert(
+                        "project_framing_version",
+                        {
+                            "project_id": project_id,
+                            "version": written_framing.version,
+                            "title": written_framing.title,
+                            "body": written_framing.body,
+                            "reason": written_framing.reason,
+                            "author": written_framing.author,
+                            "created_at": written_framing.created_at,
+                        },
+                    )
+                )
+            if statements:
+                self._execute_script(
+                    [
+                        "START TRANSACTION",
+                        *statements,
+                        f"CALL DOLT_COMMIT('-A','-m',{dolt.sql_literal(f'project {project_id}')})",
+                    ]
+                )
+            stored = self.get_project(project_id)
+            if stored is None:  # pragma: no cover - the transaction above wrote it
+                raise DoltError(f"project {project_id!r} was written but cannot be read back")
+            return ProjectWriteOutcome(
+                project=stored,
+                created=created,
+                changed=bool(statements),
+                framing=written_framing,
+                framing_created=framing_created,
+                current_framing_version=(
+                    stored.current_framing.version if stored.current_framing is not None else None
+                ),
+                retry=False,
             )
-        statements += [
-            _bind("DELETE FROM project_path WHERE project = ? AND path = ?", [name, path])
-            for path in [*(item.path for item in changed), *removed]
-            if path in current
-        ]
-        statements += [
-            _insert(
-                "project_path",
-                {
-                    "project": name,
-                    "path": item.path,
-                    "label": item.label,
-                    "access_instructions": item.access_instructions,
-                    "host": item.host,
-                },
-            )
-            for item in changed
-        ]
-        if statements:
-            self._execute_script(
+
+    def set_projects(
+        self,
+        record_id: str,
+        add: Sequence[str],
+        remove: Sequence[str],
+        reason: str,
+    ) -> SetProjectsOutcome:
+        """Append effective membership changes in one transaction and return current state."""
+        if not add and not remove:
+            raise ValidationError("set_projects needs at least one project to add or remove")
+        normal_reason = reason.strip()
+        if not normal_reason:
+            raise ValidationError("changing project membership needs a reason")
+        _require_text_bytes("project membership reason", normal_reason)
+        with dolt.exclusive(self.db_path):
+            resolved = self.resolve_project_values([*add, *remove])
+            add_refs = list({ref.id: ref for ref in resolved[: len(add)]}.values())
+            remove_refs = list({ref.id: ref for ref in resolved[len(add) :]}.values())
+            refs = [*add_refs, *remove_refs]
+            by_id = {ref.id: ref for ref in refs}
+            overlap = sorted({ref.id for ref in add_refs} & {ref.id for ref in remove_refs})
+            if overlap:
+                names = ", ".join(by_id[item].name for item in overlap)
+                raise ValidationError(f"{names} is present in both add and remove")
+            record_rows, event_rows = dolt.read_result_sets(
+                self.db_path,
                 [
-                    "START TRANSACTION",
-                    *statements,
-                    f"CALL DOLT_COMMIT('-A','-m',{dolt.sql_literal(f'project {name}')})",
-                ]
+                    _bind("SELECT id FROM record WHERE id = ?", [record_id]),
+                    _bind(
+                        "SELECT e.project_id, p.name AS project_name, e.sequence, e.action "
+                        "FROM record_project_event e JOIN project p ON p.id = e.project_id "
+                        "WHERE e.record_id = ? AND NOT EXISTS (SELECT 1 FROM "
+                        "record_project_event newer WHERE newer.record_id = e.record_id AND "
+                        "newer.project_id = e.project_id AND newer.sequence > e.sequence) "
+                        "ORDER BY e.project_id",
+                        [record_id],
+                    ),
+                ],
             )
-        stored = self.get_project(name)
-        if stored is None:  # pragma: no cover - the transaction above wrote it
-            raise DoltError(f"project {name!r} was written but cannot be read back")
-        return stored, existing is None
+            if not record_rows:
+                raise RecordNotFoundError(f"no record has id {record_id!r}")
+            latest = {
+                str(row["project_id"]): (
+                    int(row["sequence"]),
+                    str(row["action"]),
+                    str(row["project_name"]),
+                )
+                for row in event_rows
+            }
+            current_ids = {
+                project_id
+                for project_id, (_seq, action, _name) in latest.items()
+                if action == "add"
+            }
+            effective_add = [ref for ref in add_refs if ref.id not in current_ids]
+            effective_remove = [ref for ref in remove_refs if ref.id in current_ids]
+            unchanged_add = [ref for ref in add_refs if ref.id in current_ids]
+            unchanged_remove = [ref for ref in remove_refs if ref.id not in current_ids]
+            changed_at = _now()
+            author = current_author()
+            events = [
+                (ref, action)
+                for action, selected in (("add", effective_add), ("remove", effective_remove))
+                for ref in selected
+            ]
+            if events:
+                self._execute_script(
+                    [
+                        "START TRANSACTION",
+                        *(
+                            _insert(
+                                "record_project_event",
+                                {
+                                    "record_id": record_id,
+                                    "project_id": ref.id,
+                                    "sequence": latest.get(ref.id, (-1, "", ""))[0] + 1,
+                                    "action": action,
+                                    "reason": normal_reason,
+                                    "author": author,
+                                    "created_at": changed_at,
+                                },
+                            )
+                            for ref, action in events
+                        ),
+                        f"CALL DOLT_COMMIT('-A','-m',{dolt.sql_literal(f'projects {record_id}')})",
+                    ]
+                )
+            resulting = (current_ids | {ref.id for ref in effective_add}) - {
+                ref.id for ref in effective_remove
+            }
+            known: dict[str, ProjectRef] = {
+                project_id: ProjectRef(id=project_id, name=name)
+                for project_id, (_seq, _action, name) in latest.items()
+            }
+            known.update(by_id)
+            current_projects: list[ProjectRef] = [known[project_id] for project_id in resulting]
+            current_projects.sort(key=_project_ref_key)
+            return SetProjectsOutcome(
+                record_id=record_id,
+                changed=[
+                    ProjectMembershipChange(
+                        project=ref,
+                        action=_as_project_action(action),
+                        reason=normal_reason,
+                        author=author,
+                        created_at=changed_at,
+                    )
+                    for ref, action in events
+                ],
+                unchanged_add=unchanged_add,
+                unchanged_remove=unchanged_remove,
+                projects=current_projects,
+            )
 
     def write_tag_alias(self, tag: str, canonical: str) -> None:
         """Insert a tag_alias row; an existing identical row is a no-op.
@@ -804,11 +1308,16 @@ class Store:
         """Append one link. Duplicate (source, relation, target) is a no-op returning the link.
 
         Raises:
-            ValidationError: source equals target; supersedes would close a cycle.
+            ValidationError: source equals target, or relation is supersedes.
             RecordNotFoundError: either id names no record.
         """
         if relation not in RELATIONS:
             raise ValidationError(f"relation must be one of {', '.join(RELATIONS)}")
+        if relation == "supersedes":
+            raise ValidationError(
+                "Store.add_link does not write supersedes; write a new record with "
+                "supersedes=<id> and a reason"
+            )
         if source_id == target_id:
             raise ValidationError("a record cannot link to itself")
         missing = [i for i in (source_id, target_id) if i not in self._existing_ids([i])]
@@ -822,10 +1331,6 @@ class Store:
             )
         ):
             return result
-        if relation == "supersedes" and self._supersedes_reaches(target_id, source_id):
-            raise ValidationError(
-                f"{source_id} supersedes {target_id} would close a supersedes cycle"
-            )
         self._execute_script(
             [
                 "START TRANSACTION",
@@ -962,15 +1467,7 @@ class Store:
         )
 
     def upsert_chunk_embeddings(self, rows: Sequence[tuple[str, int, str, Sequence[float]]]) -> int:
-        """Write `(record_id, chunk_index, model_id, vector)` rows in ONE transaction.
-
-        Returns the number of rows written. An empty `rows` returns 0 WITHOUT opening a
-        transaction, because `CALL DOLT_COMMIT` raises "nothing to commit" on one that changed
-        nothing.
-
-        Raises:
-            ValidationError: a vector does not have EMBEDDING_DIMENSIONS components.
-        """
+        """Write record chunk vectors in one transaction, returning the row count."""
         if not rows:
             return 0
         for record_id, chunk, _model_id, vector in rows:
@@ -990,6 +1487,40 @@ class Store:
                 "REPLACE INTO record_chunk_embedding (record_id, chunk_index, model_id, vec) "
                 f"VALUES {values}",
                 f"CALL DOLT_COMMIT('-A','-m','embed {len(rows)} chunks')",
+            ]
+        )
+        return len(rows)
+
+    def insert_project_framing_embeddings(
+        self,
+        rows: Sequence[tuple[str, int, int, str, Sequence[float]]],
+    ) -> int:
+        """Insert framing vectors without deleting or replacing any earlier version rows."""
+        if not rows:
+            return 0
+        for project_id, version, chunk, _model_id, values in rows:
+            if len(values) != EMBEDDING_DIMENSIONS:
+                raise ValidationError(
+                    f"a vector for {project_id} framing {version} chunk {chunk} has "
+                    f"{len(values)} components; the schema stores {EMBEDDING_DIMENSIONS}"
+                )
+        self._execute_script(
+            [
+                "START TRANSACTION",
+                *(
+                    _insert_vector(
+                        "project_framing_embedding",
+                        {
+                            "project_id": project_id,
+                            "version": version,
+                            "chunk_index": chunk,
+                            "model_id": model_id,
+                        },
+                        values,
+                    )
+                    for project_id, version, chunk, model_id, values in rows
+                ),
+                f"CALL DOLT_COMMIT('-A','-m','embed {len(rows)} framing chunks')",
             ]
         )
         return len(rows)
@@ -1055,23 +1586,30 @@ class Store:
         if not self._existing_ids([record_id]):
             raise RecordNotFoundError(f"no record has id {record_id!r}")
 
-    def _supersedes_reaches(self, start: str, goal: str) -> bool:
-        """True when `start` reaches `goal` by following supersedes links, source to target."""
-        edges: dict[str, list[str]] = {}
+    def superseding_tip(self, record_id: str) -> str | None:
+        """Newest current descendant reached through incoming supersedes links.
+
+        None means nothing supersedes `record_id`. Existing historical forks are followed by
+        choosing the newest successor at each step, with id as the equal-time tie break. New
+        writes refuse before creating another fork.
+        """
+        successors: dict[str, list[tuple[datetime, str]]] = {}
         for row in self._read(
-            "SELECT source_id, target_id FROM link WHERE relation = 'supersedes'"
+            "SELECT source_id, target_id, created_at FROM link "
+            "WHERE relation = 'supersedes' ORDER BY created_at, source_id"
         ):
-            edges.setdefault(str(row["source_id"]), []).append(str(row["target_id"]))
-        frontier, seen = [start], {start}
-        while frontier:
-            current = frontier.pop()
-            if current == goal:
-                return True
-            for nxt in edges.get(current, []):
-                if nxt not in seen:
-                    seen.add(nxt)
-                    frontier.append(nxt)
-        return False
+            successors.setdefault(str(row["target_id"]), []).append(
+                (_as_datetime(row["created_at"]), str(row["source_id"]))
+            )
+        current = record_id
+        seen = {record_id}
+        while choices := successors.get(current):
+            _created_at, nxt = max(choices)
+            if nxt in seen:
+                return current
+            seen.add(nxt)
+            current = nxt
+        return None if current == record_id else current
 
     def _read(self, statement: str) -> list[dict[str, Any]]:
         return dolt.read_rows(self.db_path, statement)
@@ -1095,7 +1633,6 @@ def _validated(  # noqa: PLR0912 — one boundary validates the complete record 
     if not title:
         raise ValidationError("title is empty: a record needs a one-line title")
     _require_length("title", title, TITLE_CHARS)
-    _require_length("project", draft.project, NAME_CHARS)
     _require_text_bytes("reason", draft.reason)
     for capture in draft.code:
         _require_length("code repo_path", capture.repo_path, PATH_CHARS)
@@ -1187,17 +1724,29 @@ def _normalise_tags(tags: Sequence[str]) -> list[str]:
 
 
 def _require_length(field: str, value: str | None, limit: int) -> None:
-    """Refuse a value longer than its VARCHAR column, as malformed input."""
+    """Refuse an unencodable value or one longer than its VARCHAR column."""
+    _require_utf8(field, value)
     if value is not None and len(value) > limit:
         raise ValidationError(f"{field} is {len(value)} characters; the limit is {limit}")
 
 
 def _require_text_bytes(field: str, value: str | None) -> None:
-    """Refuse a value over a TEXT column's 65,535 bytes of UTF-8, as malformed input."""
-    if value is not None and len(value.encode()) > TEXT_BYTES:
+    """Refuse unencodable text or text over the column's 65,535 UTF-8 bytes."""
+    encoded = _require_utf8(field, value)
+    if encoded is not None and len(encoded) > TEXT_BYTES:
         raise ValidationError(
-            f"{field} is {len(value.encode())} bytes of UTF-8; the limit is {TEXT_BYTES}"
+            f"{field} is {len(encoded)} bytes of UTF-8; the limit is {TEXT_BYTES}"
         )
+
+
+def _require_utf8(field: str, value: str | None) -> bytes | None:
+    """Return UTF-8 bytes or translate unpaired surrogates to malformed input."""
+    if value is None:
+        return None
+    try:
+        return value.encode()
+    except UnicodeEncodeError as exc:
+        raise ValidationError(f"{field} contains an unpaired Unicode surrogate") from exc
 
 
 def _value_text(value: dict[str, Any] | None) -> str | None:
@@ -1299,6 +1848,17 @@ def _insert(table: str, columns: dict[str, Any]) -> str:
     return f"INSERT INTO {table} ({names}) VALUES ({values})"
 
 
+def _insert_vector(table: str, columns: dict[str, Any], vector: Sequence[float]) -> str:
+    names = ", ".join([*(f"`{column}`" for column in columns), "`vec`"])
+    values = ", ".join(
+        [
+            *(dolt.sql_literal(value) for value in columns.values()),
+            f"STRING_TO_VECTOR({dolt.sql_literal(dolt.vector_literal(vector))})",
+        ]
+    )
+    return f"INSERT INTO {table} ({names}) VALUES ({values})"
+
+
 def _id_candidates(entry_type: EntryType) -> Iterator[str]:
     """Ten five-character candidates, then ten six-character candidates."""
     for length in ID_LENGTHS:
@@ -1367,3 +1927,96 @@ def _as_relation(value: Any) -> Relation:
         if relation == text:
             return relation
     raise ValueError(f"link.relation {text!r} is not one of {RELATIONS}")
+
+
+def _project_id_candidates() -> Iterator[str]:
+    """Ten five-character project ids, then ten six-character candidates."""
+    for length in ID_LENGTHS:
+        for _attempt in range(ID_ATTEMPTS_PER_LENGTH):
+            suffix = "".join(secrets.choice(ID_ALPHABET) for _ in range(length))
+            yield f"{PROJECT_ID_PREFIX}-{suffix}"
+
+
+def _validated_project_name(name: str) -> str:
+    """A trimmed one-line human name that cannot be mistaken for a project id."""
+    normal = name.strip()
+    if not normal:
+        raise ValidationError("project name is empty")
+    if PROJECT_ID_PATTERN.fullmatch(normal) is not None:
+        raise ValidationError(f"project name {normal!r} matches the reserved project id shape")
+    if any(_forbidden_one_line_character(character) for character in normal):
+        raise ValidationError("project name must be one line with no control characters")
+    _require_length("project name", normal, NAME_CHARS)
+    return normal
+
+
+def _validated_framing(framing: ProjectFramingDraft | None) -> tuple[str, str]:
+    """Validate framing without changing bytes other than requiring a clean one-line title."""
+    if framing is None:
+        return "", ""
+    title = framing.title
+    if not title.strip():
+        raise ValidationError("framing title is empty")
+    if title != title.strip() or any(
+        _forbidden_one_line_character(character) for character in title
+    ):
+        raise ValidationError("framing title must be one trimmed line with no control characters")
+    if "\x00" in framing.body:
+        raise ValidationError("framing body contains a NUL byte")
+    _require_utf8("framing body", framing.body)
+    _require_length("framing title", title, TITLE_CHARS)
+    return title, framing.body
+
+
+def _normalise_newlines(text: str) -> str:
+    """The only equivalence allowed for lost-response framing retry recognition."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _same_framing(existing: ProjectFramingVersion, title: str, body: str) -> bool:
+    return _normalise_newlines(existing.title) == _normalise_newlines(
+        title
+    ) and _normalise_newlines(existing.body) == _normalise_newlines(body)
+
+
+def _project_framing(row: dict[str, Any]) -> ProjectFramingVersion:
+    return ProjectFramingVersion(
+        project_id=str(row["project_id"]),
+        version=int(row["version"]),
+        title=str(row["title"]),
+        body=str(row.get("body", "")),
+        reason=_optional_str(row.get("reason")),
+        author=str(row["author"]),
+        created_at=_as_datetime(row["created_at"]),
+    )
+
+
+def _as_project_action(value: Any) -> ProjectAction:
+    text = str(value)
+    if text not in PROJECT_ACTIONS:
+        raise DoltError(f"membership has unknown action {text!r}")
+    return text
+
+
+def _project_ref_key(item: ProjectRef) -> tuple[str, str]:
+    return item.name, item.id
+
+
+def _project_suggestions(value: str, rows: Sequence[dict[str, Any]]) -> list[ProjectRef]:
+    """Up to three close human names, ordered by similarity then name and id."""
+    target = value.casefold().strip()
+    candidates = []
+    for row in rows:
+        name = str(row["name"])
+        ratio = difflib.SequenceMatcher(a=target, b=name.casefold()).ratio()
+        if ratio >= 0.6:
+            candidates.append((-ratio, name.casefold(), str(row["id"]), name))
+    return [
+        ProjectRef(id=project_id, name=name)
+        for _ratio, _normal, project_id, name in sorted(candidates)[:3]
+    ]
+
+
+def _forbidden_one_line_character(character: str) -> bool:
+    """True for Unicode controls, surrogates, formatting controls, and line separators."""
+    return unicodedata.category(character) in {"Cc", "Cf", "Cs", "Zl", "Zp"}

@@ -71,9 +71,9 @@ def test_an_exported_file_with_a_reason_line_publishes_a_superseding_record(
 def test_export_refuses_an_existing_file_unless_overwrite(store: Store, tmp_path: Path) -> None:
     """Silent failure: an export clobbering a file the agent was still editing."""
     record = store.write_record(
-        RecordDraft(work_status="closed", title="project", entry_type="project-context")
+        RecordDraft(work_status="closed", title="project", entry_type="note")
     ).record
-    path = tmp_path / "project-context.md"
+    path = tmp_path / "record.md"
     path.write_text("my unsaved edits")
 
     with pytest.raises(ValidationError, match="exists; pass overwrite=true"):
@@ -123,9 +123,12 @@ def test_embed_writes_vectors_only_for_records_without_one(
 
     result = _run(store, embed)
 
-    assert (result.records, result.vectors) == (1, 1)
+    assert (result.records, result.record_vectors) == (1, 1)
     assert fake.calls == ["Pending"]
-    assert result.render_text() == ("1 embedding vectors written for 1 records\nNext: search(...)")
+    assert result.render_text() == (
+        "1 record vectors written for 1 records\n"
+        "0 framing vectors written for 0 current framing versions\nNext: search(...)"
+    )
 
 
 def test_embed_with_no_runtime_writes_nothing_and_says_how_to_install_it(
@@ -138,7 +141,7 @@ def test_embed_with_no_runtime_writes_nothing_and_says_how_to_install_it(
 
     result = _run(store, embed)
 
-    assert (result.available, result.records, result.vectors) == (False, 0, 0)
+    assert (result.available, result.records, result.record_vectors) == (False, 0, 0)
     assert store.query("SELECT COUNT(*) AS n FROM record_chunk_embedding") == [{"n": 0}]
     assert result.render_text() == (
         "embedding runtime not available: install the search extra "

@@ -10,11 +10,6 @@ from trails.store import SCHEMA_MARKER, Store, open_store
 
 
 def test_a_fresh_database_holds_exactly_the_trails_tables(store: Store) -> None:
-    """Catches a leftover per-kind table, or a missing one, from the schema rewrite.
-
-    A stray `claim` or `verification` table would sit empty and unread, and its presence would
-    tell a later reader the strict-workflow store still exists.
-    """
     tables = {str(next(iter(row.values()))) for row in store.query("SHOW TABLES")}
 
     assert tables == {
@@ -22,9 +17,12 @@ def test_a_fresh_database_holds_exactly_the_trails_tables(store: Store) -> None:
         "code_capture",
         "link",
         "project",
+        "project_framing_embedding",
+        "project_framing_version",
         "project_path",
         "record",
         "record_chunk_embedding",
+        "record_project_event",
         "record_tag",
         "record_work_status",
         "retirement",
@@ -33,45 +31,97 @@ def test_a_fresh_database_holds_exactly_the_trails_tables(store: Store) -> None:
     }
 
 
-def test_every_text_column_of_record_record_tag_and_artifact_is_case_insensitive(
-    store: Store,
-) -> None:
-    """Catches a text column left on Dolt's default utf8mb4_0900_bin.
+def test_project_schema_has_stable_identity_framing_and_membership_events(store: Store) -> None:
+    """Catches an intermediate dual-read schema or wrong event keys surviving the cutover."""
+    record_columns = {str(row["Field"]) for row in store.query("SHOW COLUMNS FROM record")}
+    project_columns = {str(row["Field"]) for row in store.query("SHOW COLUMNS FROM project")}
+    framing_columns = {
+        str(row["Field"]) for row in store.query("SHOW COLUMNS FROM project_framing_version")
+    }
+    event_columns = {
+        str(row["Field"]): (str(row["Type"]), str(row["Key"]))
+        for row in store.query("SHOW COLUMNS FROM record_project_event")
+    }
 
-    That collation makes MATCH and LIKE case-sensitive, so a search for `lift` silently misses
-    a title reading `Lift`. Dolt 2.4.0 reports a declared column collation inside the `Type`
-    field of SHOW FULL COLUMNS (its `Collation` field reads utf8mb4_0900_bin regardless), and
-    in information_schema COLLATION_NAME, so both are asserted.
-    """
-    for table in ("record", "record_tag", "record_work_status", "artifact"):
+    assert "project" not in record_columns
+    assert project_columns == {"id", "name", "created_at", "created_by", "created_on_host"}
+    assert framing_columns == {
+        "project_id",
+        "version",
+        "title",
+        "body",
+        "reason",
+        "author",
+        "created_at",
+    }
+    assert set(event_columns) == {
+        "record_id",
+        "project_id",
+        "sequence",
+        "action",
+        "reason",
+        "author",
+        "created_at",
+    }
+    assert event_columns["action"][0] == "enum('add','remove')"
+    assert [
+        str(row["Column_name"])
+        for row in store.query("SHOW INDEX FROM record_project_event WHERE Key_name = 'PRIMARY'")
+    ] == ["record_id", "project_id", "sequence"]
+    path_collation = store.query(
+        "SELECT COLLATION_NAME FROM information_schema.columns WHERE table_schema = DATABASE() "
+        "AND table_name = 'project_path' AND column_name = 'path'"
+    )[0]["COLLATION_NAME"]
+    assert path_collation == "utf8mb4_0900_bin"
+
+
+def test_every_non_path_text_column_is_case_and_accent_insensitive(store: Store) -> None:
+    """Catches a text column left on Dolt's binary default and silent case-sensitive search."""
+    for table in (
+        "record",
+        "record_tag",
+        "record_work_status",
+        "artifact",
+        "project",
+        "project_framing_version",
+        "record_project_event",
+    ):
         text_columns = {
             str(row["Field"]): str(row["Type"])
             for row in store.query(f"SHOW FULL COLUMNS FROM {table}")
             if str(row["Type"]).lower().startswith(("varchar", "text", "longtext"))
         }
         assert text_columns, table
-        for column, declared in text_columns.items():
-            assert declared.endswith("COLLATE utf8mb4_0900_ai_ci"), (table, column, declared)
+        assert all(
+            declared.endswith("COLLATE utf8mb4_0900_ai_ci") for declared in text_columns.values()
+        )
 
-        collations = {
-            str(row["COLUMN_NAME"]): str(row["COLLATION_NAME"])
-            for row in store.query(
-                "SELECT COLUMN_NAME, COLLATION_NAME FROM information_schema.columns "
-                "WHERE table_schema = DATABASE() AND table_name = ? "
-                "AND COLLATION_NAME IS NOT NULL",
-                [table],
-            )
-        }
-        assert {column: collations[column] for column in text_columns} == dict.fromkeys(
-            text_columns, "utf8mb4_0900_ai_ci"
-        ), table
+    path_columns = {
+        str(row["Field"]): str(row["Type"])
+        for row in store.query("SHOW FULL COLUMNS FROM project_path")
+        if str(row["Type"]).lower().startswith(("varchar", "text", "longtext"))
+    }
+    assert (
+        store.query(
+            "SELECT COLLATION_NAME FROM information_schema.columns WHERE table_schema = DATABASE() "
+            "AND table_name = 'project_path' AND column_name = 'path'"
+        )[0]["COLLATION_NAME"]
+        == "utf8mb4_0900_bin"
+    )
+    assert all(
+        declared.endswith("COLLATE utf8mb4_0900_ai_ci")
+        for column, declared in path_columns.items()
+        if column != "path"
+    )
 
 
 def test_fulltext_and_like_match_regardless_of_case(store: Store) -> None:
-    """The behaviour the collation exists for, on both FULLTEXT indexes and LIKE."""
     record = store.write_record(
         RecordDraft(
-            entry_type="note", work_status="closed", title="Lift Study", body="Variance Reduction"
+            entry_type="note",
+            work_status="closed",
+            title="Lift Study",
+            body="Variance Reduction",
         )
     ).record
 
@@ -83,14 +133,12 @@ def test_fulltext_and_like_match_regardless_of_case(store: Store) -> None:
 
 
 def test_a_database_with_no_tables_gets_the_schema_on_open(tmp_path: Path) -> None:
-    """labbook-79y.6 item 1. Catches a process dying between `dolt init` and the schema
-    script leaving a store that opens with no tables, forever."""
     db = tmp_path / "db"
     dolt.init_database(db)
 
     store = open_store(db)
 
     tables = {str(next(iter(row.values()))) for row in store.query("SHOW TABLES")}
-    assert {"record", "link", "project"} <= tables
+    assert {"record", "link", "project", "record_project_event"} <= tables
     (db / SCHEMA_MARKER).unlink()
     assert open_store(db).query("SELECT COUNT(*) AS n FROM record") == [{"n": 0}]

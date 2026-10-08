@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator, Sequence
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
@@ -276,7 +276,8 @@ FILTER_NAMES: tuple[str, ...] = (
     "entry_type",
     "work_status",
     "tags",
-    "project",
+    "projects",
+    "unscoped",
     "since",
     "until",
     "links",
@@ -289,7 +290,8 @@ class Filters(BaseModel):
     entry_type: EntryType | None = None
     work_status: WorkStatus | None = None
     tags: list[str] = []
-    project: str | None = None
+    projects: list[str] = []
+    unscoped: bool = False
     since: date | None = None
     until: date | None = None
     links: tuple[Relation, str] | None = None
@@ -301,7 +303,8 @@ class Filters(BaseModel):
 
     def without(self, name: str) -> Filters:
         """A copy with the filter `name` removed."""
-        return self.model_copy(update={name: [] if name == "tags" else None})
+        empty: Any = [] if name in {"tags", "projects"} else False if name == "unscoped" else None
+        return self.model_copy(update={name: empty})
 
 
 class Ranked(BaseModel):
@@ -364,7 +367,7 @@ def run_search(
         )
     if count_unembedded and model_id is not None:
         names.append("unembedded")
-        statements.append(vector.unembedded_statement(model_id, filters.project))
+        statements.append(vector.unembedded_statement(model_id, filters.projects, filters.unscoped))
     results = dict(zip(names, dolt.read_result_sets(store.db_path, statements), strict=True))
 
     unembedded = int(results["unembedded"][0]["n"]) if "unembedded" in results else None
@@ -488,8 +491,28 @@ def _where(filters: Filters, equivalence: dict[str, tuple[str, ...]]) -> str:
         clauses.append(
             f"EXISTS (SELECT 1 FROM record_tag g WHERE g.record_id = r.id AND g.tag IN ({forms}))"
         )
-    if filters.project is not None:
-        clauses.append(f"r.project = {_lit(filters.project)}")
+    if filters.projects or filters.unscoped:
+        scope_parts: list[str] = []
+        if filters.projects:
+            ids = ", ".join(_lit(project_id) for project_id in filters.projects)
+            scope_parts.append(
+                "EXISTS (SELECT 1 FROM record_project_event membership WHERE "
+                "membership.record_id = r.id AND membership.project_id IN ("
+                f"{ids}) AND membership.action = 'add' AND NOT EXISTS (SELECT 1 FROM "
+                "record_project_event newer_membership WHERE newer_membership.record_id = "
+                "membership.record_id AND newer_membership.project_id = membership.project_id "
+                "AND newer_membership.sequence > membership.sequence))"
+            )
+        if filters.unscoped:
+            scope_parts.append(
+                "NOT EXISTS (SELECT 1 FROM record_project_event membership WHERE "
+                "membership.record_id = r.id AND membership.action = 'add' AND NOT EXISTS ("
+                "SELECT 1 FROM record_project_event newer_membership WHERE "
+                "newer_membership.record_id = membership.record_id AND "
+                "newer_membership.project_id = membership.project_id AND "
+                "newer_membership.sequence > membership.sequence))"
+            )
+        clauses.append(f"({' OR '.join(scope_parts)})")
     if filters.since is not None:
         clauses.append(f"r.created_at >= {_lit(datetime.combine(filters.since, time()))}")
     if filters.until is not None:
@@ -562,6 +585,123 @@ def _lit(value: str | datetime) -> str:
 
 def _dedupe(record_ids: Iterator[str] | Sequence[str]) -> list[str]:
     return list(dict.fromkeys(record_ids))
+
+
+# ---------------------------------------------------------- project discovery
+
+
+class ProjectRanked(BaseModel):
+    """Every project matched by identity or current framing, ranked separately from records."""
+
+    order: list[str]
+    rankers: dict[str, dict[str, int]]
+    vector: dict[str, vector.ProjectVectorMatch]
+
+
+def run_project_search(
+    store: Store,
+    *,
+    query: str,
+    query_vector: Sequence[float] | None,
+    model_id: str | None,
+) -> ProjectRanked:
+    """Fuse exact project identity, current-framing keyword, and current-framing vector ranks."""
+    text = query.strip()
+    if not text:
+        return ProjectRanked(order=[], rankers={}, vector={})
+    keyword_query = " ".join(keyword_tokens(query))
+    names: list[str] = ["exact"]
+    statements = [_project_exact_statement(text)]
+    if keyword_query:
+        names.append("keyword")
+        statements.append(_project_keyword_statement(keyword_query))
+    if query_vector is not None and model_id is not None:
+        names.append("vector")
+        statements.append(vector.project_nearest_statement(query_vector, model_id))
+    results = dict(zip(names, dolt.read_result_sets(store.db_path, statements), strict=True))
+    rankings: dict[str, list[str]] = {"exact": _dedupe(str(row["id"]) for row in results["exact"])}
+    if "keyword" in results:
+        rankings["keyword"] = _dedupe(str(row["id"]) for row in results["keyword"])
+    nearest = [
+        match
+        for match in vector.parse_project_nearest(
+            results.get("vector", []), len(results.get("vector", []))
+        )
+        if match.cosine >= VECTOR_MIN_COSINE
+    ]
+    if nearest:
+        rankings["vector"] = [match.project_id for match in nearest]
+    created: dict[str, str] = {}
+    for result in results.values():
+        for row in result:
+            identity = row.get("id", row.get("project_id"))
+            if identity is not None:
+                created[str(identity)] = str(row.get("updated_at", row.get("created_at", "")))
+    scores = rrf_scores(list(rankings.values()))
+    fused = sorted(scores)
+    fused.sort(key=lambda item: created.get(item, ""), reverse=True)
+    fused.sort(key=lambda item: scores[item], reverse=True)
+    exact = set(rankings["exact"])
+    order = [item for item in fused if item in exact] + [
+        item for item in fused if item not in exact
+    ]
+    return ProjectRanked(
+        order=order,
+        rankers={
+            project_id: {
+                name: ranking.index(project_id) + 1
+                for name, ranking in rankings.items()
+                if project_id in ranking
+            }
+            for project_id in order
+        },
+        vector={match.project_id: match for match in nearest},
+    )
+
+
+def project_keyword_matches(
+    query: str, name: str, title: str, body: str
+) -> list[tuple[str, Literal["name", "framing_title", "framing_body"]]]:
+    """Located whole-word keyword matches in current searchable project fields."""
+    tokens = keyword_tokens(query)
+    fields: tuple[tuple[Literal["name", "framing_title", "framing_body"], str], ...] = (
+        ("name", name),
+        ("framing_title", title),
+        ("framing_body", body),
+    )
+    found: list[tuple[str, Literal["name", "framing_title", "framing_body"]]] = []
+    for field, text in fields:
+        words = set(split_words(text.lower()))
+        found.extend((token, field) for token in tokens if token in words)
+    return found
+
+
+def _project_exact_statement(query: str) -> str:
+    value = _lit(query)
+    return (
+        "SELECT p.id AS id, COALESCE(f.created_at, p.created_at) AS updated_at "
+        "FROM project p LEFT JOIN project_framing_version f ON f.project_id = p.id "
+        "AND NOT EXISTS (SELECT 1 FROM project_framing_version newer WHERE "
+        "newer.project_id = f.project_id AND newer.version > f.version) WHERE "
+        f"p.id = {value} OR p.name = {value} ORDER BY updated_at DESC, p.id ASC"
+    )
+
+
+def _project_keyword_statement(query: str) -> str:
+    q = _lit(query)
+    tokens = keyword_tokens(query)
+    name_conditions = [f"p.name LIKE {_lit(like_pattern(token))}" for token in tokens]
+    name_match = " OR ".join(name_conditions) if name_conditions else "FALSE"
+    title = f"MATCH(f.title) AGAINST ({q} IN NATURAL LANGUAGE MODE)"
+    body = f"MATCH(f.body) AGAINST ({q} IN NATURAL LANGUAGE MODE)"
+    return (
+        "SELECT p.id AS id, COALESCE(f.created_at, p.created_at) AS updated_at, "
+        f"({title} + {body}) AS score FROM project p LEFT JOIN "
+        "project_framing_version f ON f.project_id = p.id AND NOT EXISTS (SELECT 1 FROM "
+        "project_framing_version newer WHERE newer.project_id = f.project_id AND "
+        "newer.version > f.version) WHERE "
+        f"({name_match} OR {title} OR {body}) ORDER BY score DESC, updated_at DESC, p.id ASC"
+    )
 
 
 # ------------------------------------------------------------------ show and lineage
@@ -660,24 +800,29 @@ def _relation(value: Any) -> Relation:
 
 
 class Overview(BaseModel):
-    """The ids and disjoint status counts prime needs for one scope."""
+    """The ids and disjoint status counts prime needs for one project."""
 
     current_count: int
     replaced_count: int
     retired_count: int
-    current: list[str]  # neither retired nor superseded, newest first
-    project_contexts: list[str]  # current context records in scope, newest first
-    problem_statements: list[str]  # current in scope, plus ones citing this project's context
+    current: list[str]
+    problem_statements: list[str]
 
 
-def overview(store: Store, project: str | None) -> Overview:
-    """Every prime index query in one Dolt invocation.
+class ProjectIndexRow(BaseModel):
+    """Internal whole-store project index row."""
 
-    Current, replaced and retired are disjoint: a retired record is counted as retired even if
-    another record also supersedes it. Problem statements from another project that cite this
-    project's context are returned for orientation but are not added to the project's counts.
-    """
-    scope = f"r.project = {_lit(project)}" if project is not None else "1 = 1"
+    project_id: str
+    name: str
+    framing_title: str | None
+    record_count: int
+    open_count: int
+    last_activity: datetime
+
+
+def overview(store: Store, project_id: str) -> Overview:
+    """Every project-scoped prime index query in one Dolt invocation."""
+    scope = _current_membership("r", _lit(project_id))
     current = f"{scope} AND {_LIVE} AND {_NOT_SUPERSEDED}"
     replaced = f"{scope} AND {_LIVE} AND NOT ({_NOT_SUPERSEDED})"
     statements = [
@@ -685,34 +830,88 @@ def overview(store: Store, project: str | None) -> Overview:
         f"SELECT COUNT(*) AS n FROM record r WHERE {replaced}",
         f"SELECT COUNT(*) AS n FROM record r WHERE {scope} AND NOT ({_LIVE})",
         _ids(current),
-        _ids(f"{current} AND {_typed('project-context')}"),
-        _ids(f"({_problem_statement_scope(project)}) AND {_LIVE} AND {_NOT_SUPERSEDED}"),
+        _ids(f"{current} AND {_typed('problem-statement')}"),
     ]
-    counts_current, counts_replaced, counts_retired, ids, contexts, problems = (
-        dolt.read_result_sets(store.db_path, statements)
+    counts_current, counts_replaced, counts_retired, ids, problems = dolt.read_result_sets(
+        store.db_path, statements
     )
     return Overview(
         current_count=int(counts_current[0]["n"]),
         replaced_count=int(counts_replaced[0]["n"]),
         retired_count=int(counts_retired[0]["n"]),
         current=[str(row["id"]) for row in ids],
-        project_contexts=[str(row["id"]) for row in contexts],
         problem_statements=[str(row["id"]) for row in problems],
     )
 
 
-def _problem_statement_scope(project: str | None) -> str:
-    """Current problem statements in the project, or citing one of its context records."""
-    typed = _typed("problem-statement")
-    if project is None:
-        return typed
-    cites_context = (
-        "EXISTS (SELECT 1 FROM link c JOIN record p ON p.id = c.target_id "
-        "WHERE c.source_id = r.id "
-        f"AND c.relation = 'cites' AND p.entry_type = 'project-context' "
-        f"AND p.project = {_lit(project)})"
+def project_index(store: Store) -> tuple[list[ProjectIndexRow], int]:
+    """Current project counts, open counts, activity, and current unscoped count."""
+    current_member = _current_membership("r", "p.id")
+    current_record = f"{_LIVE} AND {_NOT_SUPERSEDED}"
+    latest_open = (
+        "EXISTS (SELECT 1 FROM record_work_status w WHERE w.record_id = r.id "
+        "AND w.work_status = 'open' AND NOT EXISTS (SELECT 1 FROM record_work_status newer "
+        "WHERE newer.record_id = w.record_id AND newer.sequence > w.sequence))"
     )
-    return f"{typed} AND (r.project = {_lit(project)} OR {cites_context})"
+    projects, unscoped = dolt.read_result_sets(
+        store.db_path,
+        [
+            "SELECT p.id, p.name, p.created_at, "
+            "(SELECT f.title FROM project_framing_version f WHERE f.project_id = p.id "
+            "ORDER BY f.version DESC LIMIT 1) AS framing_title, "
+            "(SELECT MAX(f.created_at) FROM project_framing_version f WHERE "
+            "f.project_id = p.id) AS framing_at, "
+            "(SELECT MAX(e.created_at) FROM record_project_event e WHERE "
+            "e.project_id = p.id) AS membership_at, "
+            "(SELECT MAX(r.created_at) FROM record r WHERE "
+            f"{current_member} AND {current_record}) AS record_at, "
+            "(SELECT COUNT(*) FROM record r WHERE "
+            f"{current_member} AND {current_record}) AS record_count, "
+            "(SELECT COUNT(*) FROM record r WHERE "
+            f"{current_member} AND {current_record} AND {latest_open}) AS open_count "
+            "FROM project p ORDER BY p.name, p.id",
+            "SELECT COUNT(*) AS n FROM record r WHERE "
+            f"{current_record} AND NOT EXISTS (SELECT 1 FROM record_project_event e WHERE "
+            "e.record_id = r.id AND e.action = 'add' AND NOT EXISTS (SELECT 1 FROM "
+            "record_project_event newer WHERE newer.record_id = e.record_id AND "
+            "newer.project_id = e.project_id AND newer.sequence > e.sequence))",
+        ],
+    )
+    rows: list[ProjectIndexRow] = []
+    for row in projects:
+        moments = [
+            _as_index_datetime(row[key])
+            for key in ("created_at", "framing_at", "membership_at", "record_at")
+            if row.get(key) is not None
+        ]
+        rows.append(
+            ProjectIndexRow(
+                project_id=str(row["id"]),
+                name=str(row["name"]),
+                framing_title=(
+                    str(row["framing_title"]) if row.get("framing_title") is not None else None
+                ),
+                record_count=int(row["record_count"]),
+                open_count=int(row["open_count"]),
+                last_activity=max(moments),
+            )
+        )
+    return rows, int(unscoped[0]["n"])
+
+
+def _current_membership(record_alias: str, project_id: str) -> str:
+    return (
+        "EXISTS (SELECT 1 FROM record_project_event membership WHERE membership.record_id = "
+        f"{record_alias}.id AND membership.project_id = {project_id} AND membership.action = "
+        "'add' AND NOT EXISTS (SELECT 1 FROM record_project_event newer_membership WHERE "
+        "newer_membership.record_id = membership.record_id AND "
+        "newer_membership.project_id = membership.project_id AND "
+        "newer_membership.sequence > membership.sequence))"
+    )
+
+
+def _as_index_datetime(value: Any) -> datetime:
+    return datetime.fromisoformat(str(value).replace(" ", "T")).replace(tzinfo=UTC)
 
 
 _LIVE = "NOT EXISTS (SELECT 1 FROM retirement t WHERE t.record_id = r.id)"

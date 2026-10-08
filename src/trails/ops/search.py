@@ -11,44 +11,42 @@ from pydantic import Field
 
 from trails import embeddings, engine as engine_seam, render, retrieval, vector
 from trails.errors import UsageError
-from trails.models import Record
+from trails.models import Project, Record
 from trails.ops import context
 from trails.ops._marks import Operation
-from trails.ops._read_types import KeywordMatch, SearchHit, SearchResult
+from trails.ops._read_types import (
+    KeywordMatch,
+    ProjectKeywordMatch,
+    ProjectSearchHit,
+    SearchHit,
+    SearchResult,
+)
 from trails.vocab import RELATIONS, EntryType, Relation, WorkStatus
 
 _DEFAULT_LIMIT = 10
+PROJECT_HIT_LIMIT = 3
 
 OPERATION = Operation(toolset="agent", read_only=True, destructive=False, idempotent=True)
 
 
-async def search(  # noqa: PLR0917 — every parameter is an operation parameter
+async def search(  # noqa: PLR0917 — public query contract
     query: Annotated[str, Field(description="Natural-language description of what you want.")] = "",
     terms: Annotated[
         list[str],
         Field(
             description=(
-                "Exact strings to look for in titles, bodies, tags, values, artifact "
-                "locations, captured repository paths and commit shas, and link targets, "
-                "ignoring case. An absolute local path also searches its resolved form, so "
-                "`/tmp` can find `/private/tmp` on macOS. Put short identifiers such as v2, "
-                "AB or p5 here: strings under 3 characters match only as whole words, and "
-                "the keyword search cannot see them."
+                "Exact record-only strings to look for in titles, bodies, tags, values, "
+                "artifacts, captured paths and commits, and link targets. Project id and name "
+                "exact matching comes from query."
             )
         ),
-    ] = [],  # noqa: B006 — contracted default; never mutated
+    ] = [],  # noqa: B006
     tags: Annotated[
         list[str],
-        Field(
-            description=(
-                "Keep only records carrying every one of these tags. A tag also matches its "
-                "aliases."
-            )
-        ),
-    ] = [],  # noqa: B006 — contracted default; never mutated
+        Field(description="Keep only records carrying every requested tag or an alias."),
+    ] = [],  # noqa: B006
     entry_type: Annotated[
-        EntryType | None,
-        Field(description="Keep only records of this entry type."),
+        EntryType | None, Field(description="Keep only records of this entry type.")
     ] = None,
     work_status: Annotated[
         WorkStatus | None,
@@ -60,21 +58,35 @@ async def search(  # noqa: PLR0917 — every parameter is an operation parameter
             )
         ),
     ] = None,
-    project: Annotated[str | None, Field(description="Keep only records in this project.")] = None,
+    projects: Annotated[
+        list[str],
+        Field(
+            description=(
+                "Keep records currently belonging to any of these stable project ids or exact "
+                "names. Several values use OR semantics."
+            )
+        ),
+    ] = [],  # noqa: B006
+    unscoped: Annotated[
+        bool,
+        Field(
+            description=(
+                "Also keep current records with no project membership. Combine with projects "
+                "to return either listed-project or unscoped records."
+            )
+        ),
+    ] = False,
     since: Annotated[
-        str | None,
-        Field(description="Keep only records created on or after this date, YYYY-MM-DD."),
+        str | None, Field(description="Keep records created on or after YYYY-MM-DD.")
     ] = None,
     until: Annotated[
-        str | None,
-        Field(description="Keep only records created on or before this date, YYYY-MM-DD."),
+        str | None, Field(description="Keep records created on or before YYYY-MM-DD.")
     ] = None,
     links: Annotated[
         str | None,
         Field(
             description=(
-                '"<relation>:<id>" keeps records linked to or from that id by that relation, '
-                'for example "contradicts:hyp-k3m9z".'
+                '"<relation>:<id>" keeps records linked to or from that id by that relation.'
             )
         ),
     ] = None,
@@ -88,33 +100,43 @@ async def search(  # noqa: PLR0917 — every parameter is an operation parameter
             )
         ),
     ] = False,
-    limit: Annotated[int, Field(description="Maximum records to return.")] = _DEFAULT_LIMIT,
-    offset: Annotated[int, Field(description="Number of records to skip, for paging.")] = 0,
+    limit: Annotated[int, Field(description="Maximum record hits to return.")] = _DEFAULT_LIMIT,
+    offset: Annotated[
+        int, Field(description="Record hits to skip; project hits are not paged.")
+    ] = 0,
 ) -> SearchResult:
-    """Find records by meaning, by exact strings, or by filters, in one call. Common English function words are left out of keyword matching. Combines that keyword search, an exact-string search over records, their artifacts, captured repository paths and commits, and links (ids, paths, S3 URIs, commit shas, metric names, and short identifiers passed in terms), and a similarity search over record text.
+    """Find records and, for an unfiltered query, discover projects by current framing.
 
-    Use this when: you need to know whether the store holds something: a procedure, a past result, a decision, a fact, or anything that mentions or links to a given id or path.
+    Use this when: you need to know whether the store holds a record or which existing project
+    matches a described body of work.
 
-    Use instead: show, once you have an id; prime, for an overview; lineage, for what a record was built on.
+    Use instead: show, once you have an exact id; prime, to orient to all projects or one project;
+    lineage, for what a record was built on.
 
-    Returns: one compact preview per record with its id, entry type, title, project, creation time, lifecycle, latest work status, tags, which search methods matched it, any located title or body keyword matches, and a body excerpt when one is known. A body-keyword match shows a window of at most 240 characters centered on the first match. A semantic match with no body-keyword match shows the complete selected embedding chunk. Full records and retrieval scores remain outside search; use show for the complete record. The similarity search contributes at most its 10 nearest records with cosine at least 0.25 internally; exact strings and non-stopword keyword matches have no cosine floor. When nothing matches, it lists the filters applied and what removing each one would find. Its one broader retry drops every restrictive filter and includes retired records, and never repeats the same call. After that retry finds nothing relevant, stop: the store does not hold it.
+    Returns: a separately ranked list of at most three project matches before one paged record
+    list. Project discovery searches exact id/name, current framing keywords, and current framing
+    similarity. Record-only filters suppress project matches. A body-keyword match shows a window
+    of at most 240 characters centered on the first match. A semantic match with no body-keyword
+    match shows the complete selected embedding chunk.
     """
     if limit < 1:
         raise UsageError(f"limit must be at least 1, not {limit}")
     if offset < 0:
         raise UsageError(f"offset must be 0 or more, not {offset}")
+    store = context.store()
+    resolved_projects = store.resolve_projects(projects)
     filters = retrieval.Filters(
         entry_type=entry_type,
         work_status=work_status,
         tags=tags,
-        project=project,
+        projects=[item.id for item in resolved_projects],
+        unscoped=unscoped,
         since=_date("since", since),
         until=_date("until", until),
         links=_link_filter(links),
         include_history=include_history,
     )
 
-    store = context.store()
     engine = engine_seam.build_engine()
     status, detail = embeddings.engine_status(engine)
     query_vector: Sequence[float] | None = None
@@ -124,7 +146,6 @@ async def search(  # noqa: PLR0917 — every parameter is an operation parameter
         except (embeddings.ModelNotAvailableError, embeddings.ModelDownloadError) as exc:
             status, detail = "unavailable", str(exc)
     model_id = engine.model_id() if status == "ready" else None
-
     equivalence = retrieval.tag_equivalence(store) if tags else {}
 
     def run(active: retrieval.Filters, *, count_unembedded: bool = False) -> retrieval.Ranked:
@@ -142,6 +163,18 @@ async def search(  # noqa: PLR0917 — every parameter is an operation parameter
     ranked = run(filters, count_unembedded=True)
     total = len(ranked.order)
     page = ranked.order[offset : offset + limit]
+    allow_project_hits = bool(query.strip()) and not any(
+        (entry_type, work_status, tags, links, since, until, projects, unscoped)
+    )
+    project_ranked = (
+        retrieval.run_project_search(
+            store, query=query, query_vector=query_vector, model_id=model_id
+        )
+        if allow_project_hits
+        else retrieval.ProjectRanked(order=[], rankers={}, vector={})
+    )
+    project_total = len(project_ranked.order)
+    project_page = project_ranked.order[:PROJECT_HIT_LIMIT]
 
     relaxed_firsts: list[tuple[str, int, str]] = []
     if total == 0:
@@ -150,13 +183,19 @@ async def search(  # noqa: PLR0917 — every parameter is an operation parameter
             if found:
                 relaxed_firsts.append((name, len(found), found[0]))
     records = store.get_records([*page, *(first for _, _, first in relaxed_firsts)])
-
     hits = [_hit(records[record_id], ranked, query, engine) for record_id in page]
-    received = {
+    all_projects = {item.id: item for item in store.list_projects()}
+    project_hits = [
+        _project_hit(all_projects[project_id], project_ranked, query, engine)
+        for project_id in project_page
+        if project_id in all_projects
+    ]
+    received: dict[str, Any] = {
         "entry_type": entry_type,
         "work_status": work_status,
         "tags": tags,
-        "project": project,
+        "projects": projects,
+        "unscoped": unscoped,
         "since": since,
         "until": until,
         "links": links,
@@ -165,11 +204,20 @@ async def search(  # noqa: PLR0917 — every parameter is an operation parameter
     arguments["include_history"] = include_history
     if limit != _DEFAULT_LIMIT:
         arguments["limit"] = limit
-
     return SearchResult(
-        state=_state(status, detail, ranked.unembedded, project, total),
+        state=_state(
+            status,
+            detail,
+            ranked.unembedded,
+            [item.name for item in resolved_projects],
+            unscoped,
+            total,
+            project_total,
+        ),
         hits=hits,
         total=total,
+        project_hits=project_hits,
+        project_total=project_total,
         offset=offset,
         filters={name: value for name, value in received.items() if value},
         relaxed=[
@@ -177,7 +225,7 @@ async def search(  # noqa: PLR0917 — every parameter is an operation parameter
             for name, count, first in relaxed_firsts
         ],
         tag_aliases=_tag_aliases(equivalence, tags) if total == 0 else {},
-        next=_next_hints(arguments, hits, offset, total),
+        next=_next_hints(arguments, hits, project_hits, offset, total),
     )
 
 
@@ -202,66 +250,118 @@ def _hit(
             else []
         )
     ]
-    matched_by: list[Literal["keyword", "exact", "semantic"]] = []
-    if "keyword" in rankers:
-        matched_by.append("keyword")
-    if "exact" in rankers:
-        matched_by.append("exact")
-    if "vector" in rankers:
-        matched_by.append("semantic")
     return SearchHit(
         id=record.id,
         entry_type=record.entry_type,
         title=record.title,
-        project=record.project,
+        projects=record.projects,
         created_at=record.created_at,
         lifecycle=_lifecycle(record),
         superseded_by=record.superseded_by,
         work_status=record.work_status,
         tags=record.tags,
-        matched_by=matched_by,
+        matched_by=_matched_by(rankers),
         keyword_matches=keyword_matches,
-        excerpt=_excerpt(record, keyword_matches, vector_match, engine),
+        excerpt=_excerpt(record.title, record.body, keyword_matches, vector_match, engine),
     )
+
+
+def _project_hit(
+    project: Project,
+    ranked: retrieval.ProjectRanked,
+    query: str,
+    engine: embeddings.EmbeddingEngine,
+) -> ProjectSearchHit:
+    framing = project.current_framing
+    title = framing.title if framing is not None else ""
+    body = framing.body if framing is not None else ""
+    rankers = ranked.rankers.get(project.id, {})
+    keyword_matches = [
+        ProjectKeywordMatch(term=term, field=field)
+        for term, field in (
+            retrieval.project_keyword_matches(query, project.name, title, body)
+            if "keyword" in rankers
+            else []
+        )
+    ]
+    return ProjectSearchHit(
+        id=project.id,
+        name=project.name,
+        framing_version=framing.version if framing is not None else None,
+        framing_title=framing.title if framing is not None else None,
+        matched_by=_matched_by(rankers),
+        keyword_matches=keyword_matches,
+        excerpt=_project_excerpt(project, keyword_matches, ranked.vector.get(project.id), engine),
+        updated_at=framing.created_at if framing is not None else project.created_at,
+    )
+
+
+def _matched_by(rankers: dict[str, int]) -> list[Literal["keyword", "exact", "semantic"]]:
+    matched: list[Literal["keyword", "exact", "semantic"]] = []
+    if "keyword" in rankers:
+        matched.append("keyword")
+    if "exact" in rankers:
+        matched.append("exact")
+    if "vector" in rankers:
+        matched.append("semantic")
+    return matched
 
 
 def _lifecycle(record: Record) -> Literal["current", "superseded", "retired"]:
     if record.retired:
         return "retired"
-    if record.superseded_by is not None:
-        return "superseded"
-    return "current"
+    return "superseded" if record.superseded_by is not None else "current"
 
 
 def _excerpt(
-    record: Record,
+    title: str,
+    body_text: str,
     keyword_matches: list[KeywordMatch],
     vector_match: vector.VectorMatch | None,
     engine: embeddings.EmbeddingEngine,
 ) -> str | None:
-    body = _collapse_whitespace(record.body)
+    body = _collapse_whitespace(body_text)
     for match in keyword_matches:
-        if match.field != "body":
-            continue
-        span = retrieval.keyword_match_span(body, match.term)
-        if span is not None:
+        if match.field == "body" and (span := retrieval.keyword_match_span(body, match.term)):
             return _keyword_excerpt(body, *span)
     if vector_match is None or not body:
         return None
-    chunks = vector.chunk_texts(engine, record.title, record.body)
+    chunks = vector.chunk_texts(engine, title, body_text)
     if vector_match.chunk_index >= len(chunks):
         return None
-    passage = chunks[vector_match.chunk_index].removeprefix(f"{record.title}\n\n")
+    passage = chunks[vector_match.chunk_index].removeprefix(f"{title}\n\n")
+    return _collapse_whitespace(passage) or None
+
+
+def _project_excerpt(
+    project: Project,
+    keyword_matches: list[ProjectKeywordMatch],
+    vector_match: vector.ProjectVectorMatch | None,
+    engine: embeddings.EmbeddingEngine,
+) -> str | None:
+    framing = project.current_framing
+    if framing is None:
+        return None
+    body = _collapse_whitespace(framing.body)
+    for match in keyword_matches:
+        if match.field == "framing_body" and (
+            span := retrieval.keyword_match_span(body, match.term)
+        ):
+            return _keyword_excerpt(body, *span)
+    if vector_match is None or not body:
+        return None
+    chunks = vector.chunk_texts(engine, framing.title, framing.body)
+    if vector_match.chunk_index >= len(chunks):
+        return None
+    passage = chunks[vector_match.chunk_index].removeprefix(f"{framing.title}\n\n")
     return _collapse_whitespace(passage) or None
 
 
 def _collapse_whitespace(text: str) -> str:
-    """Replace every whitespace run with one ASCII space and strip the ends."""
     return " ".join(text.split())
 
 
 def _keyword_excerpt(text: str, match_start: int, match_end: int) -> str:
-    """A body window with up to 80 characters before the match and markers inside the cap."""
     start = max(0, match_start - _KEYWORD_LEAD_CHARS)
     start = _word_start_inward(text, start, match_start)
     left_clipped = start > 0
@@ -298,61 +398,76 @@ def _word_end_inward(text: str, match_end: int, end: int) -> int:
     return boundary if boundary >= match_end else end
 
 
-def _state(
-    status: str, detail: str, unembedded: int | None, project: str | None, total: int
+def _state(  # noqa: PLR0917 — exact state dimensions
+    status: str,
+    detail: str,
+    unembedded: int | None,
+    projects: list[str],
+    unscoped: bool,
+    total: int,
+    project_total: int,
 ) -> str:
     if status == "ready":
-        state = f"state: embeddings ready ({detail}) · {unembedded} unembedded"
+        state = f"state: embeddings ready ({detail}) · {unembedded} unembedded records"
     else:
         state = f"state: embeddings unavailable: {detail} · keyword and exact matching only"
-    if project is not None:
-        state += f" · project {project}"
-    return state + f" · {total} {'match' if total == 1 else 'matches'}"
+    if projects:
+        state += f" · projects {', '.join(projects)}"
+    if unscoped:
+        state += " · includes unscoped"
+    return state + f" · {project_total} project matches · {total} record matches"
 
 
 def _next_hints(
-    arguments: dict[str, Any], hits: list[SearchHit], offset: int, total: int
+    arguments: dict[str, Any],
+    hits: list[SearchHit],
+    project_hits: list[ProjectSearchHit],
+    offset: int,
+    total: int,
 ) -> list[str]:
-    """More results: the offset call. Otherwise the first hit's show() call. No match:
-    drop every restrictive filter and include history for one broader search; when history is
-    already included and no restrictive filter exists, say there is nothing left to broaden
-    instead of repeating the same call."""
     shown_to = offset + len(hits)
-    if total == 0:
-        had_filters = any(
-            arguments.get(name)
-            for name in (
-                "entry_type",
-                "work_status",
-                "tags",
-                "project",
-                "since",
-                "until",
-                "links",
-            )
+    if shown_to < total:
+        return [
+            f"{total - shown_to} more records",
+            render.call("search", **arguments, offset=shown_to),
+        ]
+    if hits:
+        return [render.call("show", hits[0].id)]
+    if project_hits:
+        return [render.call("prime", project=project_hits[0].id)]
+    had_filters = any(
+        arguments.get(name)
+        for name in (
+            "entry_type",
+            "work_status",
+            "tags",
+            "projects",
+            "unscoped",
+            "since",
+            "until",
+            "links",
         )
-        can_broaden = had_filters or not arguments["include_history"]
-        if not can_broaden:
-            return ["nothing left to broaden; stop"]
-        broader = render.call(
+    )
+    if not (had_filters or not arguments["include_history"]):
+        return ["nothing left to broaden; stop"]
+    return [
+        render.call(
             "search",
             query=arguments["query"],
             terms=arguments["terms"],
             include_history=True,
-        )
-        return [broader, "if nothing relevant, stop"]
-    if not hits:
-        return [render.call("search", **arguments)]
-    if shown_to < total:
-        return [f"{total - shown_to} more", render.call("search", **arguments, offset=shown_to)]
-    return [render.call("show", hits[0].id)]
+        ),
+        "if nothing relevant, stop",
+    ]
 
 
 def _tag_aliases(equivalence: dict[str, tuple[str, ...]], tags: list[str]) -> dict[str, list[str]]:
     aliases = {}
     for tag in tags:
         normal = tag.strip().lower()
-        aliases[tag] = [o for o in retrieval.expand_tags(equivalence, [normal]) if o != normal]
+        aliases[tag] = [
+            item for item in retrieval.expand_tags(equivalence, [normal]) if item != normal
+        ]
     return aliases
 
 
@@ -373,6 +488,5 @@ def _link_filter(value: str | None) -> tuple[Relation, str] | None:
         if relation == known and target.strip():
             return known, target.strip()
     raise UsageError(
-        f'links must be "<relation>:<id>" with relation one of {", ".join(RELATIONS)}, '
-        f"not {value!r}"
+        f'links must be "<relation>:<id>" with relation one of {", ".join(RELATIONS)}, not {value!r}'
     )

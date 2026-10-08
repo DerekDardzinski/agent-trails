@@ -16,11 +16,13 @@ identity for code that a later reader can check. Any repository qualifies: new o
 Brazil package, a scratch repository. Folder layout, file naming and workflow belong to the
 user and the agent, never to the store.
 
-A project is metadata: a name, a project context, and the paths the work uses, each with an
-optional label and free-text access instructions such as which AWS profile reads an `s3://`
-path. The project context is the durable information a new agent needs before working in the
-project: its long-term goal, data, environments, code, conventions and open questions. It spans
-many initiatives and sessions. Registering a project creates nothing on disk.
+A project is a stable body of work with a generated id, unique human name, optional append-only
+framing, and current paths. Framing states purpose and motivation: why the project exists, who it
+serves, long-term success, and what is out of scope. Operational knowledge belongs in paths or
+ordinary records. Each path has an optional label and access instructions such as which AWS
+profile reads an `s3://` URI. Registering a project creates nothing at those paths. Records may
+belong to zero, one or several projects, and membership changes append events without revising
+record content.
 
 ## 2. trails writes only to its own data
 

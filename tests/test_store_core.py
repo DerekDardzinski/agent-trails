@@ -32,6 +32,7 @@ def test_a_written_record_reads_back_equal_to_what_the_write_returned(store: Sto
     returned record with a later read would otherwise see a difference that is not stored.
     """
     target = _write(store, "the source")
+    project = store.write_project("mint-en-ca", "host", [], []).project
     outcome = store.write_record(
         RecordDraft(
             entry_type="result",
@@ -39,7 +40,7 @@ def test_a_written_record_reads_back_equal_to_what_the_write_returned(store: Sto
             title="  Lift estimate  ",
             body="line one\nline two",
             tags=[" cuped "],
-            project="mint-en-ca",
+            projects=[project.id],
             value={"did_estimate": -0.0041, "ci95": [-0.0093, 0.0011]},
             links=[Link(relation="cites", target_id=target)],
             artifacts=[
@@ -96,6 +97,57 @@ def test_supersedes_needs_a_reason_and_then_marks_the_old_record(store: Store) -
     assert new.links == [Link(relation="supersedes", target_id=old)]
     assert new.reason == "step 3 uses the red role"
     assert store.get_record(old).superseded_by == new.id
+
+
+def test_a_record_cannot_acquire_two_superseding_successors(store: Store) -> None:
+    """Catches a fork that leaves two successors current and hides one from superseded_by."""
+    old = _write(store, "v1")
+    second = _write(store, "v2", supersedes=old, reason="first revision")
+    current = _write(store, "v3", supersedes=second, reason="second revision")
+
+    with pytest.raises(ValidationError) as refused:
+        _write(store, "fork", supersedes=old, reason="conflicting revision")
+
+    assert str(refused.value) == (
+        f"{old} is already superseded; current version is {current}; supersede {current} instead"
+    )
+    assert {row["title"] for row in store.query("SELECT id, title FROM record ORDER BY id")} == {
+        "v1",
+        "v2",
+        "v3",
+    }
+    assert store.get_record(old).superseded_by == second
+
+
+def test_a_legacy_equal_time_fork_chooses_one_deterministic_current_tip(store: Store) -> None:
+    """Catches historical forks choosing an unstable branch or ignoring the equal-time id tie."""
+    ids = [f"note-{suffix}" for suffix in ("aaaaa", "bbbbb", "ccccc", "ddddd", "eeeee")]
+    for record_id in ids:
+        _write(store, record_id, id=record_id)
+    root, left, right, left_tip, right_tip = ids
+    moment = "2026-10-07 00:00:00.000000"
+    links = ((left, root), (right, root), (left_tip, left), (right_tip, right))
+    dolt.run_script(
+        store.db_path,
+        [
+            "START TRANSACTION",
+            *(
+                "INSERT INTO link (source_id, relation, target_id, created_at) VALUES "
+                f"('{source}', 'supersedes', '{target}', '{moment}')"
+                for source, target in links
+            ),
+            "CALL DOLT_COMMIT('-A','-m','construct historical fork fixture')",
+        ],
+    )
+
+    assert store.superseding_tip(root) == right_tip
+    with pytest.raises(ValidationError) as refused:
+        _write(store, "new fork", supersedes=root, reason="must follow current")
+
+    assert str(refused.value) == (
+        f"{root} is already superseded; current version is {right_tip}; "
+        f"supersede {right_tip} instead"
+    )
 
 
 def test_a_pre_minted_id_is_used_and_cannot_be_reused(store: Store) -> None:
@@ -353,24 +405,23 @@ def test_get_record_raises_for_an_unknown_id_and_get_records_omits_it(store: Sto
 
 
 def test_add_link_refusals_and_idempotence(store: Store) -> None:
-    """Catches a duplicate link failing on DOLT_COMMIT's nothing-to-commit, and a supersedes
-    cycle that would make every lineage walk loop."""
+    """Catches duplicate links failing on no-op commits and direct supersedes bypassing the
+    reasoned new-record path."""
     a, b = _write(store, "a"), _write(store, "b")
 
     with pytest.raises(ValidationError):
         store.add_link(a, "cites", a)
     with pytest.raises(RecordNotFoundError):
         store.add_link(a, "cites", "rec-0000000000000000")
+    with pytest.raises(ValidationError, match="does not write supersedes"):
+        store.add_link(b, "supersedes", a)
 
     first = store.add_link(a, "builds_on", b)
     again = store.add_link(a, "builds_on", b)
-    store.add_link(b, "supersedes", a)
-    with pytest.raises(ValidationError, match="cycle"):
-        store.add_link(a, "supersedes", b)
 
     assert first == again == Link(relation="builds_on", target_id=b)
     assert store.get_record(a).links == [Link(relation="builds_on", target_id=b)]
-    assert store.get_record(a).superseded_by == b
+    assert store.get_record(a).superseded_by is None
 
 
 def test_retire_and_stamp_verified_reach_the_record(store: Store) -> None:
@@ -413,20 +464,20 @@ def test_project_paths_are_added_updated_and_removed_in_place(store: Store) -> N
     code = ProjectPath(path="/w/code", label="analysis code", host="h")
     data = ProjectPath(path="s3://bucket/mint/", access_instructions="aws --profile ro")
 
-    first, created = store.write_project("mint", "h", [code, data], [])
+    first = store.write_project("mint", "h", [code, data], [])
     relabelled = code.model_copy(update={"label": "scripts"})
-    second, again = store.write_project("mint", "h", [relabelled], ["s3://bucket/mint/"])
-    unchanged, _ = store.write_project("mint", "h", [relabelled], ["/not/registered"])
+    second = store.write_project("mint", "h", [relabelled], ["s3://bucket/mint/"])
+    unchanged = store.write_project("mint", "h", [relabelled], ["/not/registered"])
     with pytest.raises(ValidationError, match="both in paths and in remove_paths"):
         store.write_project("mint", "h", [code], ["/w/code"])
 
-    assert (created, again) == (True, False)
-    assert first.paths == [code, data]
-    assert second.paths == [relabelled]
-    assert unchanged == second
-    assert store.get_project("mint") == second
+    assert (first.created, second.created) == (True, False)
+    assert first.project.paths == [code, data]
+    assert second.project.paths == [relabelled]
+    assert unchanged.project == second.project
+    assert store.get_project("mint") == second.project
     assert store.get_project("nope") is None
-    assert store.list_projects() == [second]
+    assert store.list_projects() == [second.project]
 
 
 def test_project_paths_differing_only_in_case_are_two_paths(store: Store) -> None:
@@ -436,11 +487,15 @@ def test_project_paths_differing_only_in_case_are_two_paths(store: Store) -> Non
     upper, lower = ProjectPath(path="s3://bucket/Data"), ProjectPath(path="s3://bucket/data")
 
     store.write_project("p", "h", [upper], [])
-    both, _ = store.write_project("p", "h", [lower, ProjectPath(path="/tmp/A")], [])
-    removed, _ = store.write_project("p", "h", [], ["s3://bucket/data"])
+    both = store.write_project("p", "h", [lower, ProjectPath(path="/tmp/A")], [])
+    removed = store.write_project("p", "h", [], ["s3://bucket/data"])
 
-    assert {item.path for item in both.paths} == {"s3://bucket/Data", "s3://bucket/data", "/tmp/A"}
-    assert {item.path for item in removed.paths} == {"s3://bucket/Data", "/tmp/A"}
+    assert {item.path for item in both.project.paths} == {
+        "s3://bucket/Data",
+        "s3://bucket/data",
+        "/tmp/A",
+    }
+    assert {item.path for item in removed.project.paths} == {"s3://bucket/Data", "/tmp/A"}
 
 
 def test_a_possible_secret_is_reported_without_its_text_and_does_not_stop_the_write(

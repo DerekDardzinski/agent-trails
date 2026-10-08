@@ -25,7 +25,7 @@ async def export(
 ) -> ExportResult:
     """Write a record to a Markdown file with a TOML header, so you can edit it with your file tools and publish it back with publish(from_file=path) after adding a reason line to the header.
 
-    Use this when: you need to change part of a long record, such as one step of a procedure or the project context.
+    Use this when: you need to change part of a long record, such as one step of a procedure.
 
     Use instead: show, to only read it.
 

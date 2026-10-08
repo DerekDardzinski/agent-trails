@@ -1,4 +1,4 @@
-"""Tests for the agent's current-state `prime` view against real Dolt."""
+"""Tests for whole-store and project-scoped prime views."""
 
 from __future__ import annotations
 
@@ -6,19 +6,22 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-from trails.models import Link, RecordDraft
+from trails.models import Link, ProjectFramingDraft, RecordDraft
 from trails.ops import context
 from trails.ops.prime import prime
-from trails.ops.register_project import register_project
 from trails.store import Store
-from trails.vocab import PROJECT_CONTEXT_TEMPLATE
 
 
-def _call(store: Store, operation: Any, **arguments: Any) -> Any:
+def _call(store: Store, **arguments: Any) -> Any:
     async def go() -> Any:
-        return await context.bind(operation, lambda: store.db_path)(**arguments)
+        return await context.bind(prime, lambda: store.db_path)(**arguments)
 
     return asyncio.run(go())
+
+
+def _project(store: Store, name: str, title: str | None = None) -> str:
+    framing = ProjectFramingDraft(title=title, body=f"Purpose of {name}.") if title else None
+    return store.write_project(name, "host", [], [], framing=framing).project.id
 
 
 def _write(store: Store, title: str, body: str = "", **fields: Any) -> str:
@@ -27,181 +30,136 @@ def _write(store: Store, title: str, body: str = "", **fields: Any) -> str:
     return store.write_record(RecordDraft(title=title, body=body, **fields)).record.id
 
 
-def test_registered_project_context_is_labeled_and_template_body_is_not_printed(
-    store: Store,
-) -> None:
-    """Catches the project context using the old name or positional fields, or six empty
-    template headings consuming the orientation response."""
-    registered = _call(store, register_project, name="mint")
+def test_whole_store_prime_is_a_project_index_with_unscoped_count(store: Store) -> None:
+    """Catches whole prime dumping record bodies or losing a project with no framing."""
+    alpha = _project(store, "Alpha", "Reduce latency")
+    beta = _project(store, "Beta")
+    _write(store, "Open", entry_type="hypothesis", work_status="open", projects=[alpha])
+    _write(store, "Closed", projects=[alpha, beta])
+    _write(store, "Loose")
 
-    result = _call(store, prime, project="mint")
+    result = _call(store)
     text = result.render_text()
 
-    assert registered.project_context_created is True
-    assert result.project_contexts[0].id == registered.project_context_id
-    assert result.project_contexts[0].title == "mint"
-    assert result.project_contexts[0].entry_type == "project-context"
-    assert result.project_contexts[0].work_status == "open"
-    assert result.project_contexts[0].tags == []
-    assert text.splitlines()[:2] == [
-        "state: project mint · 1 current records · 0 replaced by newer versions · 0 retired",
-        "project paths: none",
+    assert result.project is None
+    assert result.unscoped_count == 1
+    assert [(item.project.id, item.record_count, item.open_count) for item in result.projects] == [
+        (alpha, 2, 1),
+        (beta, 1, 0),
     ]
-    assert "project context:\n  project: mint" in text
-    assert f"  record id: {registered.project_context_id}" in text
-    assert f'  read full record: show("{registered.project_context_id}")' in text
-    assert "  template only, nothing recorded" in text
-    assert "## Goal" not in text
-    assert "brief" not in text.lower()
+    assert result.projects[0].framing_title == "Reduce latency"
+    assert result.projects[1].framing_title is None
+    assert "Purpose of Alpha" not in text
+    assert f'prime(project="{alpha}")' in text
 
 
-def test_prime_lists_only_current_records_grouped_by_kind_and_counts_the_rest(store: Store) -> None:
-    """Catches a replaced or retired record presented as current, a body printed for an
-    ordinary record, or groups not ordered newest first."""
-    store.write_project("mint", "host", [], [])
-    old_context = _write(
-        store, "old", PROJECT_CONTEXT_TEMPLATE, entry_type="project-context", project="mint"
+def test_whole_store_prime_pages_projects_without_hiding_total(store: Store) -> None:
+    first = _project(store, "Alpha")
+    second = _project(store, "Beta")
+
+    page_one = _call(store, limit=1)
+    page_two = _call(store, limit=1, offset=1)
+
+    assert page_one.project_total == page_two.project_total == 2
+    assert [item.project.id for item in page_one.projects] == [first]
+    assert [item.project.id for item in page_two.projects] == [second]
+    assert "prime(limit=1, offset=1)" in page_one.render_text()
+
+
+def test_project_prime_shows_full_current_framing_and_problem_bodies(store: Store) -> None:
+    """Catches scoped prime omitting framing revision guidance or printing ordinary bodies."""
+    project = _project(store, "Alpha", "Initial frame")
+    store.write_project(
+        "Alpha",
+        "host",
+        [],
+        [],
+        framing=ProjectFramingDraft(title="Current frame", body="Why Alpha exists."),
+        base_version=1,
+        reason="Clarified purpose.",
     )
-    current_context = _write(
+    problem = _write(
         store,
-        "mint",
-        "## Goal\nMeasure ingest latency.",
-        entry_type="project-context",
-        project="mint",
-        supersedes=old_context,
-        reason="filled in the context",
+        "Reduce variance",
+        "Full objective body.",
+        entry_type="problem-statement",
+        work_status="open",
+        projects=[project],
     )
-    older = _write(store, "Use 10-item batches", "old body", entry_type="decision", project="mint")
-    newer = _write(store, "Use 25-item batches", "new body", entry_type="decision", project="mint")
-    retired = _write(store, "Wrong fact", "retired body", entry_type="fact", project="mint")
-    store.retire(retired, "wrong")
+    note = _write(store, "Operational note", "Do not print this body.", projects=[project])
 
-    result = _call(store, prime, project="mint")
+    result = _call(store, project="Alpha")
     text = result.render_text()
 
-    assert (result.current_count, result.replaced_count, result.retired_count) == (3, 1, 1)
-    assert [entry.record.id for entry in result.groups["decision"]] == [newer, older]
-    assert result.project_contexts[0].id == current_context
-    assert "## Goal\nMeasure ingest latency." in text
-    assert "old body" not in text and "new body" not in text and "retired body" not in text
-    assert old_context not in text.split("decisions", 1)[-1]
-    assert f"  {newer}  Use 25-item batches" in text
-    assert text.index(newer) < text.index(older)
+    assert result.project is not None and result.project.id == project
+    assert result.framing is not None and result.framing.version == 2
+    assert [record.id for record in result.problem_statements] == [problem]
+    assert [entry.record.id for entry in result.groups["note"]] == [note]
+    assert "Why Alpha exists." in text
+    assert "Full objective body." in text
+    assert "Do not print this body." not in text
+    assert f'update_project(project="{project}"' in text
+    assert 'base_version=2, reason="..."' in text
+
+
+def test_project_prime_counts_current_replaced_and_retired_members(store: Store) -> None:
+    project = _project(store, "Alpha")
+    old = _write(store, "Old", projects=[project])
+    _write(
+        store,
+        "New",
+        projects=[project],
+        supersedes=old,
+        reason="Replaced.",
+    )
+    retired = _write(store, "Retired", projects=[project])
+    store.retire(retired, "Wrong.")
+
+    result = _call(store, project=project)
+
+    assert (result.current_count, result.replaced_count, result.retired_count) == (1, 1, 1)
 
 
 def test_prime_explains_result_hypothesis_and_verification_connections(store: Store) -> None:
-    """Catches cites being treated as evidence, a result's replaced target hidden, or a
-    verification and replacement relation missing from the current-state view."""
-    old_hypothesis = _write(store, "Hypothesis: old", entry_type="hypothesis", project="mint")
+    project = _project(store, "Alpha")
     hypothesis = _write(
         store,
-        "Hypothesis: revised",
+        "Hypothesis",
         entry_type="hypothesis",
-        project="mint",
-        supersedes=old_hypothesis,
-        reason="changed threshold",
+        projects=[project],
     )
-    measured_old = _write(
+    result_id = _write(
         store,
-        "Result: old threshold",
+        "Result",
         entry_type="result",
-        project="mint",
-        links=[Link(relation="builds_on", target_id=old_hypothesis)],
-    )
-    cited = _write(
-        store,
-        "Result: related observation",
-        entry_type="result",
-        project="mint",
-        links=[Link(relation="cites", target_id=hypothesis)],
+        projects=[project],
+        links=[Link(relation="builds_on", target_id=hypothesis)],
     )
     verification = _write(
         store,
-        "Verification: rerun",
+        "Verification",
         entry_type="verification",
-        project="mint",
-        links=[Link(relation="builds_on", target_id=measured_old)],
+        projects=[project],
+        links=[Link(relation="builds_on", target_id=result_id)],
     )
 
-    text = _call(store, prime, project="mint").render_text()
+    text = _call(store, project=project).render_text()
 
-    assert (
-        f"{hypothesis}  Hypothesis: revised · work closed · no result built on this version" in text
-    )
-    assert f"replaces {old_hypothesis}" in text
-    assert f"cited by: {cited} (result; cites does not count as a test, use builds_on)" in text
-    assert (
-        f"{measured_old}  Result: old threshold · work closed · verified by {verification}" in text
-    )
-    assert f"builds on {old_hypothesis} (hypothesis, work closed, replaced by {hypothesis})" in text
-    assert (
-        f"{cited}  Result: related observation · work closed · not verified · builds on nothing"
-        in text
-    )
-    assert f'  inspect replacement history: lineage("{hypothesis}")' in text
+    assert f"results built on this version: {result_id}" in text
+    assert f"verified by {verification}" in text
 
 
-def test_prime_includes_current_problem_statements_that_cite_the_project_context(
-    store: Store,
-) -> None:
-    """Catches a cross-project problem statement omitted, or its body reduced to an index
-    line when framing must be read before work starts."""
-    store.write_project("mint", "host", [], [])
-    project_context = _write(
-        store, "mint", "## Goal\nMeasure lift", entry_type="project-context", project="mint"
-    )
-    local = _write(
-        store,
-        "Reduce variance",
-        "## Objective\nCut variance.",
-        entry_type="problem-statement",
-        project="mint",
-    )
-    shared = _write(
-        store,
-        "Shared retrieval change",
-        "## Objective\nImprove both projects.",
-        entry_type="problem-statement",
-        project="everest",
-        links=[Link(relation="cites", target_id=project_context)],
-    )
-    old = _write(store, "Old framing", "old body", entry_type="problem-statement", project="mint")
-    new = _write(
-        store,
-        "New framing",
-        "new body",
-        entry_type="problem-statement",
-        project="mint",
-        supersedes=old,
-        reason="narrowed",
-    )
+def test_whole_prime_last_activity_includes_membership_events(store: Store) -> None:
+    project = _project(store, "Alpha")
+    record = _write(store, "Record")
+    before = _call(store).projects[0].last_activity
+    store.set_projects(record, [project], [], "Grouped.")
+    after = _call(store).projects[0].last_activity
 
-    result = _call(store, prime, project="mint")
-    text = result.render_text()
-
-    assert [record.id for record in result.problem_statements] == [new, shared, local]
-    assert "    ## Objective\n    Improve both projects." in text
-    assert "old body" not in text
-
-
-def test_prime_for_an_unregistered_project_says_so_and_keeps_its_current_records(
-    store: Store,
-) -> None:
-    """Catches a misspelled project reading as empty when records already use that name."""
-    fact = _write(store, "Known fact", entry_type="fact", project="ghost")
-
-    result = _call(store, prime, project="ghost")
-    lines = result.render_text().splitlines()
-
-    assert result.registered is False
-    assert lines[1] == (
-        'project ghost is not registered: register_project(name="ghost", paths=[...])'
-    )
-    assert f"  {fact}  Known fact · work closed" in lines
+    assert after > before
 
 
 def test_prime_on_an_unopenable_store_reports_it_as_data(tmp_path: Path) -> None:
-    """Catches startup raising instead of reporting the store error and a next call."""
     not_a_directory = tmp_path / "db"
     not_a_directory.write_text("")
 
@@ -214,42 +172,3 @@ def test_prime_on_an_unopenable_store_reports_it_as_data(tmp_path: Path) -> None
         f"state: store unavailable: cannot create a database at {not_a_directory}"
     )
     assert lines[1:] == ["Next: version()"]
-
-
-def test_whole_store_prime_labels_each_problem_statements_project(store: Store) -> None:
-    """Catches two projects' same-titled framing becoming indistinguishable in the whole-store
-    orientation view."""
-    alpha = _write(
-        store,
-        "Same objective",
-        "alpha body",
-        entry_type="problem-statement",
-        project="alpha",
-    )
-    beta = _write(
-        store,
-        "Same objective",
-        "beta body",
-        entry_type="problem-statement",
-        project="beta",
-    )
-
-    text = _call(store, prime).render_text()
-
-    assert f"project: beta\n  record id: {beta}\n  title: Same objective" in text
-    assert f"project: alpha\n  record id: {alpha}\n  title: Same objective" in text
-
-
-def test_prime_displays_work_status_for_every_current_record(store: Store) -> None:
-    """Catches an agent needing a second query to distinguish open from closed current work."""
-    open_id = _write(
-        store, "Needs another run", entry_type="hypothesis", work_status="open", project="mint"
-    )
-    closed_id = _write(
-        store, "Recorded result", entry_type="result", work_status="closed", project="mint"
-    )
-
-    text = _call(store, prime, project="mint").render_text()
-
-    assert f"{open_id}  Needs another run · work open" in text
-    assert f"{closed_id}  Recorded result · work closed" in text

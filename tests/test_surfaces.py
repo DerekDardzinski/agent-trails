@@ -336,7 +336,7 @@ def test_real_search_has_structural_parity_between_cli_and_mcp(
             work_status="closed",
             title="Batching cut p99 latency",
             body="The measured p99 fell after batching.",
-            project="ingest",
+            projects=[],
         )
     ).record
 
@@ -358,7 +358,7 @@ def test_real_search_has_structural_parity_between_cli_and_mcp(
         "id",
         "entry_type",
         "title",
-        "project",
+        "projects",
         "created_at",
         "lifecycle",
         "superseded_by",
