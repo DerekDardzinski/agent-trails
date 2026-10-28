@@ -10,7 +10,11 @@ from pydantic import Field
 from trails import dolt
 from trails.errors import ValidationError
 from trails.ops import context
-from trails.ops._guidance import result_hypothesis_link_notes
+from trails.ops._guidance import (
+    contradiction_notes,
+    result_hypothesis_link_notes,
+    superseded_target_warnings,
+)
 from trails.ops._marks import Operation
 from trails.ops._write_types import LinkResult
 from trails.vocab import Relation
@@ -29,7 +33,7 @@ async def link(
 
     Use instead: publish(links=...) when writing the new record; publish(supersedes=..., reason=...) to replace a record, which link refuses.
 
-    Returns: the link and any note explaining that cites or contradicts does not count as a result built on a hypothesis. Adding a link that already exists changes nothing.
+    Returns: the link; any note explaining that cites or contradicts does not count as a result built on a hypothesis; for contradicts on a current record, the calls that correct or retire it; and a warning naming the current version when the target is superseded. Adding a link that already exists changes nothing.
     """
     # `relation` admits all four values so that supersedes reaches this refusal, which names
     # the call to make, instead of a schema rejection that names nothing.
@@ -42,21 +46,30 @@ async def link(
     with dolt.exclusive(store.db_path):
         records = store.get_records([source_id, target_id])
         stored = store.add_link(source_id, relation, target_id)
-    source = records.get(source_id)
-    target = records.get(target_id)
-    notes = (
-        result_hypothesis_link_notes(
+        source = records.get(source_id)
+        target = records.get(target_id)
+        tip = (
+            store.superseding_tip(target_id)
+            if target is not None and target.superseded_by is not None
+            else None
+        )
+    notes: list[str] = []
+    warnings: list[str] = []
+    if source is not None and target is not None:
+        notes = result_hypothesis_link_notes(
             source_id,
             source.entry_type,
             [*source.links, stored],
             {target_id: target},
         )
-        if source is not None and target is not None
-        else []
-    )
+        notes += contradiction_notes(source_id, [stored], {target_id: target})
+        warnings = superseded_target_warnings(
+            source_id, [stored], {target_id: target}, {target_id: tip} if tip else {}
+        )
     return LinkResult(
         source_id=source_id,
         relation=stored.relation,
         target_id=stored.target_id,
         notes=notes,
+        warnings=warnings,
     )

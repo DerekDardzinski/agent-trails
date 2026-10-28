@@ -41,6 +41,34 @@ def repo_id(path: Path) -> str | None:
     return str(Path(path, common).resolve())
 
 
+def containing_toplevel(path: Path) -> Path | None:
+    """The top level of the working tree that holds `path`, or None outside any repository.
+
+    `path` need not exist: the nearest existing ancestor directory is asked, so a file that
+    was deleted is still placed in the repository it lived in. Inside a linked worktree this
+    is the worktree, which is what a capture of that worktree records as its top.
+    """
+    probe = path
+    while not probe.is_dir():
+        if probe.parent == probe:
+            return None
+        probe = probe.parent
+    top = _git(probe, "rev-parse", "--show-toplevel")
+    return Path(top).resolve() if top else None
+
+
+def is_ignored(top: Path, path: Path) -> bool:
+    """Whether `path` is untracked and matched by git's ignore rules in `top`, so a capture,
+    which takes untracked files with `--exclude-standard`, would leave it out. A tracked file
+    is never ignored."""
+    completed = subprocess.run(
+        ["git", "-C", str(top), "check-ignore", "-q", str(path)],
+        capture_output=True,
+        check=False,
+    )
+    return completed.returncode == 0
+
+
 def pin_commit(store: Path, ref: str, sha: str) -> None:
     """Point `ref` at `sha` in the capture store so gc cannot reap it.
 

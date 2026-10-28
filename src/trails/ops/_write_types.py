@@ -75,13 +75,15 @@ class LinkResult(RenderedResult):
     relation: Relation
     target_id: str
     notes: list[str]
+    warnings: list[str]
 
     def render_text(self) -> str:
-        """Confirmation, notes, then the show() call for the source record."""
+        """Confirmation, notes, warnings, then the show() call for the source record."""
         return "\n".join(
             [
                 f"linked {self.source_id} {self.relation} {self.target_id}",
                 *(f"note: {note}" for note in self.notes),
+                *(f"warning: {warning}" for warning in self.warnings),
                 _next_show(self.source_id),
             ]
         )

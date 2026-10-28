@@ -175,6 +175,7 @@ class PrimeEntry(BaseModel):
     builds_on: list[Record]
     incoming_results: list[PrimeRelation]
     verifications: list[Record]
+    contradicted_by: list[Record]  # current records of any type that contradict this one
 
 
 class ProjectIndexEntry(BaseModel):

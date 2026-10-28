@@ -3,19 +3,28 @@
 NOTE: no `from __future__ import annotations` in this package. See `ops/__init__.py`.
 """
 
+import json
 from pathlib import Path
 from typing import Annotated, Any
 
 from pydantic import Field
 
-from trails import capture, dolt, engine as engine_seam, gitprobe, vector
+from trails import capture, dolt, engine as engine_seam, gitprobe, retrieval, vector
 from trails.errors import RecordNotFoundError, ValidationError
 from trails.models import ArtifactRef, Link, Record, RecordDraft
 from trails.ops import context
-from trails.ops._guidance import result_hypothesis_link_notes
+from trails.ops._guidance import (
+    CapturedRepo,
+    contradiction_notes,
+    repoint_notes,
+    result_hypothesis_link_notes,
+    superseded_target_warnings,
+    uncaptured_location_warnings,
+)
 from trails.ops._marks import Operation
 from trails.ops._write_types import PublishResult
 from trails.record_file import from_markdown
+from trails.store import Store
 from trails.vocab import EntryType, WorkStatus
 
 OPERATION = Operation(toolset="agent", read_only=False, destructive=False, idempotent=False)
@@ -89,9 +98,10 @@ async def publish(  # noqa: PLR0912, PLR0915, PLR0917 — operation orchestratio
             description=(
                 'List of {"relation": ..., "target_id": ...} from this new record. builds_on: '
                 "this record builds on the target (a result built on a hypothesis, a "
-                "verification of a result). contradicts: this record conflicts with the "
-                "target. cites: the target is a source. Use supersedes, not links, to replace "
-                "a record."
+                "verification of a result). contradicts: this record conflicts with or "
+                "corrects the target, including a correction of a number or a cause; prime "
+                "shows it on the target. cites: the target is a source. Use supersedes, not "
+                "links, to replace a record."
             )
         ),
     ] = [],  # noqa: B006 — contracted default; never mutated
@@ -113,7 +123,10 @@ async def publish(  # noqa: PLR0912, PLR0915, PLR0917 — operation orchestratio
             description=(
                 "Git repositories whose full working tree, uncommitted and untracked files "
                 "included, is captured as a pinned commit without changing your files or "
-                "index. Pass every repository whose code produced this record. Captured code "
+                "index. Pass every repository whose code produced this record. Write analysis "
+                "scripts inside a git repository, not in /tmp or another temporary directory: "
+                "trails captures code only from repos, and publish warns about a script it "
+                "could not capture. Captured code "
                 "is not carried into a superseding record; pass repos again when publishing a "
                 "revision of a result. Each entry must be a different repository; a "
                 "repository and its own linked worktree cannot be captured in one publish. A "
@@ -254,6 +267,13 @@ async def publish(  # noqa: PLR0912, PLR0915, PLR0917 — operation orchestratio
                 f"{draft.supersedes} is already superseded; current version is {current}; "
                 f"supersede {current} instead"
             )
+    # Read before the write, so nothing after the durable point has to read the store.
+    tips = {
+        target.id: store.superseding_tip(target.id) or str(target.superseded_by)
+        for target in link_targets.values()
+        if target.superseded_by is not None
+    }
+    repoint = _repoint_sources(store, draft.supersedes) if draft.supersedes else ([], [])
 
     repo_paths = _distinct_repos(repos)
     capture_store = capture.store_path(store.db_path)
@@ -308,6 +328,24 @@ async def publish(  # noqa: PLR0912, PLR0915, PLR0917 — operation orchestratio
             record_id, outcome.record.entry_type, outcome.record.links, link_targets
         )
     )
+    notes.extend(contradiction_notes(record_id, outcome.record.links, link_targets))
+    warnings.extend(superseded_target_warnings(record_id, outcome.record.links, link_targets, tips))
+    if replaced is not None and replaced.entry_type == "problem-statement":
+        notes.extend(repoint_notes(record_id, *repoint))
+    try:
+        warnings.extend(
+            uncaptured_location_warnings(
+                record_id,
+                outcome.record.artifacts,
+                [outcome.record.body, json.dumps(outcome.record.value or {})],
+                [
+                    CapturedRepo(top=plan.top.resolve(), exclude=tuple(plan.exclude))
+                    for plan in plans
+                ],
+            )
+        )
+    except OSError as exc:  # git could not run; the record is durable, so this cannot raise
+        warnings.append(f"could not check where this record's artifacts live: {exc}")
 
     # THE RECORD IS DURABLE from here, so nothing below may raise: an exception would hide a
     # successful write and invite a retry that duplicates it. Broad on purpose, because model
@@ -358,6 +396,39 @@ def _distinct_repos(repos: list[str]) -> list[Path]:
             )
         seen[common] = path
     return paths
+
+
+def _repoint_sources(store: Store, replaced_id: str) -> tuple[list[str], list[str]]:
+    """The replaced record and its earlier versions, and the current records that build on
+    any of them, in link-creation order."""
+    chain = [replaced_id]
+    found = store.get_records(chain)
+    current = found.get(replaced_id)
+    while current is not None:
+        earlier = next(
+            (link.target_id for link in current.links if link.relation == "supersedes"), None
+        )
+        if earlier is None or earlier in chain:
+            break
+        chain.append(earlier)
+        current = store.get_records([earlier]).get(earlier)
+    incoming = retrieval.incoming_links_many(store, chain)
+    source_ids = list(
+        dict.fromkeys(
+            source
+            for target in chain
+            for relation, source in incoming.get(target, [])
+            if relation == "builds_on"
+        )
+    )
+    sources = store.get_records(source_ids)
+    return chain, [
+        source
+        for source in source_ids
+        if source in sources
+        and sources[source].superseded_by is None
+        and not sources[source].retired
+    ]
 
 
 def _supersession_notes(replaced: Record | None) -> list[str]:

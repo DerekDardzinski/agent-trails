@@ -45,7 +45,7 @@ def reachability(ref: ArtifactRef, *, verify: bool) -> Reachability:
     "not checked: location is not a local path". Never raises for a missing or unreadable
     file; that is a status.
     """
-    local = _local_path(ref.location)
+    local = local_path(ref.location)
     if local is None:
         return Reachability(status="unresolvable", path=None, detail=NOT_LOCAL)
     return _check_file(local, ref.digest if verify else None, compared=verify or ref.digest is None)
@@ -76,7 +76,7 @@ def code_reachability(capture: CodeCapture, store: Path) -> Reachability:
     )
 
 
-def _local_path(location: str) -> Path | None:
+def local_path(location: str) -> Path | None:
     """The location as a local path, or None when it is a URI, a query or free text.
 
     Local means absolute or `~`-relative with no URI scheme. A relative path is not local,

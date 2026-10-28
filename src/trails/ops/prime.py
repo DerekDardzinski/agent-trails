@@ -170,6 +170,11 @@ def _entry(
             for relation, source in sources
             if source.entry_type == "verification" and relation == "builds_on"
         ],
+        contradicted_by=list(
+            {
+                source.id: source for relation, source in sources if relation == "contradicts"
+            }.values()
+        ),
     )
 
 

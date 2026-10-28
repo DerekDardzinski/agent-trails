@@ -489,6 +489,7 @@ def _prime_entry_lines(kind: str, entry: PrimeEntry) -> list[str]:
     if replaced := _replaces(record):
         facts.append(f"replaces {replaced}")
     lines = [f"  {record.id}  {record.title} · " + " · ".join(facts)]
+    listed: set[str] = set()
     if kind == "hypothesis":
         for link in entry.incoming_results:
             if link.relation in {"cites", "contradicts"}:
@@ -496,6 +497,11 @@ def _prime_entry_lines(kind: str, entry: PrimeEntry) -> list[str]:
                 lines.append(
                     f"    {verb}: {link.record.id} (result; {link.relation} does not count as a test, use builds_on)"
                 )
+                if link.relation == "contradicts":
+                    listed.add(link.record.id)
+    for source in entry.contradicted_by:
+        if source.id not in listed:
+            lines.append(f"    contradicted by: {source.id} ({source.entry_type}) {source.title}")
     return lines
 
 

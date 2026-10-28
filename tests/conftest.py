@@ -94,3 +94,15 @@ def prevent_implicit_cli_model_download(monkeypatch: pytest.MonkeyPatch) -> None
     # through it. Patching anywhere else would silently stop working — the operations would
     # reach the real engine and the default gate would start downloading a model.
     monkeypatch.setattr(engine_seam, "build_engine", lambda: FakeEngine(available=False))
+
+
+@pytest.fixture(autouse=True)
+def no_temporary_roots_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every pytest `tmp_path` lies under the OS temp directory, so with the real roots every
+    artifact and repository a test creates would draw a temporary-directory warning, and
+    tests that assert an exact warning list would fail for a reason unrelated to them. Tests
+    of that warning patch `trails.locations.temporary_roots` to a root of their own, and one
+    test checks the real roots directly."""
+    from trails import locations
+
+    monkeypatch.setattr(locations, "temporary_roots", lambda: ())
