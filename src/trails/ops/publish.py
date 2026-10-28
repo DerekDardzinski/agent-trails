@@ -11,6 +11,7 @@ from pydantic import Field
 
 from trails import capture, dolt, engine as engine_seam, gitprobe, retrieval, vector
 from trails.errors import RecordNotFoundError, ValidationError
+from trails.locations import safe_resolve
 from trails.models import ArtifactRef, Link, Record, RecordDraft
 from trails.ops import context
 from trails.ops._guidance import (
@@ -256,9 +257,10 @@ async def publish(  # noqa: PLR0912, PLR0915, PLR0917 — operation orchestratio
     missing_targets = [target for target in target_ids if target not in link_targets]
     if missing_targets:
         raise ValidationError(f"no existing record has id {', '.join(missing_targets)}")
+    to_replace: Record | None = None
     if draft.supersedes is not None:
         try:
-            store.get_record(draft.supersedes)
+            to_replace = store.get_record(draft.supersedes)
         except RecordNotFoundError as exc:
             raise ValidationError(f"no existing record has id {draft.supersedes}") from exc
         current = store.superseding_tip(draft.supersedes)
@@ -273,7 +275,11 @@ async def publish(  # noqa: PLR0912, PLR0915, PLR0917 — operation orchestratio
         for target in link_targets.values()
         if target.superseded_by is not None
     }
-    repoint = _repoint_sources(store, draft.supersedes) if draft.supersedes else ([], [])
+    repoint = (
+        _repoint_sources(store, to_replace)
+        if to_replace is not None and to_replace.entry_type == "problem-statement"
+        else ([], [])
+    )
 
     repo_paths = _distinct_repos(repos)
     capture_store = capture.store_path(store.db_path)
@@ -315,6 +321,8 @@ async def publish(  # noqa: PLR0912, PLR0915, PLR0917 — operation orchestratio
         if plans and record_id is not None and record_id not in store.get_records([record_id]):
             capture.discard_unpublished_refs(capture_store, record_id)
         raise
+    # THE RECORD IS DURABLE from here, so nothing below may raise: an exception would hide a
+    # successful write and invite a retry that duplicates it.
     record_id = outcome.record.id
     warnings = [
         f"possible secret: {finding.detector} in {finding.field} line {finding.line}"
@@ -328,28 +336,37 @@ async def publish(  # noqa: PLR0912, PLR0915, PLR0917 — operation orchestratio
             record_id, outcome.record.entry_type, outcome.record.links, link_targets
         )
     )
-    notes.extend(contradiction_notes(record_id, outcome.record.links, link_targets))
-    warnings.extend(superseded_target_warnings(record_id, outcome.record.links, link_targets, tips))
-    if replaced is not None and replaced.entry_type == "problem-statement":
-        notes.extend(repoint_notes(record_id, *repoint))
+    # Guidance only, so broad on purpose: path resolution raises RuntimeError on a symlink
+    # loop, git may be missing, and none of it may cost the agent the confirmation of a write.
     try:
+        notes.extend(
+            contradiction_notes(
+                record_id, outcome.record.links, link_targets, superseded_now=draft.supersedes
+            )
+        )
+        warnings.extend(
+            superseded_target_warnings(record_id, outcome.record.links, link_targets, tips)
+        )
+        notes.extend(repoint_notes(record_id, *repoint))
         warnings.extend(
             uncaptured_location_warnings(
                 record_id,
                 outcome.record.artifacts,
-                [outcome.record.body, json.dumps(outcome.record.value or {})],
                 [
-                    CapturedRepo(top=plan.top.resolve(), exclude=tuple(plan.exclude))
+                    outcome.record.body,
+                    json.dumps(outcome.record.value or {}, ensure_ascii=False),
+                ],
+                [
+                    CapturedRepo(top=safe_resolve(plan.top), exclude=tuple(plan.exclude))
                     for plan in plans
                 ],
             )
         )
-    except OSError as exc:  # git could not run; the record is durable, so this cannot raise
-        warnings.append(f"could not check where this record's artifacts live: {exc}")
+    except Exception as exc:
+        warnings.append(f"the record was written, but checking its links and paths failed: {exc}")
 
-    # THE RECORD IS DURABLE from here, so nothing below may raise: an exception would hide a
-    # successful write and invite a retry that duplicates it. Broad on purpose, because model
-    # download and inference raise types owned by urllib, onnxruntime and tokenizers.
+    # Broad on purpose, because model download and inference raise types owned by urllib,
+    # onnxruntime and tokenizers.
     embedded = False
     try:
         engine = engine_seam.build_engine()
@@ -398,12 +415,11 @@ def _distinct_repos(repos: list[str]) -> list[Path]:
     return paths
 
 
-def _repoint_sources(store: Store, replaced_id: str) -> tuple[list[str], list[str]]:
+def _repoint_sources(store: Store, replaced: Record) -> tuple[list[str], list[str]]:
     """The replaced record and its earlier versions, and the current records that build on
-    any of them, in link-creation order."""
-    chain = [replaced_id]
-    found = store.get_records(chain)
-    current = found.get(replaced_id)
+    any of them, in link-creation order. One read per earlier version: chains are short."""
+    chain = [replaced.id]
+    current: Record | None = replaced
     while current is not None:
         earlier = next(
             (link.target_id for link in current.links if link.relation == "supersedes"), None

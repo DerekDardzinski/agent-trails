@@ -90,6 +90,7 @@ async def prime(
                 replaced_count=0,
                 retired_count=0,
                 problem_statements=[],
+                problem_statement_contradicted_by={},
                 groups={},
                 store_error=None,
             )
@@ -100,7 +101,7 @@ async def prime(
             raise AssertionError("unreachable")
         seen = retrieval.overview(store, registered.id)
         records = store.get_records([*seen.current, *seen.problem_statements])
-        incoming = retrieval.incoming_links_many(store, seen.current)
+        incoming = retrieval.incoming_links_many(store, [*seen.current, *seen.problem_statements])
         incoming_ids = [source for links in incoming.values() for _relation, source in links]
         target_ids = [
             link.target_id
@@ -136,6 +137,16 @@ async def prime(
         replaced_count=seen.replaced_count,
         retired_count=seen.retired_count,
         problem_statements=[records[item] for item in seen.problem_statements if item in records],
+        problem_statement_contradicted_by={
+            item: contradicting
+            for item in seen.problem_statements
+            if item in records
+            and (
+                contradicting := _entry(
+                    records[item], incoming.get(item, []), related
+                ).contradicted_by
+            )
+        },
         groups=groups,
         store_error=None,
     )
@@ -192,6 +203,7 @@ def _unavailable(error: str) -> PrimeResult:
         replaced_count=0,
         retired_count=0,
         problem_statements=[],
+        problem_statement_contradicted_by={},
         groups={},
         store_error=error,
     )

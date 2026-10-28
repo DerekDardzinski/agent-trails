@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from trails import gitprobe
-from trails.locations import is_code, temporary_paths_in_text, temporary_root
+from trails.locations import is_code, safe_resolve, temporary_paths_in_text, temporary_root
 from trails.models import ArtifactRef, Link, Record
 from trails.reachability import local_path
 from trails.vocab import EntryType
@@ -91,7 +91,7 @@ def uncaptured_location_warnings(
         path = local_path(ref.location)
         if path is None:
             continue
-        named.add(path.resolve())
+        named.add(safe_resolve(path))
         top = gitprobe.containing_toplevel(path)
         if top is not None and _held_by_capture(path, top, captured):
             continue
@@ -99,11 +99,16 @@ def uncaptured_location_warnings(
         temp = temporary_root(path)
         code = is_code(path)
         if temp is not None and code:
+            fix = (
+                f"Republish with {top} captured"
+                if top is not None
+                else "Commit the script to a git repository, then republish with it captured"
+            )
             warnings.append(
                 f"{where} is a script in the temporary directory {temp}, which the operating "
                 "system may delete; trails keeps a reference to it, never a copy, so the code "
-                "that produced this record will be lost. Commit the script to a git "
-                f"repository, then republish with it captured: {_republish(record_id, str(top) if top else '<repository>')}"
+                f"that produced this record will be lost. {fix}: "
+                f"{_republish(record_id, str(top) if top else '<repository>')}"
             )
         elif temp is not None:
             warnings.append(
@@ -128,7 +133,7 @@ def uncaptured_location_warnings(
         text_path
         for text in texts
         for text_path in temporary_paths_in_text(text)
-        if Path(text_path).resolve() not in named
+        if safe_resolve(Path(text_path)) not in named
     ]
     mentioned = list(dict.fromkeys(mentioned))
     if mentioned:
@@ -143,7 +148,7 @@ def uncaptured_location_warnings(
             else "Move them somewhere permanent and name them in artifacts"
         )
         warnings.append(
-            f"the record names {len(mentioned)} paths in temporary directories, which the "
+            f"the record names {_count(len(mentioned), 'path')} in temporary directories, which the "
             f"operating system may delete, and trails keeps no copy: {shown}. {advice}: "
             f"{_republish(record_id, '<repository>' if scripts else None)}"
         )
@@ -173,7 +178,7 @@ def _why_not_captured(path: Path, top: Path, captured: Sequence[CapturedRepo]) -
 
 def _excluded(path: Path, repo: CapturedRepo) -> bool:
     try:
-        relative = path.resolve().relative_to(repo.top).as_posix()
+        relative = safe_resolve(path).relative_to(repo.top).as_posix()
     except ValueError:
         return False
     return any(
@@ -182,15 +187,23 @@ def _excluded(path: Path, repo: CapturedRepo) -> bool:
     )
 
 
+def _count(number: int, noun: str) -> str:
+    return f"{number} {noun}" if number == 1 else f"{number} {noun}s"
+
+
 def contradiction_notes(
-    record_id: str, links: Sequence[Link], targets: Mapping[str, Record]
+    record_id: str,
+    links: Sequence[Link],
+    targets: Mapping[str, Record],
+    superseded_now: str | None = None,
 ) -> list[str]:
     """For each current target of a contradicts link, the calls that correct it at its source.
 
     A contradicts link is visible only as an incoming link on the target; a reader who opens
-    the target sees its old content first. Superseded and retired targets get no note, and
-    neither does a hypothesis: evidence against a hypothesis is its purpose, and the
-    hypothesis stays the record of what was tested.
+    the target sees its old content first. Superseded and retired targets get no note, nor
+    does `superseded_now`, the record this same publish replaces (`targets` were read before
+    that write). Neither does a hypothesis: evidence against a hypothesis is its purpose, and
+    the hypothesis stays the record of what was tested.
     """
     notes = []
     seen: set[str] = set()
@@ -200,6 +213,7 @@ def contradiction_notes(
             link.relation != "contradicts"
             or target is None
             or target.id in seen
+            or target.id == superseded_now
             or target.entry_type == "hypothesis"
             or target.superseded_by is not None
             or target.retired
@@ -262,7 +276,8 @@ def repoint_notes(new_id: str, replaced_ids: Sequence[str], sources: Sequence[st
             f'search(links="builds_on:{replaced_ids[0]}")'
         )
     return [
-        f"{len(sources)} current records build on the replaced problem statement "
+        f"{_count(len(sources), 'current record')} "
+        f"{'builds' if len(sources) == 1 else 'build'} on the replaced problem statement "
         f'({", ".join(replaced_ids)}), and show and search(links="builds_on:{new_id}") do not '
         f"list them under {new_id}. To relate each to {new_id}: {shown}"
     ]

@@ -307,3 +307,217 @@ def test_superseding_a_problem_statement_lists_current_records_on_every_earlier_
         f'link("{on_second}", "builds_on", "{third.record_id}") · '
         f'link("{on_first}", "builds_on", "{third.record_id}")'
     )
+
+
+# --- added after review of 7cbfb86 ---------------------------------------------------------
+
+
+def test_an_artifact_path_through_a_symlink_loop_still_confirms_the_write(
+    store: Store, tmp_path: Path
+) -> None:
+    """Catches the guidance raising RuntimeError after the record is durable, which hid a
+    stored write and invited a duplicate retry."""
+    loop = tmp_path / "loop"
+    loop.mkdir()
+    (loop / "a").symlink_to(loop / "b")
+    (loop / "b").symlink_to(loop / "a")
+
+    result = _run(store, publish, title="Loop", artifacts=_artifact(loop / "a" / "run.py"))
+
+    assert store.get_record(result.record_id).title == "Loop"
+
+
+def test_naming_the_temporary_directory_itself_is_not_a_path_that_can_be_lost(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches a false alarm on a record that states the rule against writing to /tmp."""
+    monkeypatch.setattr(locations, "temporary_roots", lambda: (Path("/tmp").resolve(),))
+
+    result = _run(
+        store,
+        publish,
+        title="Rule",
+        body="Never write analysis scripts to /tmp; outputs go under /tmp/ only if disposable.",
+    )
+
+    assert result.warnings == []
+
+
+def test_a_temporary_path_named_as_an_artifact_is_not_listed_again_from_the_body(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches a second warning for the same file, once from artifacts and once from prose,
+    including a non-ASCII path written in value."""
+    root = _temp_root(monkeypatch, tmp_path / "scratch")
+    script = root / "run.py"
+
+    result = _run(
+        store,
+        publish,
+        title="Once",
+        body=f"ran {script}",
+        value={"other": f"{root}/café/out.csv"},
+        artifacts=_artifact(script),
+    )
+
+    assert len(result.warnings) == 2
+    assert result.warnings[0].startswith(f"artifact[0] {script} is a script")
+    assert result.warnings[1].startswith(
+        f"the record names 1 path in temporary directories, which the operating system may "
+        f"delete, and trails keeps no copy: {root}/café/out.csv. Move them"
+    )
+
+
+def test_an_excluded_script_in_a_captured_repository_is_reported_as_excluded(
+    store: Store, git_repo: Path
+) -> None:
+    """Catches exclude being ignored, which would report a script as captured when the
+    publish deliberately left it out."""
+    script = git_repo / "big" / "make.py"
+    script.parent.mkdir()
+    script.write_text("print(6)\n")
+
+    result = _run(
+        store,
+        publish,
+        title="Excluded",
+        artifacts=_artifact(script),
+        repos=[str(git_repo)],
+        exclude=["big"],
+    )
+
+    [warning] = result.warnings
+    assert "but it is excluded from this capture." in warning
+
+
+def test_a_script_in_a_temporary_repository_is_not_told_to_find_a_repository(
+    store: Store, git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches advice to commit to a git repository for a script already in one."""
+    _temp_root(monkeypatch, tmp_path)
+    script = git_repo / "run.py"
+    top = git_repo.resolve()
+
+    result = _run(store, publish, title="Temp repo", artifacts=_artifact(script))
+
+    [warning] = result.warnings
+    assert f"will be lost. Republish with {top} captured: " in warning
+    assert warning.endswith(f'repos=["{top}"])')
+
+
+def test_superseding_and_contradicting_the_same_record_gives_no_correction_note(
+    store: Store,
+) -> None:
+    """Catches a note calling the record this same call replaced 'still current'."""
+    old = _run(store, publish, entry_type="report", title="Old").record_id
+
+    result = _run(
+        store,
+        publish,
+        entry_type="report",
+        title="Corrected",
+        supersedes=old,
+        reason="corrected the count",
+        links=[{"relation": "contradicts", "target_id": old}],
+    )
+
+    assert not any("still current" in note for note in result.notes)
+
+
+def test_link_contradicts_notes_a_current_report_but_not_a_hypothesis_or_a_retired_record(
+    store: Store,
+) -> None:
+    """Catches the link half of the correction note, and the two exceptions: evidence against
+    a hypothesis is normal, and a retired record needs no correction."""
+    source = _run(store, publish, title="Finding").record_id
+    report = _run(store, publish, entry_type="report", title="Report").record_id
+    hypothesis = _run(
+        store, publish, entry_type="hypothesis", work_status="open", title="H"
+    ).record_id
+    retired = _run(store, publish, entry_type="report", title="Gone").record_id
+    store.retire(retired, "wrong")
+
+    on_report = _run(store, link, source_id=source, relation="contradicts", target_id=report)
+    on_hypothesis = _run(
+        store, link, source_id=source, relation="contradicts", target_id=hypothesis
+    )
+    on_retired = _run(store, link, source_id=source, relation="contradicts", target_id=retired)
+
+    assert [note.split(",")[0] for note in on_report.notes] == [
+        f"{source} contradicts {report} (report)"
+    ]
+    assert on_hypothesis.notes == []
+    assert on_retired.notes == []
+
+
+def test_superseding_a_report_gives_no_repointing_note(store: Store) -> None:
+    """Catches the problem-statement re-pointing list appearing for every record type,
+    where moving links would misattribute work (a verification checked the old version)."""
+    old = _run(store, publish, entry_type="result", title="v1").record_id
+    _run(store, publish, title="check", links=[{"relation": "builds_on", "target_id": old}])
+
+    result = _run(store, publish, entry_type="result", title="v2", supersedes=old, reason="r")
+
+    assert not any("on the replaced problem statement" in note for note in result.notes)
+
+
+def test_prime_shows_contradictions_on_problem_statements_and_ignores_cites(
+    store: Store,
+) -> None:
+    """Catches criterion 4 missing problem statements, which prime prints in their own
+    section, and a cites link being presented as a contradiction."""
+    project = store.write_project("P", "host", [], []).project.id
+    statement = _run(
+        store,
+        publish,
+        entry_type="problem-statement",
+        work_status="open",
+        title="Goal",
+        projects=[project],
+    ).record_id
+    against = _run(
+        store,
+        publish,
+        title="Against",
+        projects=[project],
+        links=[{"relation": "contradicts", "target_id": statement}],
+    ).record_id
+    _run(
+        store,
+        publish,
+        title="Mentions",
+        projects=[project],
+        links=[{"relation": "cites", "target_id": statement}],
+    )
+
+    text = _run(store, prime, project=project).render_text()
+
+    assert text.count("contradicted by:") == 1
+    assert (
+        f"  {statement}  Goal · work open\n    contradicted by: {against} (note) Against"
+    ) in text
+
+
+def test_prime_lists_a_result_contradicting_a_hypothesis_once(store: Store) -> None:
+    """Catches the hypothesis line and the general line both printing one contradiction."""
+    project = store.write_project("Q", "host", [], []).project.id
+    hypothesis = _run(
+        store,
+        publish,
+        entry_type="hypothesis",
+        work_status="open",
+        title="H",
+        projects=[project],
+    ).record_id
+    _run(
+        store,
+        publish,
+        entry_type="result",
+        title="R",
+        projects=[project],
+        links=[{"relation": "contradicts", "target_id": hypothesis}],
+    )
+
+    text = _run(store, prime, project=project).render_text()
+
+    assert text.count("contradicted by:") == 1

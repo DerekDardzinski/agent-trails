@@ -61,14 +61,27 @@ def temporary_roots() -> tuple[Path, ...]:
     return tuple(roots)
 
 
-def temporary_root(path: Path, roots: Iterable[Path] | None = None) -> Path | None:
-    """The temporary directory `path` lies under, or None. `path` need not exist."""
+def safe_resolve(path: Path) -> Path:
+    """`path` resolved, or made absolute without resolving when resolution fails.
+
+    Python 3.12 raises RuntimeError on a symlink loop and OSError on some unreadable
+    components; a caller after a durable write must not raise for either.
+    """
     try:
-        resolved = path.expanduser().resolve()
+        return path.expanduser().resolve()
     except (OSError, RuntimeError):
-        return None
+        return path.absolute()
+
+
+def temporary_root(path: Path, roots: Iterable[Path] | None = None) -> Path | None:
+    """The temporary directory `path` lies strictly under, or None. `path` need not exist.
+
+    The root itself is not inside it: a record that names /tmp, as in a rule never to write
+    there, names no file that can be lost.
+    """
+    resolved = safe_resolve(path)
     for root in temporary_roots() if roots is None else roots:
-        if resolved == root or resolved.is_relative_to(root):
+        if resolved != root and resolved.is_relative_to(root):
             return root
     return None
 

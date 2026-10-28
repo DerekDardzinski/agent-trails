@@ -407,7 +407,9 @@ def prime_text(result: PrimeResult) -> str:
                 reason="...",
             )
         )
-    lines += _problem_statement_lines(result.problem_statements)
+    lines += _problem_statement_lines(
+        result.problem_statements, result.problem_statement_contradicted_by
+    )
     ordered = [name for name in _PRIME_GROUP_ORDER if name in result.groups]
     ordered += sorted(name for name in result.groups if name not in _PRIME_GROUP_ORDER)
     for kind in ordered:
@@ -449,14 +451,25 @@ _GROUP_LABELS = {
 }
 
 
-def _problem_statement_lines(records: list[Record]) -> list[str]:
+def _problem_statement_lines(
+    records: list[Record], contradicted_by: dict[str, list[Record]]
+) -> list[str]:
     lines = ["", f"problem statements ({len(records)} current):"]
     if not records:
         return [*lines, "  none recorded"]
     for record in records:
         lines.append(f"  {record.id}  {record.title} · work {record.work_status}")
+        lines += _contradicted_by_lines(contradicted_by.get(record.id, []))
         lines += [f"    {line}" for line in record.body.splitlines()]
     return lines
+
+
+def _contradicted_by_lines(sources: list[Record], skip: set[str] | None = None) -> list[str]:
+    return [
+        f"    contradicted by: {source.id} ({source.entry_type}) {source.title}"
+        for source in sources
+        if source.id not in (skip or set())
+    ]
 
 
 def _prime_entry_lines(kind: str, entry: PrimeEntry) -> list[str]:
@@ -499,10 +512,7 @@ def _prime_entry_lines(kind: str, entry: PrimeEntry) -> list[str]:
                 )
                 if link.relation == "contradicts":
                     listed.add(link.record.id)
-    for source in entry.contradicted_by:
-        if source.id not in listed:
-            lines.append(f"    contradicted by: {source.id} ({source.entry_type}) {source.title}")
-    return lines
+    return lines + _contradicted_by_lines(entry.contradicted_by, listed)
 
 
 def _target(record: Record) -> str:

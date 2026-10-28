@@ -203,6 +203,8 @@ class PrimeResult(RenderedResult):
     replaced_count: int
     retired_count: int
     problem_statements: list[Record]
+    # problem statement id -> current records of any type that contradict it; absent when none
+    problem_statement_contradicted_by: dict[str, list[Record]]
     groups: dict[str, list[PrimeEntry]]
     store_error: str | None
 
