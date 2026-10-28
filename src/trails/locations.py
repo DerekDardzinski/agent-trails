@@ -47,17 +47,20 @@ _TEXT_PATH = re.compile(r"(?<![\w.~:/-])/[^\s`'\"<>()\[\]{},;|*]+")
 
 
 def temporary_roots() -> tuple[Path, ...]:
-    """Directories whose contents the operating system may delete, resolved.
+    """Directories whose contents the operating system may delete, resolved first.
 
     /tmp and /var/tmp, and on macOS /var/folders, which holds every user's $TMPDIR, plus
-    whatever `tempfile.gettempdir()` reports here.
+    whatever `tempfile.gettempdir()` reports here, each in its resolved and literal spelling.
     """
     candidates = ["/tmp", "/var/tmp", "/var/folders", tempfile.gettempdir()]
     roots: list[Path] = []
     for candidate in candidates:
-        resolved = Path(candidate).resolve()
-        if resolved not in roots:
-            roots.append(resolved)
+        # Both spellings: the resolved one (/private/tmp on macOS) matches a path that
+        # resolves, and the literal one (/tmp) matches a path that cannot be resolved, such
+        # as one through a symlink loop.
+        for spelling in (Path(candidate).resolve(), Path(candidate).absolute()):
+            if spelling not in roots:
+                roots.append(spelling)
     return tuple(roots)
 
 

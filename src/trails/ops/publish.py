@@ -113,7 +113,8 @@ async def publish(  # noqa: PLR0912, PLR0915, PLR0917 — operation orchestratio
                 'References to data, each {"location": ..., "digest": null or '
                 '"sha256:<64 lowercase hex>", "notes": ...}. location is a path, an s3:// URI, '
                 "a query, or a description; notes say what identifies the data, such as a "
-                "version, a row count or a query date. Data is referenced, never copied. An "
+                "version, a row count or a query date. Data is referenced, never copied, so "
+                "a location in /tmp or another temporary directory will disappear. An "
                 "uppercase hex digest is refused."
             )
         ),
@@ -186,6 +187,8 @@ async def publish(  # noqa: PLR0912, PLR0915, PLR0917 — operation orchestratio
     """Write a record. Use it for anything worth keeping: a result, a procedure that finally worked, a decision and its reason, a fact about an environment, a hypothesis, a verification of another result, or a note. Nothing is reviewed or gated; the record is stored as given. A write is refused only for malformed input or an attempt to overwrite a record. A possible secret does not stop the write: it is reported in warnings, and you must tell the user, because removing it from history requires a manual database-history rewrite by the user.
 
     Use this when: you learned something a later session would otherwise have to rediscover. Store a procedure the moment it works, not at handoff.
+
+    Do not write a script or data file that a record will name to /tmp or another temporary directory: the operating system deletes files there, and trails keeps only the reference, never a copy. Write scripts inside a git repository and pass it in repos, so the exact code is captured, and keep data at a permanent location named in artifacts.
 
     Use instead: mark_verified (full toolset), to record that a procedure still works: a verification record does not stamp the procedure, and prime keeps listing it as not verified; link, to relate two records that already exist; retire, when a record is no longer true and nothing replaces it; export and then publish(from_file=...), to revise a long record from an editable copy of its links and artifacts. A superseding record starts unverified and inherits no links, artifacts, captured code or verification stamps unless this call supplies them again.
 

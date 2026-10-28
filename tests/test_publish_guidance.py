@@ -8,6 +8,8 @@ assertion is about what the agent is told after the record is stored.
 from __future__ import annotations
 
 import asyncio
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -192,6 +194,23 @@ def test_the_real_temporary_roots_cover_tmp_and_not_the_home_directory(
     assert locations.temporary_root(Path("/tmp/x/a.py")) == Path("/tmp").resolve()
     assert locations.temporary_root(Path("/private/tmp/a.py")) == Path("/tmp").resolve()
     assert locations.temporary_root(Path.home() / "workplace" / "a.py") is None
+
+
+def test_an_unresolvable_path_spelled_with_tmp_is_still_temporary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches the macOS gap the review found: a path through a symlink loop cannot be
+    resolved to /private/tmp, so only the literal /tmp spelling can match it."""
+    monkeypatch.undo()
+    scratch = Path(tempfile.mkdtemp(dir="/tmp"))
+    try:
+        (scratch / "a").symlink_to(scratch / "b")
+        (scratch / "b").symlink_to(scratch / "a")
+        literal = Path("/tmp") / scratch.name / "a" / "run.py"
+
+        assert locations.temporary_root(literal) == Path("/tmp")
+    finally:
+        shutil.rmtree(scratch)
 
 
 # --- records that later records contradict or supersede -------------------------------------
