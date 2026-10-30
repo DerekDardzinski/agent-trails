@@ -118,6 +118,13 @@ digest is flagged) and returns field, line and detector, never the matched text.
   `retrieval.Ranked` keeps diagnostics internally; `show` returns the full record.
   A `work_status` filter returns current versions unless `include_history=true`; searches without
   `work_status` continue to include superseded versions.
+- **PRIME ENTRIES ARE REFERENCES, NOT RECORDS.** Scoped prime lists every current record of a
+  project, so `PrimeRecordRef` carries id, entry type, title, work status, lifecycle, the id it
+  replaces and the last verification, and no body or other `Record` field. Full records there
+  made one 10,612,327-byte MCP reply on a 317-record project, and Kiro dropped the connection.
+  What prime lists is chosen only from stored fields: the work status the agent set and stored
+  `contradicts` links. Every collapsed set comes with the complete `show` or `search` call that
+  returns it.
 - Vocabularies (`ENTRY_TYPES`, `WORK_STATUSES`, `PROJECT_ACTIONS`, `ENTRY_TYPE_PREFIXES`,
   `RELATIONS`, the record and project id patterns, and `stale_days()`) are defined once in `src/trails/vocab.py`, which also generates
   the schema's ENUM columns.

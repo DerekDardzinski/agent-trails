@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
@@ -66,8 +67,9 @@ def test_whole_store_prime_pages_projects_without_hiding_total(store: Store) -> 
     assert "prime(limit=1, offset=1)" in page_one.render_text()
 
 
-def test_project_prime_shows_full_current_framing_and_problem_bodies(store: Store) -> None:
-    """Catches scoped prime omitting framing revision guidance or printing ordinary bodies."""
+def test_project_prime_shows_full_framing_and_problem_titles_without_bodies(store: Store) -> None:
+    """Catches scoped prime omitting framing revision guidance, printing any record body, or
+    losing the call that reads the problem statements in full."""
     project = _project(store, "Alpha", "Initial frame")
     store.write_project(
         "Alpha",
@@ -86,7 +88,9 @@ def test_project_prime_shows_full_current_framing_and_problem_bodies(store: Stor
         work_status="open",
         projects=[project],
     )
-    note = _write(store, "Operational note", "Do not print this body.", projects=[project])
+    note = _write(
+        store, "Operational note", "Do not print this body.", work_status="open", projects=[project]
+    )
 
     result = _call(store, project="Alpha")
     text = result.render_text()
@@ -96,7 +100,10 @@ def test_project_prime_shows_full_current_framing_and_problem_bodies(store: Stor
     assert [record.id for record in result.problem_statements] == [problem]
     assert [entry.record.id for entry in result.groups["note"]] == [note]
     assert "Why Alpha exists." in text
-    assert "Full objective body." in text
+    assert (
+        f'  {problem}  Reduce variance · work open\n  read them: show(["{problem}"], detail="full")'
+    ) in text
+    assert "Full objective body." not in text
     assert "Do not print this body." not in text
     assert f'update_project(project="{project}"' in text
     assert 'base_version=2, reason="..."' in text
@@ -126,12 +133,14 @@ def test_prime_explains_result_hypothesis_and_verification_connections(store: St
         store,
         "Hypothesis",
         entry_type="hypothesis",
+        work_status="open",
         projects=[project],
     )
     result_id = _write(
         store,
         "Result",
         entry_type="result",
+        work_status="open",
         projects=[project],
         links=[Link(relation="builds_on", target_id=hypothesis)],
     )
@@ -147,6 +156,90 @@ def test_prime_explains_result_hypothesis_and_verification_connections(store: St
 
     assert f"results built on this version: {result_id}" in text
     assert f"verified by {verification}" in text
+
+
+def test_project_prime_collapses_closed_records_to_a_count_and_the_call_that_lists_them(
+    store: Store,
+) -> None:
+    """Catches closed records listed one by one again, a count that disagrees with the records,
+    or a listing call that would not return every closed record of the type."""
+    project = _project(store, "Alpha")
+    open_decision = _write(
+        store, "Still deciding", entry_type="decision", work_status="open", projects=[project]
+    )
+    first = _write(store, "Settled one", entry_type="decision", projects=[project])
+    second = _write(store, "Settled two", entry_type="decision", projects=[project])
+    only_closed = _write(store, "Old fact", entry_type="fact", projects=[project])
+
+    result = _call(store, project=project)
+    text = result.render_text()
+
+    assert result.closed_counts == {"decision": 2, "fact": 1}
+    assert [entry.record.id for entry in result.groups["decision"]] == [open_decision]
+    assert result.groups["fact"] == []
+    assert (
+        "decisions (3 current · 2 closed):\n"
+        f"  {open_decision}  Still deciding · work open\n"
+        "  2 closed, listed above only when contradicted: "
+        f'search(projects=["{project}"], entry_type="decision", work_status="closed", limit=2)'
+    ) in text
+    assert (
+        "facts (1 current · 1 closed):\n"
+        "  1 closed, listed above only when contradicted: "
+        f'search(projects=["{project}"], entry_type="fact", work_status="closed", limit=1)'
+    ) in text
+    for hidden in (first, second, only_closed):
+        assert hidden not in text
+
+
+def test_project_prime_structured_content_carries_no_record_body(store: Store) -> None:
+    """Catches the 10.6 MB reply: full records, with the full records they build on, in the
+    structured content an MCP host must accept in one message."""
+    project = _project(store, "Alpha")
+    _write(
+        store,
+        "Goal",
+        "PROBLEM-BODY",
+        entry_type="problem-statement",
+        work_status="open",
+        projects=[project],
+    )
+    hypothesis = _write(
+        store,
+        "Claim",
+        "TARGET-BODY",
+        entry_type="hypothesis",
+        work_status="open",
+        projects=[project],
+    )
+    result_id = _write(
+        store,
+        "Measured",
+        "RESULT-BODY",
+        entry_type="result",
+        work_status="open",
+        projects=[project],
+        links=[Link(relation="builds_on", target_id=hypothesis)],
+    )
+
+    dumped = _call(store, project=project).model_dump(mode="json")
+
+    serialized = json.dumps(dumped)
+    for body in ("PROBLEM-BODY", "TARGET-BODY", "RESULT-BODY"):
+        assert body not in serialized
+    assert dumped["groups"]["result"][0]["builds_on"] == [
+        {
+            "id": hypothesis,
+            "entry_type": "hypothesis",
+            "title": "Claim",
+            "work_status": "open",
+            "superseded_by": None,
+            "retired": False,
+            "replaces": None,
+            "last_verified": None,
+        }
+    ]
+    assert dumped["groups"]["result"][0]["record"]["id"] == result_id
 
 
 def test_whole_prime_last_activity_includes_membership_events(store: Store) -> None:

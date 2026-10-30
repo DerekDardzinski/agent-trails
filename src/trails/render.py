@@ -12,6 +12,7 @@ if TYPE_CHECKING:
         LineageResult,
         PathStatus,
         PrimeEntry,
+        PrimeRecordRef,
         PrimeResult,
         ProjectSearchHit,
         RelatedRecord,
@@ -414,9 +415,20 @@ def prime_text(result: PrimeResult) -> str:
     ordered += sorted(name for name in result.groups if name not in _PRIME_GROUP_ORDER)
     for kind in ordered:
         entries = result.groups[kind]
-        lines += ["", f"{_group_label(kind)} ({len(entries)} current):"]
+        closed = result.closed_counts.get(kind, 0)
+        current = closed + sum(entry.record.work_status == "open" for entry in entries)
+        lines += ["", f"{_group_label(kind)} ({current} current · {closed} closed):"]
         for entry in entries:
             lines += _prime_entry_lines(kind, entry)
+        if closed:
+            listing = call(
+                "search",
+                projects=[project.id],
+                entry_type=kind,
+                work_status="closed",
+                limit=closed,
+            )
+            lines.append(f"  {closed} closed, listed above only when contradicted: {listing}")
     shown = [entry.record.id for kind in ordered for entry in result.groups[kind]]
     hints = []
     if shown:
@@ -452,7 +464,7 @@ _GROUP_LABELS = {
 
 
 def _problem_statement_lines(
-    records: list[Record], contradicted_by: dict[str, list[Record]]
+    records: list[PrimeRecordRef], contradicted_by: dict[str, list[PrimeRecordRef]]
 ) -> list[str]:
     lines = ["", f"problem statements ({len(records)} current):"]
     if not records:
@@ -460,11 +472,13 @@ def _problem_statement_lines(
     for record in records:
         lines.append(f"  {record.id}  {record.title} · work {record.work_status}")
         lines += _contradicted_by_lines(contradicted_by.get(record.id, []))
-        lines += [f"    {line}" for line in record.body.splitlines()]
+    lines.append(f"  read them: {call('show', [record.id for record in records], detail='full')}")
     return lines
 
 
-def _contradicted_by_lines(sources: list[Record], skip: set[str] | None = None) -> list[str]:
+def _contradicted_by_lines(
+    sources: list[PrimeRecordRef], skip: set[str] | None = None
+) -> list[str]:
     return [
         f"    contradicted by: {source.id} ({source.entry_type}) {source.title}"
         for source in sources
@@ -499,7 +513,7 @@ def _prime_entry_lines(kind: str, entry: PrimeEntry) -> list[str]:
             if record.last_verified is not None
             else "never verified"
         )
-    if replaced := _replaces(record):
+    if replaced := record.replaces:
         facts.append(f"replaces {replaced}")
     lines = [f"  {record.id}  {record.title} · " + " · ".join(facts)]
     listed: set[str] = set()
@@ -515,17 +529,13 @@ def _prime_entry_lines(kind: str, entry: PrimeEntry) -> list[str]:
     return lines + _contradicted_by_lines(entry.contradicted_by, listed)
 
 
-def _target(record: Record) -> str:
+def _target(record: PrimeRecordRef) -> str:
     labels = [record.entry_type, f"work {record.work_status}"]
     if record.superseded_by is not None:
         labels.append(f"replaced by {record.superseded_by}")
     elif record.retired:
         labels.append("retired")
     return f"{record.id} ({', '.join(labels)})"
-
-
-def _replaces(record: Record) -> str | None:
-    return next((link.target_id for link in record.links if link.relation == "supersedes"), None)
 
 
 def _group_label(kind: str) -> str:

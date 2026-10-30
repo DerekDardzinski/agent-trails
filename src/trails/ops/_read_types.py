@@ -3,7 +3,7 @@
 NOTE: no `from __future__ import annotations` in this package. See `ops/__init__.py`.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel
@@ -165,17 +165,35 @@ class LineageResult(RenderedResult):
         return render.lineage_text(self)
 
 
+class PrimeRecordRef(BaseModel):
+    """A record as prime lists it: identity and lifecycle, never its body.
+
+    Prime is an orientation page over every current record of a project, so it carries
+    references and leaves full records to show. Measured on a 317-record project, full
+    records here made one 10.6 MB MCP reply that the host dropped.
+    """
+
+    id: str
+    entry_type: EntryType
+    title: str
+    work_status: WorkStatus
+    superseded_by: str | None
+    retired: bool
+    replaces: str | None  # the record this one supersedes
+    last_verified: tuple[date, str] | None
+
+
 class PrimeRelation(BaseModel):
     relation: Relation
-    record: Record
+    record: PrimeRecordRef
 
 
 class PrimeEntry(BaseModel):
-    record: Record
-    builds_on: list[Record]
+    record: PrimeRecordRef
+    builds_on: list[PrimeRecordRef]
     incoming_results: list[PrimeRelation]
-    verifications: list[Record]
-    contradicted_by: list[Record]  # current records of any type that contradict this one
+    verifications: list[PrimeRecordRef]
+    contradicted_by: list[PrimeRecordRef]  # current records of any type that contradict this one
 
 
 class ProjectIndexEntry(BaseModel):
@@ -202,10 +220,14 @@ class PrimeResult(RenderedResult):
     current_count: int
     replaced_count: int
     retired_count: int
-    problem_statements: list[Record]
+    problem_statements: list[PrimeRecordRef]
     # problem statement id -> current records of any type that contradict it; absent when none
-    problem_statement_contradicted_by: dict[str, list[Record]]
+    problem_statement_contradicted_by: dict[str, list[PrimeRecordRef]]
+    # entry type -> its listed current records: every open one, and every closed one that a
+    # current record contradicts. A type with current records always has a key, even if empty.
     groups: dict[str, list[PrimeEntry]]
+    # entry type -> current closed records of that type, problem statements excluded
+    closed_counts: dict[str, int]
     store_error: str | None
 
     def render_text(self) -> str:
