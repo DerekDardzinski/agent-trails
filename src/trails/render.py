@@ -432,7 +432,9 @@ def prime_text(result: PrimeResult) -> str:
     shown = [entry.record.id for kind in ordered for entry in result.groups[kind]]
     hints = []
     if shown:
-        hints.append(f"read full records: {call('show', shown, detail='full')}")
+        # One id, not every listed id: a show of every listed record is itself a reply large
+        # enough to lose the MCP connection (546,817 bytes for 69 records on prj-5ht8o).
+        hints.append(f"read a full record: {call('show', shown[0], detail='full')}")
     hints.append(f"find anything else: {call('search', projects=[project.id], query='...')}")
     hints.append(f"framing history: {call('show', project.id, detail='full')}")
     lines += ["", next_line(hints)]

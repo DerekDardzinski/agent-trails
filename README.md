@@ -104,7 +104,7 @@ projects because the measured 1,000-project JSON response without paging was 155
 records without bodies: problem statements as title lines with the `show` call that reads them,
 open and contradicted records one line each, and per entry type the count of closed records with
 the `search` call that lists them. Measured on a 317-record project, the earlier full-record
-response was one 10,612,327-byte MCP message, which Kiro dropped; the compact one is 179,883 bytes.
+response was one 10,612,327-byte MCP message, which Kiro dropped; the compact one is about 180 KB.
 
 ## A possible secret is a warning
 

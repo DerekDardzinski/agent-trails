@@ -190,6 +190,24 @@ def test_project_prime_collapses_closed_records_to_a_count_and_the_call_that_lis
     ) in text
     for hidden in (first, second, only_closed):
         assert hidden not in text
+    assert f'read a full record: show("{open_decision}", detail="full")' in text
+
+
+def test_project_prime_counts_a_listed_contradicted_closed_record_once(store: Store) -> None:
+    """Catches a closed record listed for its contradiction being counted as open as well."""
+    project = _project(store, "Alpha")
+    wrong = _write(store, "Wrong", entry_type="report", projects=[project])
+    _write(
+        store,
+        "Correction",
+        work_status="open",
+        projects=[project],
+        links=[Link(relation="contradicts", target_id=wrong)],
+    )
+
+    text = _call(store, project=project).render_text()
+
+    assert f"reports (1 current · 1 closed):\n  {wrong}  Wrong · work closed" in text
 
 
 def test_project_prime_structured_content_carries_no_record_body(store: Store) -> None:
