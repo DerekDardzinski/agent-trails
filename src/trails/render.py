@@ -460,29 +460,39 @@ def _problem_statement_lines(result: PrimeResult, project_id: str) -> list[str]:
 
 
 def _contradicted_lines(result: PrimeResult) -> list[str]:
-    if not result.contradicted:
-        return ["", "contradicted records: none"]
-    lines = [
-        "",
-        f"contradicted records ({len(result.contradicted)}; read the correction before relying "
-        "on these):",
-    ]
+    if result.contradicted:
+        lines = [
+            "",
+            f"contradicted records ({len(result.contradicted)}; read the correction before "
+            "relying on these):",
+        ]
+    else:
+        lines = ["", "contradicted records: none besides problem statements above"]
     for item in result.contradicted:
         record = item.record
         lines.append(
             f"  {record.id}  {record.entry_type}  {record.title} · work {record.work_status}"
         )
         lines += _contradicted_by_lines(item.contradicted_by)
-    corrections = list(
-        dict.fromkeys(source.id for item in result.contradicted for source in item.contradicted_by)
-    )
-    lines.append(f"  read the corrections: {call('show', corrections, detail='full')}")
+    # Corrections of open problem statements too: their lines above print no call of their own.
+    sources = [
+        *(
+            source
+            for found in result.problem_statement_contradicted_by.values()
+            for source in found
+        ),
+        *(source for item in result.contradicted for source in item.contradicted_by),
+    ]
+    corrections = list(dict.fromkeys(source.id for source in sources))
+    if corrections:
+        lines.append(f"  read the corrections: {call('show', corrections, detail='full')}")
     return lines
 
 
 def _count_lines(result: PrimeResult, project_id: str) -> list[str]:
     lines = ["", "records by type (search lists them; add query=... to rank by your task):"]
-    open_total = sum(row.open for row in result.counts if row.entry_type != "problem-statement")
+    # Every open record, problem statements included, so the call returns exactly this many.
+    open_total = sum(row.open for row in result.counts)
     if open_total:
         lines.append(
             f"  all {open_total} open: "

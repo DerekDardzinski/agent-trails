@@ -139,11 +139,13 @@ def test_project_prime_counts_each_type_with_calls_that_return_exactly_that_many
         _write(store, title, entry_type="decision", work_status="open", projects=[project])
     _write(store, "Settled", entry_type="decision", projects=[project])
     _write(store, "Old fact", entry_type="fact", projects=[project])
+    _write(store, "Goal", entry_type="problem-statement", work_status="open", projects=[project])
 
     result = _call(store, project=project)
     text = result.render_text()
 
     assert [(row.entry_type, row.open, row.closed) for row in result.counts] == [
+        ("problem-statement", 1, 0),
         ("fact", 0, 1),
         ("decision", 2, 1),
     ]
@@ -168,7 +170,14 @@ def test_project_prime_counts_each_type_with_calls_that_return_exactly_that_many
     listed = asyncio.run(listing())
     assert sorted(hit.title for hit in listed.hits) == ["Also deciding", "Deciding"]
     assert listed.total == 2
-    assert (f'  all 2 open: search(projects=["{project}"], work_status="open", limit=2)') in text
+    assert f'  all 3 open: search(projects=["{project}"], work_status="open", limit=3)' in text
+
+    async def everything_open() -> Any:
+        return await context.bind(search, lambda: store.db_path)(
+            projects=[project], work_status="open", limit=3
+        )
+
+    assert asyncio.run(everything_open()).total == 3
     assert f'search(projects=["{project}"], query="...")' in text
 
 
@@ -205,6 +214,30 @@ def test_project_prime_lists_contradicted_records_with_current_corrections_only(
     assert "Withdrawn objection" not in text
     assert untouched not in text
     assert "  report: 0 open · 2 closed" in text
+
+
+def test_project_prime_gives_the_call_that_reads_a_problem_statements_correction(
+    store: Store,
+) -> None:
+    """Catches a correction of an open problem statement named on the page with no call that
+    reads it."""
+    project = _project(store, "Alpha")
+    goal = _write(
+        store, "Goal", entry_type="problem-statement", work_status="open", projects=[project]
+    )
+    against = _write(
+        store,
+        "Goal is wrong",
+        projects=[project],
+        links=[Link(relation="contradicts", target_id=goal)],
+    )
+
+    text = _call(store, project=project).render_text()
+
+    assert (
+        "contradicted records: none besides problem statements above\n"
+        f'  read the corrections: show(["{against}"], detail="full")'
+    ) in text
 
 
 def test_project_prime_structured_content_carries_no_record_body(store: Store) -> None:
