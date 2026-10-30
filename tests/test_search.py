@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import math
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -176,6 +176,7 @@ def test_ten_large_records_produce_compact_structured_hits_without_body_tails(
         "excerpt",
         "contradicted_by",
         "verified_by",
+        "last_verified",
     }
 
     assert len(result.hits) == 10
@@ -757,4 +758,27 @@ def test_a_hit_names_current_corrections_and_verifications_and_drops_replaced_on
 
     assert (hit.contradicted_by, hit.verified_by) == ([fix], [review])
     text = found.render_text()
-    assert f"  contradicted by: {fix}\n  verified by: {review}\n" in text
+    assert (
+        f'  contradicted by: {fix} · read before relying on this: show(["{fix}"], detail="full")\n'
+        f"  verified by: {review}\n"
+    ) in text
+
+
+def test_a_procedure_hit_says_whether_it_was_ever_verified(store: Store) -> None:
+    """Catches an unstamped procedure found by search with nothing saying it was never run."""
+    never = _write(store, "Rebuild index", entry_type="procedure", work_status="open")
+    stamped = _write(store, "Rotate keys", entry_type="procedure", work_status="open")
+    store.stamp_verified(stamped, "green", date(2026, 10, 1))
+
+    found = _search(store, entry_type="procedure")
+    text = found.render_text()
+
+    assert {hit.id: hit.last_verified for hit in found.hits} == {
+        never: None,
+        stamped: (date(2026, 10, 1), "green"),
+    }
+    assert f"{never}  procedure  Rebuild index  current · work open · never verified" in text
+    assert (
+        f"{stamped}  procedure  Rotate keys  current · work open · verified 2026-10-01 in green"
+        in text
+    )

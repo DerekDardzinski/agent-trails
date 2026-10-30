@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -36,9 +37,19 @@ def record_line(record: Record) -> str:
         f"{record.id}  {record.entry_type}  {record.title}  {lifecycle(record)} "
         f"· work {record.work_status}"
     )
-    if record.last_verified is not None:
-        line += f" · verified {record.last_verified[0].isoformat()}"
+    line += verification_state(record.entry_type, record.last_verified, prefix=" · ")
     return line
+
+
+def verification_state(
+    entry_type: str, last_verified: tuple[date, str] | None, *, prefix: str = ""
+) -> str:
+    """A procedure's mark_verified stamp, or that it has none; empty for other types."""
+    if last_verified is not None:
+        return f"{prefix}verified {last_verified[0].isoformat()} in {last_verified[1]}"
+    if entry_type == "procedure":
+        return f"{prefix}never verified, run it and then mark_verified"
+    return ""
 
 
 def call(operation: str, *positional: Any, **arguments: Any) -> str:
@@ -72,7 +83,10 @@ def search_text(result: SearchResult) -> str:  # noqa: PLR0912 — project and r
         status = hit.lifecycle
         if status == "superseded" and hit.superseded_by is not None:
             status += f" by {hit.superseded_by}"
-        lines.append(f"{hit.id}  {hit.entry_type}  {hit.title}  {status} · work {hit.work_status}")
+        lines.append(
+            f"{hit.id}  {hit.entry_type}  {hit.title}  {status} · work {hit.work_status}"
+            + verification_state(hit.entry_type, hit.last_verified, prefix=" · ")
+        )
         details = [f"created: {hit.created_at.date().isoformat()}"]
         if hit.projects:
             details.insert(
@@ -88,7 +102,10 @@ def search_text(result: SearchResult) -> str:  # noqa: PLR0912 — project and r
         if hit.excerpt is not None:
             lines.append(f"  excerpt: {hit.excerpt}")
         if hit.contradicted_by:
-            lines.append(f"  contradicted by: {', '.join(hit.contradicted_by)}")
+            lines.append(
+                f"  contradicted by: {', '.join(hit.contradicted_by)} · read before relying on "
+                f"this: {call('show', hit.contradicted_by, detail='full')}"
+            )
         if hit.verified_by:
             lines.append(f"  verified by: {', '.join(hit.verified_by)}")
         lines.append(f"  → {call('show', hit.id)}")
@@ -456,11 +473,21 @@ def _contradicted_lines(result: PrimeResult) -> list[str]:
             f"  {record.id}  {record.entry_type}  {record.title} · work {record.work_status}"
         )
         lines += _contradicted_by_lines(item.contradicted_by)
+    corrections = list(
+        dict.fromkeys(source.id for item in result.contradicted for source in item.contradicted_by)
+    )
+    lines.append(f"  read the corrections: {call('show', corrections, detail='full')}")
     return lines
 
 
 def _count_lines(result: PrimeResult, project_id: str) -> list[str]:
     lines = ["", "records by type (search lists them; add query=... to rank by your task):"]
+    open_total = sum(row.open for row in result.counts if row.entry_type != "problem-statement")
+    if open_total:
+        lines.append(
+            f"  all {open_total} open: "
+            + call("search", projects=[project_id], work_status="open", limit=open_total)
+        )
     for row in result.counts:
         if row.entry_type == "problem-statement":
             continue

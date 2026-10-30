@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -310,3 +311,20 @@ def test_show_mixes_record_and_project_ids_and_full_lists_framing_history(store:
     assert [item.project.id for item in result.projects] == [project.project.id]
     assert [item.version for item in result.projects[0].framing_history] == [2, 1]
     assert text.index("Second purpose.") < text.index("Record body")
+
+
+def test_show_reports_a_procedure_never_verified_and_a_stamped_one_with_its_date(
+    store: Store,
+) -> None:
+    """Catches an unstamped procedure reading as fine: with prime no longer listing records,
+    show and search are where an agent learns a procedure was never run."""
+    never = _write(store, "Run the thing", entry_type="procedure", work_status="open")
+    stamped = _write(store, "Run the other thing", entry_type="procedure", work_status="open")
+    store.stamp_verified(stamped, "green", date(2026, 10, 1))
+
+    never_text = _call(store, show, item_id=never).render_text()
+    stamped_text = _call(store, show, item_id=stamped).render_text()
+
+    assert "never verified, run it and then mark_verified" in never_text
+    assert "verified 2026-10-01 in green" in stamped_text
+    assert "never verified" not in stamped_text

@@ -168,6 +168,7 @@ def test_project_prime_counts_each_type_with_calls_that_return_exactly_that_many
     listed = asyncio.run(listing())
     assert sorted(hit.title for hit in listed.hits) == ["Also deciding", "Deciding"]
     assert listed.total == 2
+    assert (f'  all 2 open: search(projects=["{project}"], work_status="open", limit=2)') in text
     assert f'search(projects=["{project}"], query="...")' in text
 
 
@@ -198,7 +199,8 @@ def test_project_prime_lists_contradicted_records_with_current_corrections_only(
     assert (
         "contradicted records (1; read the correction before relying on these):\n"
         f"  {wrong}  report  Wrong total · work closed\n"
-        f"    contradicted by: {fix} (note) Correct total"
+        f"    contradicted by: {fix} (note) Correct total\n"
+        f'  read the corrections: show(["{fix}"], detail="full")'
     ) in text
     assert "Withdrawn objection" not in text
     assert untouched not in text

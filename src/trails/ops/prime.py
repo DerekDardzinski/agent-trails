@@ -46,7 +46,7 @@ async def prime(
         Field(description="Projects to skip in the whole-store index; ignored for scoped prime."),
     ] = 0,
 ) -> PrimeResult:
-    """Orient to the whole store or one project's current framing, paths, and records.
+    """Orient to the whole store, or to one project's framing, open work and corrections.
 
     Use this when: beginning a session, choosing among registered projects, or resuming work in
     one known project.

@@ -291,6 +291,7 @@ def _hit(
         contradicted_by=list(
             dict.fromkeys(source.id for relation, source in current if relation == "contradicts")
         ),
+        last_verified=record.last_verified,
         verified_by=list(
             dict.fromkeys(
                 source.id

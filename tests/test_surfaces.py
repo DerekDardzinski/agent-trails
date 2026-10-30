@@ -369,6 +369,7 @@ def test_real_search_has_structural_parity_between_cli_and_mcp(
         "excerpt",
         "contradicted_by",
         "verified_by",
+        "last_verified",
     }
 
 

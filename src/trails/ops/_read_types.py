@@ -3,7 +3,7 @@
 NOTE: no `from __future__ import annotations` in this package. See `ops/__init__.py`.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel
@@ -56,6 +56,7 @@ class SearchHit(BaseModel):
     # it: the warnings prime used to print beside each record, now carried wherever it is found
     contradicted_by: list[str]
     verified_by: list[str]
+    last_verified: tuple[date, str] | None  # a procedure's mark_verified stamp
 
 
 class ProjectSearchHit(BaseModel):
