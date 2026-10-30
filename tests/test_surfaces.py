@@ -367,6 +367,8 @@ def test_real_search_has_structural_parity_between_cli_and_mcp(
         "matched_by",
         "keyword_matches",
         "excerpt",
+        "contradicted_by",
+        "verified_by",
     }
 
 
@@ -511,8 +513,8 @@ def test_publish_help_shows_field_descriptions_and_the_entry_format(
 
     assert code == 0
     assert (
-        "One line stating the claim or outcome rather than only naming the activity; prime "
-        "lists this title when orienting an agent."
+        "One line stating the claim or outcome rather than only naming the activity; search "
+        "and prime list this title when orienting an agent."
     ) in out
     assert (
         "Open means a later action is expected on this exact record, for example an untested "

@@ -11,7 +11,6 @@ if TYPE_CHECKING:
         ArtifactStatus,
         LineageResult,
         PathStatus,
-        PrimeEntry,
         PrimeRecordRef,
         PrimeResult,
         ProjectSearchHit,
@@ -88,6 +87,10 @@ def search_text(result: SearchResult) -> str:  # noqa: PLR0912 — project and r
             lines.append(f"  matched by: {matched}")
         if hit.excerpt is not None:
             lines.append(f"  excerpt: {hit.excerpt}")
+        if hit.contradicted_by:
+            lines.append(f"  contradicted by: {', '.join(hit.contradicted_by)}")
+        if hit.verified_by:
+            lines.append(f"  verified by: {', '.join(hit.verified_by)}")
         lines.append(f"  → {call('show', hit.id)}")
     if result.total == 0 and result.project_total == 0:
         if result.filters:
@@ -408,140 +411,77 @@ def prime_text(result: PrimeResult) -> str:
                 reason="...",
             )
         )
-    lines += _problem_statement_lines(
-        result.problem_statements, result.problem_statement_contradicted_by
-    )
-    ordered = [name for name in _PRIME_GROUP_ORDER if name in result.groups]
-    ordered += sorted(name for name in result.groups if name not in _PRIME_GROUP_ORDER)
-    for kind in ordered:
-        entries = result.groups[kind]
-        closed = result.closed_counts.get(kind, 0)
-        current = closed + sum(entry.record.work_status == "open" for entry in entries)
-        lines += ["", f"{_group_label(kind)} ({current} current · {closed} closed):"]
-        for entry in entries:
-            lines += _prime_entry_lines(kind, entry)
-        if closed:
-            listing = call(
-                "search",
-                projects=[project.id],
-                entry_type=kind,
-                work_status="closed",
-                limit=closed,
-            )
-            lines.append(f"  {closed} closed, listed above only when contradicted: {listing}")
-    shown = [entry.record.id for kind in ordered for entry in result.groups[kind]]
-    hints = []
-    if shown:
-        # One id, not every listed id: a show of every listed record is itself a reply large
-        # enough to lose the MCP connection (546,817 bytes for 69 records on prj-5ht8o).
-        hints.append(f"read a full record: {call('show', shown[0], detail='full')}")
-    hints.append(f"find anything else: {call('search', projects=[project.id], query='...')}")
-    hints.append(f"framing history: {call('show', project.id, detail='full')}")
+    lines += _problem_statement_lines(result, project.id)
+    lines += _contradicted_lines(result)
+    lines += _count_lines(result, project.id)
+    hints = [
+        f"find what your task needs: {call('search', projects=[project.id], query='...')}",
+        f"framing history: {call('show', project.id, detail='full')}",
+    ]
     lines += ["", next_line(hints)]
     return "\n".join(lines)
 
 
-_PRIME_GROUP_ORDER = (
-    "decision",
-    "result",
-    "hypothesis",
-    "procedure",
-    "fact",
-    "insight",
-    "verification",
-    "report",
-    "note",
-)
-_GROUP_LABELS = {
-    "decision": "decisions",
-    "result": "results",
-    "hypothesis": "hypotheses",
-    "procedure": "procedures",
-    "fact": "facts",
-    "insight": "insights",
-    "verification": "verifications",
-    "report": "reports",
-    "note": "notes",
-}
-
-
-def _problem_statement_lines(
-    records: list[PrimeRecordRef], contradicted_by: dict[str, list[PrimeRecordRef]]
-) -> list[str]:
-    lines = ["", f"problem statements ({len(records)} current):"]
+def _problem_statement_lines(result: PrimeResult, project_id: str) -> list[str]:
+    records = result.problem_statements
+    closed = next((row.closed for row in result.counts if row.entry_type == "problem-statement"), 0)
+    lines = ["", f"open problem statements ({len(records)} of {len(records) + closed} current):"]
     if not records:
-        return [*lines, "  none recorded"]
+        lines.append("  none open")
     for record in records:
-        lines.append(f"  {record.id}  {record.title} · work {record.work_status}")
-        lines += _contradicted_by_lines(contradicted_by.get(record.id, []))
-    lines.append(f"  read them: {call('show', [record.id for record in records], detail='full')}")
+        lines.append(f"  {record.id}  {record.title}")
+        lines += _contradicted_by_lines(result.problem_statement_contradicted_by.get(record.id, []))
+    if records:
+        lines.append(
+            f"  read them: {call('show', [record.id for record in records], detail='full')}"
+        )
+    if closed:
+        lines.append(
+            f"  {closed} closed: {_listing(project_id, 'problem-statement', 'closed', closed)}"
+        )
     return lines
 
 
-def _contradicted_by_lines(
-    sources: list[PrimeRecordRef], skip: set[str] | None = None
-) -> list[str]:
+def _contradicted_lines(result: PrimeResult) -> list[str]:
+    if not result.contradicted:
+        return ["", "contradicted records: none"]
+    lines = [
+        "",
+        f"contradicted records ({len(result.contradicted)}; read the correction before relying "
+        "on these):",
+    ]
+    for item in result.contradicted:
+        record = item.record
+        lines.append(
+            f"  {record.id}  {record.entry_type}  {record.title} · work {record.work_status}"
+        )
+        lines += _contradicted_by_lines(item.contradicted_by)
+    return lines
+
+
+def _count_lines(result: PrimeResult, project_id: str) -> list[str]:
+    lines = ["", "records by type (search lists them; add query=... to rank by your task):"]
+    for row in result.counts:
+        if row.entry_type == "problem-statement":
+            continue
+        lines.append(f"  {row.entry_type}: {row.open} open · {row.closed} closed")
+        for status, count in (("open", row.open), ("closed", row.closed)):
+            if count:
+                lines.append(f"    {status}: {_listing(project_id, row.entry_type, status, count)}")
+    return lines
+
+
+def _listing(project_id: str, entry_type: str, work_status: str, count: int) -> str:
+    return call(
+        "search", projects=[project_id], entry_type=entry_type, work_status=work_status, limit=count
+    )
+
+
+def _contradicted_by_lines(sources: list[PrimeRecordRef]) -> list[str]:
     return [
         f"    contradicted by: {source.id} ({source.entry_type}) {source.title}"
         for source in sources
-        if source.id not in (skip or set())
     ]
-
-
-def _prime_entry_lines(kind: str, entry: PrimeEntry) -> list[str]:
-    record = entry.record
-    facts: list[str] = [f"work {record.work_status}"]
-    if kind == "result":
-        facts.append(
-            "verified by " + ", ".join(item.id for item in entry.verifications)
-            if entry.verifications
-            else "not verified"
-        )
-        facts.append(
-            "builds on " + ", ".join(_target(item) for item in entry.builds_on)
-            if entry.builds_on
-            else "builds on nothing"
-        )
-    elif kind == "hypothesis":
-        results = [item.record for item in entry.incoming_results if item.relation == "builds_on"]
-        facts.append(
-            "results built on this version: " + ", ".join(item.id for item in results)
-            if results
-            else "no result built on this version"
-        )
-    elif kind == "procedure":
-        facts.append(
-            f"verified {record.last_verified[0].isoformat()} in {record.last_verified[1]}"
-            if record.last_verified is not None
-            else "never verified"
-        )
-    if replaced := record.replaces:
-        facts.append(f"replaces {replaced}")
-    lines = [f"  {record.id}  {record.title} · " + " · ".join(facts)]
-    listed: set[str] = set()
-    if kind == "hypothesis":
-        for link in entry.incoming_results:
-            if link.relation in {"cites", "contradicts"}:
-                verb = "cited by" if link.relation == "cites" else "contradicted by"
-                lines.append(
-                    f"    {verb}: {link.record.id} (result; {link.relation} does not count as a test, use builds_on)"
-                )
-                if link.relation == "contradicts":
-                    listed.add(link.record.id)
-    return lines + _contradicted_by_lines(entry.contradicted_by, listed)
-
-
-def _target(record: PrimeRecordRef) -> str:
-    labels = [record.entry_type, f"work {record.work_status}"]
-    if record.superseded_by is not None:
-        labels.append(f"replaced by {record.superseded_by}")
-    elif record.retired:
-        labels.append("retired")
-    return f"{record.id} ({', '.join(labels)})"
-
-
-def _group_label(kind: str) -> str:
-    return _GROUP_LABELS.get(kind, f"{kind} records")
 
 
 def _work_status_history(record: Record) -> list[str]:

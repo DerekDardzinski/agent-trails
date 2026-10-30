@@ -234,7 +234,7 @@ def test_prime_shows_a_note_that_contradicts_a_report(store: Store) -> None:
     text = _run(store, prime, project=project).render_text()
 
     assert (
-        f"  {report}  19,389 of 20,948 rows · work closed\n"
+        f"  {report}  report  19,389 of 20,948 rows · work closed\n"
         f"    contradicted by: {correction} (note) Correction: 19,189 of 20,748"
     ) in text
 
@@ -512,9 +512,7 @@ def test_prime_shows_contradictions_on_problem_statements_and_ignores_cites(
     text = _run(store, prime, project=project).render_text()
 
     assert text.count("contradicted by:") == 1
-    assert (
-        f"  {statement}  Goal · work open\n    contradicted by: {against} (note) Against"
-    ) in text
+    assert (f"  {statement}  Goal\n    contradicted by: {against} (note) Against") in text
 
 
 def test_prime_lists_a_result_contradicting_a_hypothesis_once(store: Store) -> None:

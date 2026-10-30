@@ -174,6 +174,8 @@ def test_ten_large_records_produce_compact_structured_hits_without_body_tails(
         "matched_by",
         "keyword_matches",
         "excerpt",
+        "contradicted_by",
+        "verified_by",
     }
 
     assert len(result.hits) == 10
@@ -719,3 +721,40 @@ def test_project_filters_use_or_and_unscoped_uses_latest_membership_state(store:
     assert set(_ids(scoped)) == {only_alpha, only_beta, shared}
     assert set(_ids(unscoped)) == {loose, removed}
     assert set(_ids(combined)) == {only_alpha, only_beta, shared, loose, removed}
+
+
+def test_a_hit_names_current_corrections_and_verifications_and_drops_replaced_ones(
+    store: Store,
+) -> None:
+    """Catches the warnings prime used to print going missing once search is the way to a
+    record: a correction or a review that the reader of the hit never sees, or a withdrawn
+    one still presented as current."""
+    result = _write(store, "Throughput measured", entry_type="result")
+    fix = _write(store, "Correction", links=[Link(relation="contradicts", target_id=result)])
+    old_review = _write(
+        store,
+        "Review v1",
+        entry_type="verification",
+        links=[Link(relation="builds_on", target_id=result)],
+    )
+    _write(
+        store,
+        "Review v2",
+        entry_type="verification",
+        supersedes=old_review,
+        reason="Rechecked.",
+    )
+    review = _write(
+        store,
+        "Independent rerun",
+        entry_type="verification",
+        links=[Link(relation="builds_on", target_id=result)],
+    )
+    _write(store, "Cites only", links=[Link(relation="cites", target_id=result)])
+
+    found = _search(store, entry_type="result")
+    hit = next(item for item in found.hits if item.id == result)
+
+    assert (hit.contradicted_by, hit.verified_by) == ([fix], [review])
+    text = found.render_text()
+    assert f"  contradicted by: {fix}\n  verified by: {review}\n" in text

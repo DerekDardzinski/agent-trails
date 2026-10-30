@@ -35,8 +35,8 @@ def result_hypothesis_link_notes(
         ):
             continue
         notes.append(
-            f"this result {link.relation} {target.id} (hypothesis). prime counts only "
-            "builds_on when it decides whether a hypothesis has a result. If this result "
+            f"this result {link.relation} {target.id} (hypothesis). Only builds_on "
+            "records that a result tests a hypothesis. If this result "
             f'tests that hypothesis, run: link("{record_id}", "builds_on", "{target.id}")'
         )
         seen.add(key)

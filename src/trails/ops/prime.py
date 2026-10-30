@@ -3,7 +3,6 @@
 NOTE: no `from __future__ import annotations` in this package. See `ops/__init__.py`.
 """
 
-from collections.abc import Sequence
 from typing import Annotated
 
 from pydantic import Field
@@ -15,14 +14,14 @@ from trails.ops import context
 from trails.ops._marks import Operation
 from trails.ops._read_types import (
     PathStatus,
-    PrimeEntry,
+    PrimeContradicted,
     PrimeRecordRef,
-    PrimeRelation,
     PrimeResult,
+    PrimeTypeCount,
     ProjectIndexEntry,
 )
 from trails.reachability import path_state
-from trails.vocab import Relation
+from trails.vocab import ENTRY_TYPES
 
 OPERATION = Operation(toolset="agent", read_only=True, destructive=False, idempotent=True)
 
@@ -57,11 +56,11 @@ async def prime(
 
     Returns: without project, up to 100 project ids, names, framing titles, current/open counts,
     last activity, the total project count, paging call, and current unscoped count. With
-    project, current identity, paths, full current framing, one title line per current problem
-    statement with the show call that reads them, one line per open record and per contradicted
-    closed record, and per entry type the count of closed records with the search call that
-    lists them, plus disjoint current, replaced and retired counts. Records are references
-    without bodies; show returns a full record.
+    project, a page whose size does not grow with history: current identity, paths and full
+    framing; one title line per open problem statement with the show call that reads them;
+    every current record that a current record contradicts, with those corrections; and per
+    entry type the open and closed counts with the search calls that list each, plus disjoint
+    current, replaced and retired counts. No other record is listed: search finds the rest.
     """
     if limit < 1:
         raise UsageError(f"limit must be at least 1, not {limit}")
@@ -95,8 +94,8 @@ async def prime(
                 retired_count=0,
                 problem_statements=[],
                 problem_statement_contradicted_by={},
-                groups={},
-                closed_counts={},
+                contradicted=[],
+                counts=[],
                 store_error=None,
             )
 
@@ -105,40 +104,46 @@ async def prime(
             store.resolve_project(project)  # raises the stable public refusal
             raise AssertionError("unreachable")
         seen = retrieval.overview(store, registered.id)
-        records = store.get_records([*seen.current, *seen.problem_statements])
-        incoming = retrieval.incoming_links_many(store, [*seen.current, *seen.problem_statements])
-        incoming_ids = [source for links in incoming.values() for _relation, source in links]
-        target_ids = [
-            link.target_id
-            for record_id in seen.current
-            if (record := records.get(record_id)) is not None
-            for link in record.links
-            if link.relation == "builds_on"
+        records = store.get_records(seen.current)
+        incoming = retrieval.incoming_links_many(store, seen.current)
+        contradicting_ids = [
+            source
+            for links in incoming.values()
+            for relation, source in links
+            if relation == "contradicts"
         ]
-        related = {**records, **store.get_records([*incoming_ids, *target_ids])}
+        sources = store.get_records(contradicting_ids)
     except StoreUnavailableError as exc:
         return _unavailable(str(exc))
 
-    problem_ids = set(seen.problem_statements)
-    groups: dict[str, list[PrimeEntry]] = {}
-    closed_counts: dict[str, int] = {}
+    def corrections(record_id: str) -> list[PrimeRecordRef]:
+        found = {
+            source: _ref(sources[source])
+            for relation, source in incoming.get(record_id, [])
+            if relation == "contradicts"
+            and source in sources
+            and not sources[source].retired
+            and sources[source].superseded_by is None
+        }
+        return list(found.values())
+
+    tallies: dict[str, list[int]] = {}
+    problem_statements: list[PrimeRecordRef] = []
+    problem_contradicted: dict[str, list[PrimeRecordRef]] = {}
+    contradicted: list[PrimeContradicted] = []
     for record_id in seen.current:
         record = records.get(record_id)
-        if record is None or record_id in problem_ids:
+        if record is None:
             continue
-        listed = groups.setdefault(record.entry_type, [])
-        entry = _entry(record, incoming.get(record_id, []), related)
-        if record.work_status == "closed":
-            closed_counts[record.entry_type] = closed_counts.get(record.entry_type, 0) + 1
-            # A contradicted closed record stays listed, so its correction is seen in prime.
-            if not entry.contradicted_by:
-                continue
-        listed.append(entry)
-    problem_entries = {
-        item: _entry(records[item], incoming.get(item, []), related)
-        for item in seen.problem_statements
-        if item in records
-    }
+        tally = tallies.setdefault(record.entry_type, [0, 0])
+        tally[0 if record.work_status == "open" else 1] += 1
+        against = corrections(record_id)
+        if record.entry_type == "problem-statement" and record.work_status == "open":
+            problem_statements.append(_ref(record))
+            if against:
+                problem_contradicted[record_id] = against
+        elif against:
+            contradicted.append(PrimeContradicted(record=_ref(record), contradicted_by=against))
 
     return PrimeResult(
         project=ProjectRef(id=registered.id, name=registered.name),
@@ -152,14 +157,14 @@ async def prime(
         current_count=seen.current_count,
         replaced_count=seen.replaced_count,
         retired_count=seen.retired_count,
-        problem_statements=[entry.record for entry in problem_entries.values()],
-        problem_statement_contradicted_by={
-            item: entry.contradicted_by
-            for item, entry in problem_entries.items()
-            if entry.contradicted_by
-        },
-        groups=groups,
-        closed_counts=closed_counts,
+        problem_statements=problem_statements,
+        problem_statement_contradicted_by=problem_contradicted,
+        contradicted=contradicted,
+        counts=[
+            PrimeTypeCount(entry_type=kind, open=tallies[kind][0], closed=tallies[kind][1])
+            for kind in ENTRY_TYPES
+            if kind in tallies
+        ],
         store_error=None,
     )
 
@@ -170,49 +175,6 @@ def _ref(record: Record) -> PrimeRecordRef:
         entry_type=record.entry_type,
         title=record.title,
         work_status=record.work_status,
-        superseded_by=record.superseded_by,
-        retired=record.retired,
-        replaces=next(
-            (link.target_id for link in record.links if link.relation == "supersedes"), None
-        ),
-        last_verified=record.last_verified,
-    )
-
-
-def _entry(
-    record: Record,
-    incoming: Sequence[tuple[Relation, str]],
-    related: dict[str, Record],
-) -> PrimeEntry:
-    sources = [
-        (relation, related[source])
-        for relation, source in incoming
-        if source in related
-        and not related[source].retired
-        and related[source].superseded_by is None
-    ]
-    return PrimeEntry(
-        record=_ref(record),
-        builds_on=[
-            _ref(related[link.target_id])
-            for link in record.links
-            if link.relation == "builds_on" and link.target_id in related
-        ],
-        incoming_results=[
-            PrimeRelation(relation=relation, record=_ref(source))
-            for relation, source in sources
-            if source.entry_type == "result" and relation in {"builds_on", "cites", "contradicts"}
-        ],
-        verifications=[
-            _ref(source)
-            for relation, source in sources
-            if source.entry_type == "verification" and relation == "builds_on"
-        ],
-        contradicted_by=list(
-            {
-                source.id: _ref(source) for relation, source in sources if relation == "contradicts"
-            }.values()
-        ),
     )
 
 
@@ -231,7 +193,7 @@ def _unavailable(error: str) -> PrimeResult:
         retired_count=0,
         problem_statements=[],
         problem_statement_contradicted_by={},
-        groups={},
-        closed_counts={},
+        contradicted=[],
+        counts=[],
         store_error=error,
     )

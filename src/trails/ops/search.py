@@ -114,7 +114,8 @@ async def search(  # noqa: PLR0917 — public query contract
     lineage, for what a record was built on.
 
     Returns: a separately ranked list of at most three project matches before one paged record
-    list. Project discovery searches exact id/name, current framing keywords, and current framing
+    list. Each record match names the current records that contradict it and the current
+    verifications built on it. Project discovery searches exact id/name, current framing keywords, and current framing
     similarity. Record-only filters suppress project matches. A body-keyword match shows a window
     of at most 240 characters centered on the first match. A semantic match with no body-keyword
     match shows the complete selected embedding chunk.
@@ -183,7 +184,21 @@ async def search(  # noqa: PLR0917 — public query contract
             if found:
                 relaxed_firsts.append((name, len(found), found[0]))
     records = store.get_records([*page, *(first for _, _, first in relaxed_firsts)])
-    hits = [_hit(records[record_id], ranked, query, engine) for record_id in page]
+    incoming = retrieval.incoming_links_many(store, page)
+    sources = store.get_records(
+        [source for links in incoming.values() for _relation, source in links]
+    )
+    hits = [
+        _hit(
+            records[record_id],
+            ranked,
+            query,
+            engine,
+            incoming=incoming.get(record_id, []),
+            sources=sources,
+        )
+        for record_id in page
+    ]
     all_projects = {item.id: item for item in store.list_projects()}
     project_hits = [
         _project_hit(all_projects[project_id], project_ranked, query, engine)
@@ -239,7 +254,17 @@ def _hit(
     ranked: retrieval.Ranked,
     query: str,
     engine: embeddings.EmbeddingEngine,
+    *,
+    incoming: Sequence[tuple[Relation, str]],
+    sources: dict[str, Record],
 ) -> SearchHit:
+    current = [
+        (relation, sources[source])
+        for relation, source in incoming
+        if source in sources
+        and not sources[source].retired
+        and sources[source].superseded_by is None
+    ]
     vector_match = ranked.vector.get(record.id)
     rankers = ranked.rankers.get(record.id, {})
     keyword_matches = [
@@ -263,6 +288,16 @@ def _hit(
         matched_by=_matched_by(rankers),
         keyword_matches=keyword_matches,
         excerpt=_excerpt(record.title, record.body, keyword_matches, vector_match, engine),
+        contradicted_by=list(
+            dict.fromkeys(source.id for relation, source in current if relation == "contradicts")
+        ),
+        verified_by=list(
+            dict.fromkeys(
+                source.id
+                for relation, source in current
+                if relation == "builds_on" and source.entry_type == "verification"
+            )
+        ),
     )
 
 

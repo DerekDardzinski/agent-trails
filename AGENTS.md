@@ -118,13 +118,14 @@ digest is flagged) and returns field, line and detector, never the matched text.
   `retrieval.Ranked` keeps diagnostics internally; `show` returns the full record.
   A `work_status` filter returns current versions unless `include_history=true`; searches without
   `work_status` continue to include superseded versions.
-- **PRIME ENTRIES ARE REFERENCES, NOT RECORDS.** Scoped prime lists every current record of a
-  project, so `PrimeRecordRef` carries id, entry type, title, work status, lifecycle, the id it
-  replaces and the last verification, and no body or other `Record` field. Full records there
-  made one 10,612,327-byte MCP reply on a 317-record project, and Kiro dropped the connection.
-  What prime lists is chosen only from stored fields: the work status the agent set and stored
-  `contradicts` links. Every collapsed set comes with the complete `show` or `search` call that
-  returns it.
+- **SCOPED PRIME IS A PAGE WHOSE SIZE DOES NOT GROW WITH HISTORY.** It lists only open problem
+  statements and current records that a current record contradicts, each as a `PrimeRecordRef`
+  (id, entry type, title, work status, never a body), and counts every entry type by work status
+  with the `search` calls that list each. Listing records made one 10,612,327-byte MCP reply on
+  a 317-record project (Kiro dropped the connection), and even open records alone were 35,264
+  bytes of text there. Warnings about a record (its current contradictions and verifications)
+  travel on `SearchHit`, so they reach a record however it is found. What prime lists is chosen
+  only from stored fields: work status and stored `contradicts` links.
 - Vocabularies (`ENTRY_TYPES`, `WORK_STATUSES`, `PROJECT_ACTIONS`, `ENTRY_TYPE_PREFIXES`,
   `RELATIONS`, the record and project id patterns, and `stale_days()`) are defined once in `src/trails/vocab.py`, which also generates
   the schema's ENUM columns.

@@ -50,7 +50,7 @@ async def lint(
 
     Use this when: you are tidying a project, or before handing a project to another session.
 
-    Use instead: prime, for open scientific items rather than store problems.
+    Use instead: prime, for a project's open problem statements and counts of open work, rather than store problems.
 
     Returns: one section per category, each item naming the record.
     """

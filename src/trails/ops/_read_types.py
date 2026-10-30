@@ -3,7 +3,7 @@
 NOTE: no `from __future__ import annotations` in this package. See `ops/__init__.py`.
 """
 
-from datetime import date, datetime
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel
@@ -52,6 +52,10 @@ class SearchHit(BaseModel):
     matched_by: list[Literal["keyword", "exact", "semantic"]]
     keyword_matches: list[KeywordMatch]
     excerpt: str | None
+    # ids of current records that contradict this one, and of current verifications built on
+    # it: the warnings prime used to print beside each record, now carried wherever it is found
+    contradicted_by: list[str]
+    verified_by: list[str]
 
 
 class ProjectSearchHit(BaseModel):
@@ -166,34 +170,27 @@ class LineageResult(RenderedResult):
 
 
 class PrimeRecordRef(BaseModel):
-    """A record as prime lists it: identity and lifecycle, never its body.
-
-    Prime is an orientation page over every current record of a project, so it carries
-    references and leaves full records to show. Measured on a 317-record project, full
-    records here made one 10.6 MB MCP reply that the host dropped.
-    """
+    """A record as prime lists it: identity and lifecycle, never its body."""
 
     id: str
     entry_type: EntryType
     title: str
     work_status: WorkStatus
-    superseded_by: str | None
-    retired: bool
-    replaces: str | None  # the record this one supersedes
-    last_verified: tuple[date, str] | None
 
 
-class PrimeRelation(BaseModel):
-    relation: Relation
+class PrimeContradicted(BaseModel):
+    """A current record that current records contradict, with those corrections."""
+
     record: PrimeRecordRef
+    contradicted_by: list[PrimeRecordRef]
 
 
-class PrimeEntry(BaseModel):
-    record: PrimeRecordRef
-    builds_on: list[PrimeRecordRef]
-    incoming_results: list[PrimeRelation]
-    verifications: list[PrimeRecordRef]
-    contradicted_by: list[PrimeRecordRef]  # current records of any type that contradict this one
+class PrimeTypeCount(BaseModel):
+    """How many current records of one entry type a project holds, by work status."""
+
+    entry_type: EntryType
+    open: int
+    closed: int
 
 
 class ProjectIndexEntry(BaseModel):
@@ -207,7 +204,7 @@ class ProjectIndexEntry(BaseModel):
 
 
 class PrimeResult(RenderedResult):
-    """The whole-store project index or one project's complete current orientation."""
+    """The whole-store project index or one project's orientation page."""
 
     project: ProjectRef | None
     projects: list[ProjectIndexEntry]
@@ -220,14 +217,17 @@ class PrimeResult(RenderedResult):
     current_count: int
     replaced_count: int
     retired_count: int
+    # Open problem statements only; closed ones are counted under entry type problem-statement.
     problem_statements: list[PrimeRecordRef]
-    # problem statement id -> current records of any type that contradict it; absent when none
+    # problem statement id -> current records that contradict it; absent when none
     problem_statement_contradicted_by: dict[str, list[PrimeRecordRef]]
-    # entry type -> its listed current records: every open one, and every closed one that a
-    # current record contradicts. A type with current records always has a key, even if empty.
-    groups: dict[str, list[PrimeEntry]]
-    # entry type -> current closed records of that type, problem statements excluded
-    closed_counts: dict[str, int]
+    # Every other current record that a current record contradicts, so a correction is seen
+    # without a search. The only records prime lists besides open problem statements.
+    contradicted: list[PrimeContradicted]
+    # One row per entry type with current records, in a fixed order. Prime lists no other
+    # records: its size depends on open problem statements and contradictions, never on
+    # history. Measured on a 317-record project, listing open records made 35,264 bytes of text.
+    counts: list[PrimeTypeCount]
     store_error: str | None
 
     def render_text(self) -> str:

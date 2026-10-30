@@ -293,8 +293,8 @@ def test_a_result_that_only_cites_a_hypothesis_gets_the_builds_on_call(store: St
     )
 
     assert cited.notes == [
-        f"this result cites {hypothesis} (hypothesis). prime counts only builds_on when it "
-        "decides whether a hypothesis has a result. If this result tests that hypothesis, "
+        f"this result cites {hypothesis} (hypothesis). Only builds_on records that a result "
+        "tests a hypothesis. If this result tests that hypothesis, "
         f'run: link("{cited.record_id}", "builds_on", "{hypothesis}")'
     ]
     assert built.notes == []
@@ -314,8 +314,8 @@ def test_linking_a_result_to_cite_a_hypothesis_gets_the_same_note(store: Store) 
     )
 
     expected = [
-        f"this result cites {hypothesis} (hypothesis). prime counts only builds_on when it "
-        "decides whether a hypothesis has a result. If this result tests that hypothesis, "
+        f"this result cites {hypothesis} (hypothesis). Only builds_on records that a result "
+        "tests a hypothesis. If this result tests that hypothesis, "
         f'run: link("{result}", "builds_on", "{hypothesis}")'
     ]
     assert first.notes == again.notes == expected

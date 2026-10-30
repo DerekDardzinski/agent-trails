@@ -100,11 +100,13 @@ Records belong to zero, one or several projects through append-only membership e
 `publish(projects=[...])` writes initial memberships atomically. `set_projects` changes grouping
 later without changing the record. `prime()` lists a small project index page and current unscoped count; its default page holds 100
 projects because the measured 1,000-project JSON response without paging was 155,184 bytes.
-`prime(project=...)` shows one project's current framing and paths in full, then its current
-records without bodies: problem statements as title lines with the `show` call that reads them,
-open and contradicted records one line each, and per entry type the count of closed records with
-the `search` call that lists them. Measured on a 317-record project, the earlier full-record
-response was one 10,612,327-byte MCP message, which Kiro dropped; the compact one is about 180 KB.
+`prime(project=...)` is a page whose size does not grow with history: the project's current framing
+and paths in full, its open problem statements as title lines with the `show` call that reads
+them, every current record that a current record contradicts, and per entry type the open and
+closed counts with the `search` calls that list each. It lists no other record; `search` finds
+them, and each search hit names the current records that contradict it and the current
+verifications built on it. Listing every current record once made one 10,612,327-byte MCP reply
+on a 317-record project, which Kiro dropped.
 
 ## A possible secret is a warning
 
