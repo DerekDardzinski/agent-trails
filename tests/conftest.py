@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from trails.entry_store import EntryStore
 from trails.store import Store, open_store
 
 
@@ -40,6 +41,36 @@ def store(initialised_db: Path, tmp_path: Path) -> Iterator[Store]:
     destination = tmp_path / "db"
     shutil.copytree(initialised_db, destination)
     yield open_store(destination)
+
+
+@pytest.fixture(scope="session")
+def initialised_entry_db(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """One database with the entry schema, created once; tests get a copy (see `entries`)."""
+    from trails.entry_store import open_entry_store
+
+    template = tmp_path_factory.mktemp("entry-template") / "db"
+    open_entry_store(template)
+    return template
+
+
+@pytest.fixture
+def entries(initialised_entry_db: Path, tmp_path: Path) -> Iterator[EntryStore]:
+    from trails.entry_store import open_entry_store
+
+    destination = tmp_path / "entry-db"
+    shutil.copytree(initialised_entry_db, destination)
+    yield open_entry_store(destination)
+
+
+@pytest.fixture(autouse=True)
+def no_harness_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every write resolves its harness and session from the process tree, and a test run
+    inside Kiro or Claude Code would otherwise record the developer's real session. The process
+    table is the external boundary, so it is empty by default and every write records the
+    harness `unknown`. Session tests set their own table and home directory."""
+    from trails import sessions
+
+    monkeypatch.setattr(sessions, "process_table", dict)
 
 
 @pytest.fixture

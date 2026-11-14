@@ -21,7 +21,10 @@ def _ancestors() -> list[dict[str, str]]:
     pid = os.getpid()
     for _ in range(8):
         line = subprocess.run(
-            ["ps", "-o", "ppid=,command=", "-p", str(pid)], capture_output=True, text=True
+            ["ps", "-o", "ppid=,command=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            check=False,
         ).stdout.strip()
         if not line:
             break
@@ -40,7 +43,11 @@ async def probe(ctx: Context) -> str:
     info = params.clientInfo.model_dump() if params else None
     data = {
         "client_info": info,
-        "env": {k: v for k, v in os.environ.items() if any(s in k.upper() for s in ("SESSION", "CLAUDE", "KIRO", "TRANSCRIPT", "AGENT"))},
+        "env": {
+            k: v
+            for k, v in os.environ.items()
+            if any(s in k.upper() for s in ("SESSION", "CLAUDE", "KIRO", "TRANSCRIPT", "AGENT"))
+        },
         "ancestors": _ancestors(),
         "argv": sys.argv,
     }

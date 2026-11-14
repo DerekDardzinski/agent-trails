@@ -51,3 +51,25 @@ everything is on branch `redesign`. The D-numbers match "Decisions this plan mak
     `agent`; closing a parent with open children is stored with a warning; `unlink` requires a
     reason and `link` doesn't; the preference cap counts the overflow lines and the warning;
     the default database path switches in step 4.
+
+## Added during implementation
+
+Choices made while building, which neither the plan nor the records settle. The step that made
+each one is in brackets.
+
+20. **An unrecognized MCP client name falls back to the process tree before it is stored as
+    the harness name** [step 1]. The plan said "anything else is stored as given". I don't know
+    what client name Kiro sends (no probe ran under Kiro), so if it lacks the word `kiro`, the
+    plan's rule would record Kiro writes under that name with no session. Checking the process
+    tree first catches Kiro either way. A probe this session (trails `fac-7azma`) showed that
+    Kiro runs as a `node` process whose path contains `kiro-cli`, so detection matches that
+    substring anywhere in the command line, not the executable name.
+21. **`value={}` clears an entry's value** [step 1]. D14 says an empty list clears; `value` is
+    an object, so the empty object plays that role.
+22. **A version identical to the current one is not written**; the response says nothing
+    changed [step 1]. Otherwise a no-op edit would make every other writer's `base_version`
+    stale for nothing.
+23. **A lost-response retry is recognized**: a write with an old `base_version` whose next
+    version already exists with exactly this content from this same harness and session
+    returns that version instead of a stale-base refusal [step 1]. Same idea as the old store's
+    landed-write check.

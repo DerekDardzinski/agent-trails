@@ -12,7 +12,20 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from trails.vocab import EntryType, ProjectAction, Relation, WorkStatus
+from trails.vocab import (
+    EntryType,
+    Kind,
+    LinkAction,
+    LinkRelation,
+    Outcome,
+    ProjectAction,
+    Relation,
+    StatedBy,
+    TaskEventKind,
+    TaskState,
+    Verdict,
+    WorkStatus,
+)
 
 
 class ArtifactRef(BaseModel):
@@ -220,3 +233,166 @@ class SetProjectsOutcome(BaseModel):
     unchanged_add: list[ProjectRef]
     unchanged_remove: list[ProjectRef]
     projects: list[ProjectRef]
+
+
+# ------------------------------------------------------------------ the entry model (redesign)
+
+
+class Provenance(BaseModel):
+    """Which harness and session wrote something, resolved without the agent's help.
+
+    `harness` is always set ("unknown" when nothing identifies one). `session_id` is None when
+    the harness gives no session; `transcript` and `agent` are None when they cannot be found.
+    """
+
+    harness: str
+    session_id: str | None = None
+    transcript: str | None = None
+    agent: str | None = None
+
+
+class EntryVersion(BaseModel):
+    """One append-only version of an entry, carrying its full content."""
+
+    entry_id: str
+    version: int
+    title: str
+    body: str
+    tags: list[str]
+    value: dict[str, Any] | None
+    priority: int | None
+    stated_by: StatedBy | None
+    artifacts: list[ArtifactRef]
+    code: list[CodeCapture]
+    reason: str | None
+    author: str
+    harness: str
+    session_id: str | None
+    created_at: datetime
+
+
+class EntryLink(BaseModel):
+    """One current outgoing link, with the target version it was written against."""
+
+    source_id: str
+    relation: LinkRelation
+    target_id: str
+    target_version: int | None
+    reason: str | None
+    author: str
+    created_at: datetime
+
+
+class LinkEvent(BaseModel):
+    """One append-only add or remove of a link."""
+
+    source_id: str
+    relation: LinkRelation
+    target_id: str
+    sequence: int
+    action: LinkAction
+    target_version: int | None
+    reason: str | None
+    author: str
+    harness: str
+    session_id: str | None
+    created_at: datetime
+
+
+class TaskEvent(BaseModel):
+    """One append-only claim, release, close or reopen of a goal or task."""
+
+    entry_id: str
+    sequence: int
+    event: TaskEventKind
+    outcome: Outcome | None
+    reason: str | None
+    author: str
+    harness: str
+    session_id: str | None
+    created_at: datetime
+
+
+class Entry(BaseModel):
+    """An entry as a read assembles it: identity, current version and current state.
+
+    `state`, `outcome` and `claim` are set for goals and tasks only. `claim` is the claim event
+    currently held, if any.
+    """
+
+    id: str
+    kind: Kind
+    created_at: datetime
+    current: EntryVersion
+    projects: list[ProjectRef]
+    links: list[EntryLink]
+    state: TaskState | None
+    outcome: Outcome | None
+    claim: TaskEvent | None
+    task_events: list[TaskEvent]
+    retired: bool
+    retired_reason: str | None
+
+
+class EntryDraft(BaseModel):
+    """What a caller asks the store to write.
+
+    Without `id` it creates version 1, and `kind` and `title` are required. With `id` it
+    writes the next version: `base_version` must equal the current version and `reason` must
+    be nonempty. In a new version a field left None inherits the previous version's value;
+    an explicit empty list clears it, and `value={}` clears the value (D14). `projects` None
+    leaves membership unchanged, and a list replaces it.
+    """
+
+    kind: Kind | None = None
+    id: str | None = None
+    base_version: int | None = None
+    reason: str | None = None
+    title: str | None = None
+    body: str | None = None
+    tags: list[str] | None = None
+    value: dict[str, Any] | None = None
+    artifacts: list[ArtifactRef] | None = None
+    code: list[CodeCapture] | None = None
+    priority: int | None = None
+    stated_by: StatedBy | None = None
+    projects: list[str] | None = None
+    parent: str | None = None
+    waits_on: list[str] = []
+
+
+class EntryWriteOutcome(BaseModel):
+    """A written version, its warnings and possible secrets. `retry` is True when the call
+    repeated a version that had already landed, so nothing new was written."""
+
+    entry: Entry
+    created: bool
+    retry: bool
+    warnings: list[str]
+    secret_findings: list[SecretFinding]
+
+
+class Comment(BaseModel):
+    """A comment beside an entry. It creates no version."""
+
+    id: str
+    entry_id: str
+    entry_version: int
+    body: str
+    verdict: Verdict | None
+    addresses: list[str]
+    addressed_by: list[str]
+    author: str
+    harness: str
+    session_id: str | None
+    created_at: datetime
+
+
+class SessionRow(BaseModel):
+    """One harness session, written the first time a write names it."""
+
+    id: str
+    harness: str
+    transcript: str | None
+    agent: str | None
+    first_seen: datetime
