@@ -86,9 +86,10 @@ Readiness and closing:
 - A child of X is a not-retired entry with a current `part_of` link to X. Descendants are
   children, transitively.
 - A task is **ready** when all hold: it is not closed and not retired; none of its children is
-  not closed; every current `waits_on` target of it and of each of its ancestors (via
-  `part_of`) is a task or goal closed `completed`. Targets of other kinds are ignored for
-  readiness and warned about at write time (D10). A retired target counts as not completed.
+  not closed; and every current `waits_on` target that is a task or goal, of it and of each of
+  its ancestors (via `part_of`), is closed `completed`. A `waits_on` target of any other kind
+  is ignored for readiness and warned about at write time (D10); a task whose only `waits_on`
+  target is a note is ready. A retired task or goal target counts as not completed.
 - A claimed task can be ready; `ready` lists it with the claimant's session and claim age.
 - `ready` lists ready tasks sorted by priority ascending (NULL last), then created_at
   ascending. It loads every not-closed task, its links and its ancestors' links in one read
@@ -231,6 +232,15 @@ D18. A follow-up created by `close` is `part_of` the closed entry's parent.
 D19. Search `status` values: `open`, `claimed`, `closed`, or an outcome.
 D20. Tests that are not store guards and dominate runtime may be marked `slow` (Derek asked for
     efficient test runs); each one marked is listed in the commit message.
+D21. `stated_by` defaults to `agent`.
+D22. Closing a parent with children not closed is stored with a warning, not refused
+    (principle 5).
+D23. `link` takes an optional reason; `unlink` requires one, because removing a dependency
+    changes what is ready and a later reader needs to know why.
+D24. The preference cap counts everything in the preference section, overflow title lines and
+    the warning included. "Newest first" compares the current version's created_at.
+D25. The default database path switches to `~/.agent-trails/db` in step 4, with the switch of
+    operations.
 
 Out of reach for this repository: the installed trails skill at `~/.kiro/skills/trails` (AIM
 managed) still teaches publish, export and mark_verified. It needs updating by its owner after
@@ -240,7 +250,7 @@ this lands; listed for Derek.
 
 The new core is built BESIDE the old one, so the full gate passes at the end of every step: new
 modules and new tests are added in steps 1 to 3 and the old store, ops and tests stay untouched
-until step 4 switches the operations over and deletes the old code in the same commit.
+until step 4 switches the operations over and then deletes the old code in the commit after.
 
 1. `vocab.py` new vocabularies (added beside the old ones), new schema and `EntryStore` in new
    modules, `sessions.py`. Acceptance tests: create then version an entry; a stale and a
@@ -264,13 +274,14 @@ until step 4 switches the operations over and deletes the old code in the same c
    `since_comment` lists exactly the changed versions and links.
 4. Switch: new operation modules (`write`, `link`, `unlink`, `claim`, `release`, `close`,
    `reopen`, `ready`, `add_comment`, `show`, `search`, `prime`, `retire`, projects), render,
-   guidance, the MCP binder's client-name context variable; delete the old store record code,
-   old ops and their tests in the same commit. Acceptance tests: the existing invariant suites
+   guidance, the MCP binder's client-name context variable. Acceptance tests: the existing invariant suites
    (`test_descriptions`, `test_ops_registry*`, `test_surfaces`, `test_module_boundary`,
    `test_mcp_toolsets`) pass over the new operations; prime's preference cap prints project
    preferences first and warns on overflow; a note hit lists its users; claim standing shows
    observation/assertion, supported and contradicted together; every task-changing response
-   redraws the affected graph.
+   redraws the affected graph. The deletion of the old store record code, old ops and their
+   tests is a separate commit right after the switch commit, so the review can read them apart.
+   Step 2 also tests that a task whose only `waits_on` target is a note is ready.
 5. `lint` (stale link versions, cycles, plus the carried-over artifact, capture, path, embedding
    and secret checks), `alias`, `embed`, `version`; docs (`README.md`, `AGENTS.md`,
    `docs/philosophy.md` principles 3 and 4, `CLAUDE.md` if it duplicates them); remove

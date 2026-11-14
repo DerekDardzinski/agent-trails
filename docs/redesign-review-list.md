@@ -47,3 +47,7 @@ everything is on branch `redesign`. The D-numbers match "Decisions this plan mak
     `claude-code`. It also showed `KIRO_SESSION_ID` leaking into Claude's environment when
     Claude is launched from a Kiro shell, so detection decides the harness before reading any
     variable. Only headless Claude Code was checked.
+19. Smaller defaults added after the plan's second review (D21-D25): `stated_by` defaults to
+    `agent`; closing a parent with open children is stored with a warning; `unlink` requires a
+    reason and `link` doesn't; the preference cap counts the overflow lines and the warning;
+    the default database path switches in step 4.
