@@ -1321,8 +1321,8 @@ class EntryStore(Store):
 
         `superseded` needs a nonempty `by`, every id an existing task; every current incoming
         waits_on link is moved onto every replacement, and each replacement gets a
-        `supersedes` link to the closed task, which is where `by` is recorded. Closing again
-        with the same outcome changes nothing.
+        `supersedes` link to the closed task, which is where `by` is recorded. A task that is
+        already closed, with any outcome, is refused as an overwrite and nothing is written.
         """
         if outcome not in OUTCOMES:
             raise ValidationError(f"outcome must be one of {', '.join(OUTCOMES)}")
