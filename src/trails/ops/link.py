@@ -11,7 +11,7 @@ from trails.ops import context
 from trails.ops._common import redraw
 from trails.ops._entry_types import LinkResult
 from trails.ops._marks import Operation
-from trails.vocab import LinkRelation
+from trails.vocab import AgentLinkRelation
 
 OPERATION = Operation(toolset="agent", read_only=False, destructive=False, idempotent=True)
 
@@ -19,13 +19,13 @@ OPERATION = Operation(toolset="agent", read_only=False, destructive=False, idemp
 async def link(
     source: Annotated[str, Field(description="The entry the link is from.")],
     relation: Annotated[
-        LinkRelation,
+        AgentLinkRelation,
         Field(
             description=(
-                "waits_on: source is not ready until target is closed completed. part_of: "
-                "source is a child of target. discovered_from: source came up while working on "
-                "target. supersedes: source replaces target. supports or contradicts: source is "
-                "evidence for or against target. references: source mentions target."
+                "Between two tasks: waits_on, source is not ready until target is closed "
+                "completed; part_of, source is a child of target. Between two notes, "
+                "preferences or skills: supports or contradicts, source is evidence for or "
+                "against target."
             )
         ),
     ],
@@ -34,7 +34,7 @@ async def link(
 ) -> LinkResult:
     """Add a link between two existing entries, recording the target's current version.
 
-    Use this when: an edge was not known at creation, such as a dependency on a task created later, or a note that supports a claim.
+    Use this when: an edge was not known at creation, such as a dependency on a task created later, or a note that supports another note.
 
     Use instead: write(parent=..., waits_on=...), when creating an entry whose edges you know; unlink, to remove a link.
 

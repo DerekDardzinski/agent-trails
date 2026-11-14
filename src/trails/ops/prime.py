@@ -13,7 +13,7 @@ from trails.errors import StoreUnavailableError
 from trails.models import Entry
 from trails.ops import context
 from trails.ops._entry_types import (
-    PrimeGoal,
+    PrimeInitiative,
     PrimePreference,
     PrimeProjectRow,
     PrimeResult,
@@ -22,11 +22,12 @@ from trails.ops._entry_types import (
 )
 from trails.ops._marks import Operation
 from trails.present import PREFERENCE_CAP, node_state
+from trails.taskgraph import TaskGraph
 from trails.vocab import KINDS, WORK_KINDS
 
 PROJECT_PAGE = 100
-# Prime lists at most this many open goals and contradicted claims, with the totals and the
-# search call for the rest, so its size does not grow with history.
+# Prime lists at most this many open top-level parent tasks and contradicted entries, with the
+# totals and the search call for the rest, so its size does not grow with history.
 LIST_LIMIT = 20
 
 OPERATION = Operation(toolset="agent", read_only=True, destructive=False, idempotent=True)
@@ -51,7 +52,7 @@ async def prime(
 
     Use instead: ready, for the next task; search, to find entries; show, to read one.
 
-    Returns: preferences in full (the project's first, then global, newest first) under a 10,000-character cap, with conflicts between them; without a project, the project index and the count of unscoped entries; with one, its framing and paths, open goals with their state, the count of ready tasks and of entries with open comments with the calls that list them, contradicted claims, and counts per kind and state. A store that cannot be opened is reported, not raised.
+    Returns: preferences in full (the project's first, then global, newest first) under a 10,000-character cap, with conflicts between them; without a project, the project index and the count of unscoped entries; with one, its framing and paths, its open top-level tasks that have children (up to 20) with their state, the count of ready tasks and of entries with open comments with the calls that list them, contradicted entries, and counts per kind and state. A store that cannot be opened is reported, not raised.
     """
     try:
         store = context.store()
@@ -67,13 +68,8 @@ async def prime(
                 id=item.id,
                 name=item.name,
                 framing_title=item.current_framing.title if item.current_framing else None,
-                open_goals=sum(
-                    1
-                    for node in graph.nodes.values()
-                    if node.kind == "goal"
-                    and node.state != "closed"
-                    and not node.retired
-                    and item.id in node.projects
+                open_initiatives=sum(
+                    1 for node_id in _initiatives(graph) if item.id in graph.nodes[node_id].projects
                 ),
             )
             for item in listed[:PROJECT_PAGE]
@@ -91,8 +87,8 @@ async def prime(
             preference_conflicts=found_preferences.conflicts,
             preferences_omitted=found_preferences.omitted,
             preference_conflicts_omitted=found_preferences.conflicts_omitted,
-            goals=[],
-            goal_total=0,
+            initiatives=[],
+            initiative_total=0,
             ready=0,
             open_comments=0,
             contradicted=[],
@@ -122,7 +118,7 @@ async def prime(
             "comment_addresses r WHERE r.comment_id = c.id))"
         ),
         store.query(
-            f"SELECT DISTINCT e.id FROM entry e WHERE e.kind = 'claim' AND {_NOT_RETIRED} AND "
+            f"SELECT DISTINCT e.id FROM entry e WHERE {_NOT_RETIRED} AND "
             f"{member} AND EXISTS (SELECT 1 FROM link_event l WHERE l.target_id = e.id AND "
             "l.relation = 'contradicts')"
         ),
@@ -138,23 +134,22 @@ async def prime(
         counts.setdefault(kind, {}).setdefault(state, 0)
         counts[kind][state] += 1
     ordered: dict[str, dict[str, int]] = {k: counts[k] for k in KINDS if k in counts}
-    claim_ids = [str(row["id"]) for row in contradicted_rows]
-    incoming = store.incoming_links(claim_ids, ["contradicts"])
-    claims = store.get_entries(claim_ids)
+    contradicted_ids = [str(row["id"]) for row in contradicted_rows]
+    incoming = store.incoming_links(contradicted_ids, ["contradicts"])
+    found_contradicted = store.get_entries(contradicted_ids)
     contradicted = [
-        f"{entry_id}  {claims[entry_id].current.title}  (contradicted by "
+        f"{entry_id}  {found_contradicted[entry_id].current.title}  (contradicted by "
         + ", ".join(link.source_id for link in incoming[entry_id])
         + ")"
-        for entry_id in claim_ids
-        if entry_id in claims and incoming.get(entry_id)
+        for entry_id in contradicted_ids
+        if entry_id in found_contradicted and incoming.get(entry_id)
     ]
-    goals = [
-        PrimeGoal(id=node.id, title=node.title, state=node_state(graph, node.id))
-        for node in sorted(graph.nodes.values(), key=lambda item: (item.created_at, item.id))
-        if node.kind == "goal"
-        and node.state != "closed"
-        and not node.retired
-        and ref.id in node.projects
+    initiatives = [
+        PrimeInitiative(
+            id=node_id, title=graph.nodes[node_id].title, state=node_state(graph, node_id)
+        )
+        for node_id in _initiatives(graph)
+        if ref.id in graph.nodes[node_id].projects
     ]
     return PrimeResult(
         project=shown,
@@ -166,8 +161,8 @@ async def prime(
         preference_conflicts=found_preferences.conflicts,
         preferences_omitted=found_preferences.omitted,
         preference_conflicts_omitted=found_preferences.conflicts_omitted,
-        goals=goals[:LIST_LIMIT],
-        goal_total=len(goals),
+        initiatives=initiatives[:LIST_LIMIT],
+        initiative_total=len(initiatives),
         ready=len(graph.ready(ref.id)),
         open_comments=int(open_rows[0]["n"]),
         contradicted=contradicted[:LIST_LIMIT],
@@ -175,6 +170,19 @@ async def prime(
         counts=ordered,
         unavailable=None,
     )
+
+
+def _initiatives(graph: TaskGraph) -> list[str]:
+    """Open top-level tasks that have children, oldest first: the work's initiatives."""
+    return [
+        node.id
+        for node in sorted(graph.nodes.values(), key=lambda item: (item.created_at, item.id))
+        if node.kind == "task"
+        and node.state != "closed"
+        and not node.retired
+        and not graph.parents.get(node.id)
+        and graph.children(node.id)
+    ]
 
 
 class PreferenceSection(NamedTuple):
@@ -278,8 +286,8 @@ def _unavailable(detail: str) -> PrimeResult:
         preferences=[],
         preference_cap_hit=False,
         preference_conflicts=[],
-        goals=[],
-        goal_total=0,
+        initiatives=[],
+        initiative_total=0,
         ready=0,
         open_comments=0,
         contradicted=[],

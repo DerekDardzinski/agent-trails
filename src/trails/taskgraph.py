@@ -1,22 +1,18 @@
-"""Derived task state over goals and tasks, computed in Python from one read (D15).
+"""Derived task state over tasks, computed in Python from one read (D15).
 
 Everything here is a function of stored links, task events, retirements and version fields.
-Nothing reads what an entry says.
+Nothing reads what an entry says. Readiness is the one state trails works out for itself
+(docs/philosophy.md, principle 3); everything else is reported as the stored facts it comes
+from: how each child ended, and what each waits_on target's state is.
 
-Definitions (docs/redesign-plan.md, "Derived state"):
+Definitions:
 
-- A child of X is a not-retired goal or task with a current `part_of` link to X. Only goals and
-  tasks count, because only they can close; a note `part_of` a task would otherwise keep its
-  parent from ever being ready to close.
+- A child of X is a not-retired task with a current `part_of` link to X.
 - A task is ready when it is not closed and not retired, none of its children is not closed,
-  and every current `waits_on` target that is a goal or task, of it and of each ancestor, is
-  closed `completed`. A retired target counts as not completed. A target of another kind is
-  ignored (D10).
-- An entry is ready to close when it is not closed, has at least one child, every child is
-  closed, and no child closed `failed` (D16). A parent with a `failed` child needs a decision.
-- An entry needs replanning when it is not closed and waits on a target closed `dropped`,
-  `failed` or `superseded`. A supersede moves the links that exist when it closes, so a
-  `waits_on` to a superseded target is one added afterwards, and it can never be satisfied.
+  and every current `waits_on` target that is a task, of it and of each ancestor, is closed
+  `completed`. A retired target counts as not completed.
+- A task is blocked when it is not closed and not retired and one of those `waits_on` targets
+  is not closed `completed`. A parent that waits only on its own children is not blocked.
 - A cycle is a cycle in the "must finish first" graph: a `waits_on` source needs its target, a
   parent needs its children, and a child needs every `waits_on` target of its ancestors (D8).
 """
@@ -50,7 +46,7 @@ class Node:
 
 @dataclass
 class TaskGraph:
-    """Goals, tasks, and the current `part_of` and `waits_on` links between entries."""
+    """Tasks, and the current `part_of` and `waits_on` links between entries."""
 
     nodes: dict[str, Node]
     parents: dict[str, list[str]] = field(default_factory=dict)  # child -> part_of targets
@@ -63,7 +59,7 @@ class TaskGraph:
         return node is not None and node.kind in WORK_KINDS
 
     def children(self, entry_id: str) -> list[str]:
-        """Not-retired goals and tasks with a current part_of link to `entry_id`."""
+        """Not-retired tasks with a current part_of link to `entry_id`."""
         return sorted(
             (
                 child
@@ -111,17 +107,9 @@ class TaskGraph:
     # ------------------------------------------------------------- state
 
     def unfinished_targets(self, entry_id: str) -> list[str]:
-        """The goal and task targets of `entry_id`'s waits_on links, and its ancestors', that
-        are not closed `completed`."""
-        targets: list[str] = []
-        for holder in [entry_id, *self.ancestors(entry_id)]:
-            for target in self.waits.get(holder, []):
-                if target in targets or not self.is_work(target):
-                    continue
-                node = self.nodes[target]
-                if node.retired or not (node.state == "closed" and node.outcome == "completed"):
-                    targets.append(target)
-        return targets
+        """The task targets of `entry_id`'s waits_on links, and its ancestors', that are not
+        closed `completed`."""
+        return [target for target, _via in self.waiting_on(entry_id)]
 
     def open_children(self, entry_id: str) -> list[str]:
         return [child for child in self.children(entry_id) if self.nodes[child].state != "closed"]
@@ -143,57 +131,46 @@ class TaskGraph:
             key=self._order,
         )
 
-    def failed_children(self, entry_id: str) -> list[str]:
-        return [
-            child
-            for child in self.children(entry_id)
-            if self.nodes[child].state == "closed" and self.nodes[child].outcome == "failed"
-        ]
+    def waiting_on(self, entry_id: str) -> list[tuple[str, str | None]]:
+        """The task targets of `entry_id`'s waits_on links and its ancestors', not closed
+        `completed`, each as (target, the ancestor whose link it is or None)."""
+        found: list[tuple[str, str | None]] = []
+        seen: set[str] = set()
+        for holder in [entry_id, *self.ancestors(entry_id)]:
+            for target in self.waits.get(holder, []):
+                if target in seen or not self.is_work(target):
+                    continue
+                node = self.nodes[target]
+                if node.retired or not (node.state == "closed" and node.outcome == "completed"):
+                    seen.add(target)
+                    found.append((target, None if holder == entry_id else holder))
+        return found
 
-    def is_ready_to_close(self, entry_id: str) -> bool:
+    def is_blocked(self, entry_id: str) -> bool:
         node = self.nodes.get(entry_id)
-        if node is None or node.kind not in WORK_KINDS or node.state == "closed" or node.retired:
+        if node is None or node.kind != "task" or node.retired or node.state == "closed":
             return False
-        children = self.children(entry_id)
-        return (
-            bool(children)
-            and not self.open_children(entry_id)
-            and not self.failed_children(entry_id)
-        )
+        return bool(self.unfinished_targets(entry_id))
 
-    def needs_decision(self, entry_id: str) -> bool:
-        node = self.nodes.get(entry_id)
-        return (
-            node is not None
-            and node.state != "closed"
-            and not node.retired
-            and bool(self.failed_children(entry_id))
-        )
-
-    def replanning_causes(self, entry_id: str) -> list[str]:
-        """Direct waits_on targets closed `dropped`, `failed` or `superseded`, for an entry not
-        closed."""
-        node = self.nodes.get(entry_id)
-        if node is None or node.state == "closed" or node.retired:
-            return []
-        return [
-            target
-            for target in self.waits.get(entry_id, [])
-            if self.is_work(target)
-            and self.nodes[target].state == "closed"
-            and self.nodes[target].outcome in {"dropped", "failed", "superseded"}
-        ]
-
-    def needs_replanning(self, project: str | None = None) -> list[str]:
+    def blocked(self, project: str | None = None) -> list[str]:
+        """Blocked tasks, in the ready queue's order."""
         return sorted(
             (
                 entry_id
                 for entry_id, node in self.nodes.items()
-                if self.replanning_causes(entry_id)
-                and (project is None or project in node.projects)
+                if self.is_blocked(entry_id) and (project is None or project in node.projects)
             ),
             key=self._order,
         )
+
+    def child_counts(self, entry_id: str) -> dict[str, int]:
+        """How many children are in each state: open, claimed, or the outcome of a close."""
+        counts: dict[str, int] = {}
+        for child in self.children(entry_id):
+            node = self.nodes[child]
+            label = str(node.outcome) if node.state == "closed" else str(node.state)
+            counts[label] = counts.get(label, 0) + 1
+        return counts
 
     # ------------------------------------------------------------- cycles
 

@@ -1,4 +1,4 @@
-"""The entry store: six kinds, stable ids with append-only versions, links, tasks, comments.
+"""The entry store: four kinds, stable ids with append-only versions, links, tasks, comments.
 
 The store stores, links and tracks entries and decides nothing about their meaning. It refuses
 exactly two things, both as ValidationError: malformed input, and an attempt to overwrite, which
@@ -43,7 +43,6 @@ from trails.models import (
     EntryLink,
     EntryVersion,
     EntryWriteOutcome,
-    FollowUp,
     LinkEvent,
     LinkOutcome,
     MovedLink,
@@ -91,21 +90,20 @@ from trails.vocab import (
     ID_LENGTHS,
     KIND_PREFIXES,
     KINDS,
+    KNOWLEDGE_KINDS,
     LINK_ACTIONS,
     LINK_RELATIONS,
     OUTCOMES,
     PRIORITY_RANGE,
     PROJECT_ACTIONS,
-    STATED_BY_VALUES,
-    STATED_KINDS,
     TASK_EVENTS,
     VERDICTS,
     WORK_KINDS,
+    WORK_RELATIONS,
     Kind,
     LinkAction,
     LinkRelation,
     Outcome,
-    StatedBy,
     TaskEventKind,
     TaskState,
     Verdict,
@@ -131,7 +129,6 @@ SCHEMA: tuple[str, ...] = (
         body       LONGTEXT {_TEXT} NOT NULL,
         value      JSON,
         priority   INT,
-        stated_by  {enum_column(STATED_BY_VALUES)},
         reason     TEXT {_TEXT},
         author     VARCHAR(120) {_TEXT} NOT NULL,
         harness    VARCHAR({NAME_CHARS}) {_TEXT} NOT NULL,
@@ -347,7 +344,7 @@ class EntryStore(Store):
         statements = [
             _bind(
                 "SELECT e.id, e.kind, e.created_at AS entry_created_at, x.entry_id, x.version, "
-                "x.title, x.body, x.value, x.priority, x.stated_by, x.reason, x.author, "
+                "x.title, x.body, x.value, x.priority, x.reason, x.author, "
                 "x.harness, x.session_id, x.created_at FROM entry e JOIN entry_version x ON "
                 f"x.entry_id = e.id WHERE e.id IN ({within}) AND {current}",
                 ids,
@@ -511,6 +508,51 @@ class EntryStore(Store):
             for row in rows
         }
 
+    def claims_held_at_creation(self, entry_ids: Sequence[str]) -> dict[str, list[str] | None]:
+        """For each entry, the tasks its creating session held a claim on when version 1 was
+        written, from stored task events. None when version 1 recorded no session id, since
+        then nothing says which claims were its own. One read."""
+        ids = list(dict.fromkeys(entry_ids))
+        if not ids:
+            return {}
+        firsts, events = dolt.read_result_sets(
+            self.db_path,
+            [
+                _bind(
+                    "SELECT entry_id, harness, session_id, created_at FROM entry_version WHERE "
+                    f"version = 1 AND entry_id IN ({_placeholders(len(ids))})",
+                    ids,
+                ),
+                _bind(
+                    "SELECT * FROM task_event WHERE entry_id IN (SELECT c.entry_id FROM "
+                    "task_event c JOIN entry_version v ON v.session_id = c.session_id AND "
+                    f"v.version = 1 WHERE c.event = 'claim' AND v.entry_id IN "
+                    f"({_placeholders(len(ids))})) ORDER BY entry_id, sequence",
+                    ids,
+                ),
+            ],
+        )
+        by_task: dict[str, list[TaskEvent]] = {}
+        for row in events:
+            by_task.setdefault(str(row["entry_id"]), []).append(_task_event(row))
+        held: dict[str, list[str] | None] = {}
+        for row in firsts:
+            session = _optional_str(row.get("session_id"))
+            if session is None:
+                held[str(row["entry_id"])] = None
+                continue
+            moment = _as_datetime(row["created_at"])
+            claimant = Provenance(harness=str(row["harness"]), session_id=session)
+            found = []
+            for task_id, task_events in sorted(by_task.items()):
+                _state, _outcome, claim = task_state(
+                    "task", [event for event in task_events if event.created_at <= moment]
+                )
+                if claim is not None and _same_session(claim, claimant):
+                    found.append(task_id)
+            held[str(row["entry_id"])] = [item for item in found if item != str(row["entry_id"])]
+        return held
+
     # ----------------------------------------------------------------- writes
 
     def new_entry_id(self, kind: Kind) -> str:
@@ -558,13 +600,11 @@ class EntryStore(Store):
                 raise DoltError("a write returned no outcome")
             return created
 
-    def _create_locked(
+    def _create_locked(  # noqa: PLR0912, PLR0915 — replaced by the per-kind creates (R3)
         self, draft: EntryDraft, new_id: str | None, *, check_only: bool = False
     ) -> EntryWriteOutcome | None:
         if draft.kind is None:
-            raise ValidationError(
-                "a new entry needs kind: goal, task, note, claim, preference or skill"
-            )
+            raise ValidationError("a new entry needs kind: task, note, preference or skill")
         kind = draft.kind
         if draft.base_version is not None or draft.reason is not None:
             raise ValidationError(
@@ -577,7 +617,6 @@ class EntryStore(Store):
         code = sorted(draft.code or [], key=lambda item: item.repo_path)
         value = draft.value or None
         priority = _validated_priority(kind, draft.priority)
-        stated_by = _validated_stated_by(kind, draft.stated_by, inherited=None)
         _validate_content(body, artifacts, code)
         targets = list(dict.fromkeys([*([draft.parent] if draft.parent else []), *draft.waits_on]))
         found = self.get_entries(targets)
@@ -586,6 +625,11 @@ class EntryStore(Store):
             raise ValidationError(f"no entry has id {', '.join(missing)}")
         if draft.parent is not None and draft.parent in draft.waits_on:
             raise ValidationError(f"{draft.parent} is both the parent and in waits_on")
+        if targets and kind not in WORK_KINDS:
+            raise ValidationError(f"parent and waits_on belong to a task; a {kind} has neither")
+        for target in targets:
+            relation: LinkRelation = "part_of" if target == draft.parent else "waits_on"
+            _require_relation_kinds(relation, kind, found[target].kind, "new entry", target)
         project_refs = sorted(
             self.resolve_projects(draft.projects or []), key=lambda ref: (ref.name, ref.id)
         )
@@ -610,7 +654,6 @@ class EntryStore(Store):
             tags=tags,
             value=value,
             priority=priority,
-            stated_by=stated_by,
             artifacts=artifacts,
             code=code,
             reason=None,
@@ -659,7 +702,7 @@ class EntryStore(Store):
             *_session_insert(provenance, created_at),
         ]
         findings = scan_for_secrets(_scanned_fields(version))
-        warnings = _target_warnings(entry_id, relations, found)
+        warnings: list[str] = []
         if relations and kind in WORK_KINDS:
             graph = self.task_graph()
             graph.nodes[entry_id] = Node(
@@ -904,8 +947,15 @@ class EntryStore(Store):
             raise ValidationError("an entry cannot link to itself")
         normal_reason = (reason or "").strip() or None
         _require_text_bytes("reason", normal_reason)
+        if relation == "supersedes":
+            raise ValidationError(
+                "supersedes is written when a task is closed superseded, never as a link"
+            )
         with dolt.exclusive(self.db_path):
             found = self._require_entries([source_id, target_id])
+            _require_relation_kinds(
+                relation, found[source_id].kind, found[target_id].kind, source_id, target_id
+            )
             latest = self._latest_link(source_id, relation, target_id)
             target_version = found[target_id].current.version
             if latest is not None and latest.action == "add":
@@ -929,8 +979,7 @@ class EntryStore(Store):
                 reason=normal_reason,
                 provenance=provenance,
             )
-            warnings = _target_warnings(source_id, [(relation, target_id)], found)
-            warnings += _secret_warnings({"reason": normal_reason or ""})
+            warnings = _secret_warnings({"reason": normal_reason or ""})
             if relation in {"part_of", "waits_on"}:
                 graph = self.task_graph()
                 table = graph.parents if relation == "part_of" else graph.waits
@@ -1044,7 +1093,7 @@ class EntryStore(Store):
     # ------------------------------------------------------------------ task state
 
     def task_graph(self) -> TaskGraph:
-        """Every goal and task, every entry a part_of or waits_on link names, and the current
+        """Every task, every entry a part_of or waits_on link names, and the current
         links between them, from ONE dolt invocation (D15)."""
         linked = "SELECT target_id FROM link_event WHERE relation IN ('part_of', 'waits_on')"
         versions, links, events, retired, memberships = dolt.read_result_sets(
@@ -1052,7 +1101,7 @@ class EntryStore(Store):
             [
                 "SELECT e.id, e.kind, e.created_at AS entry_created_at, x.title, x.version, "
                 "x.priority FROM entry e JOIN entry_version x ON x.entry_id = e.id WHERE "
-                f"(e.kind IN ('goal', 'task') OR e.id IN ({linked})) AND NOT EXISTS (SELECT 1 "
+                f"(e.kind = 'task' OR e.id IN ({linked})) AND NOT EXISTS (SELECT 1 "
                 "FROM entry_version n WHERE n.entry_id = x.entry_id AND n.version > x.version)",
                 "SELECT * FROM link_event WHERE relation IN ('part_of', 'waits_on')",
                 "SELECT t.* FROM task_event t ORDER BY t.entry_id, t.sequence",
@@ -1102,7 +1151,7 @@ class EntryStore(Store):
     ) -> TaskOutcome:
         """Claim a task for this session, atomically under the write lock.
 
-        Refused: a goal or any other kind (malformed), a closed task, a stale or missing
+        Refused: an entry of another kind (malformed), a closed task, a stale or missing
         `base_version` (an attempted overwrite), and a task another session holds unless
         `take_over_reason` says why (D3). Claiming a task this session already holds changes
         nothing.
@@ -1110,10 +1159,7 @@ class EntryStore(Store):
         with dolt.exclusive(self.db_path):
             entry = self.get_entry(entry_id)
             if entry.kind != "task":
-                raise ValidationError(
-                    f"{entry_id} is a {entry.kind}; only a task is claimed. A goal is closed "
-                    "when its tasks are done, never claimed"
-                )
+                raise ValidationError(f"{entry_id} is a {entry.kind}; only a task is claimed")
             if entry.state == "closed":
                 raise ValidationError(
                     f"{entry_id} is closed {entry.outcome}; reopen it first with "
@@ -1134,7 +1180,7 @@ class EntryStore(Store):
             if held is not None:
                 if _same_session(held, provenance):
                     return TaskOutcome(
-                        entry=entry, event=held, changed=False, follow_ups=[], moved=[],
+                        entry=entry, event=held, changed=False, moved=[],
                         warnings=[],
                     )  # fmt: skip
                 if not take_over:
@@ -1161,7 +1207,7 @@ class EntryStore(Store):
             entry = self.get_entry(entry_id)
             if entry.claim is None:
                 return TaskOutcome(
-                    entry=entry, event=None, changed=False, follow_ups=[], moved=[],
+                    entry=entry, event=None, changed=False, moved=[],
                     warnings=[f"{entry_id} is not claimed; nothing to release"],
                 )  # fmt: skip
             provenance = sessions.current_provenance()
@@ -1174,16 +1220,16 @@ class EntryStore(Store):
         )
 
     def reopen(self, entry_id: str, reason: str) -> TaskOutcome:
-        """Move a closed goal or task back to open (D11). Links a supersede moved stay moved.
+        """Move a closed task back to open (D11). Links a supersede moved stay moved.
         Reopening an entry that is not closed changes nothing."""
         normal_reason = _required_reason("reopen", reason)
         with dolt.exclusive(self.db_path):
             entry = self.get_entry(entry_id)
             if entry.kind not in WORK_KINDS:
-                raise ValidationError(f"{entry_id} is a {entry.kind}; only goals and tasks close")
+                raise ValidationError(f"{entry_id} is a {entry.kind}; only tasks close")
             if entry.state != "closed":
                 return TaskOutcome(
-                    entry=entry, event=None, changed=False, follow_ups=[], moved=[],
+                    entry=entry, event=None, changed=False, moved=[],
                     warnings=[f"{entry_id} is not closed; nothing to reopen"],
                 )  # fmt: skip
             provenance = sessions.current_provenance()
@@ -1195,22 +1241,15 @@ class EntryStore(Store):
             entry, event, warnings=_secret_warnings({"reason": normal_reason})
         )
 
-    def close(  # noqa: PLR0912, PLR0915 — one transaction holds the close and all it implies
-        self,
-        entry_id: str,
-        outcome: Outcome,
-        summary: str,
-        by: Sequence[str] = (),
-        follow_ups: Sequence[FollowUp] = (),
+    def close(  # noqa: PLR0912 — one transaction holds the close and all it implies
+        self, entry_id: str, outcome: Outcome, summary: str, by: Sequence[str] = ()
     ) -> TaskOutcome:
-        """Close a goal or task with an outcome, in one transaction with everything it implies.
+        """Close a task with an outcome, in one transaction with everything it implies.
 
-        `superseded` needs a nonempty `by`, every id an existing goal or task; every current
-        incoming waits_on link is moved onto every replacement, and each replacement gets a
-        `supersedes` link to the closed entry, which is where `by` is recorded. Each follow-up
-        becomes a new task linked `discovered_from` the closed entry and `part_of` its parent,
-        if it has one (D18). Closing a parent with children not closed is stored with a warning
-        (D22). Closing again with the same outcome changes nothing.
+        `superseded` needs a nonempty `by`, every id an existing task; every current incoming
+        waits_on link is moved onto every replacement, and each replacement gets a
+        `supersedes` link to the closed task, which is where `by` is recorded. Closing again
+        with the same outcome changes nothing.
         """
         if outcome not in OUTCOMES:
             raise ValidationError(f"outcome must be one of {', '.join(OUTCOMES)}")
@@ -1221,30 +1260,26 @@ class EntryStore(Store):
         replacements = list(dict.fromkeys(by))
         if outcome == "superseded" and not replacements:
             raise ValidationError(
-                'outcome="superseded" needs by=[ids]: the goals or tasks that replace this one'
+                'outcome="superseded" needs by=[ids]: the tasks that replace this one'
             )
         if outcome != "superseded" and replacements:
             raise ValidationError('by names replacements and goes with outcome="superseded" only')
         if entry_id in replacements:
             raise ValidationError(f"{entry_id} cannot supersede itself")
-        for item in follow_ups:
-            _validated_title(item.title)
-            _validated_priority("task", item.priority)
         with dolt.exclusive(self.db_path):
             found = self._require_entries([entry_id, *replacements])
             entry = found[entry_id]
             if entry.kind not in WORK_KINDS:
-                raise ValidationError(f"{entry_id} is a {entry.kind}; only goals and tasks close")
+                raise ValidationError(f"{entry_id} is a {entry.kind}; only tasks close")
             not_work = [item for item in replacements if found[item].kind not in WORK_KINDS]
             if not_work:
                 raise ValidationError(
-                    f"{', '.join(not_work)} is not a goal or task; only a goal or task can "
-                    "replace one"
+                    f"{', '.join(not_work)} is not a task; only a task can replace one"
                 )
             if entry.state == "closed":
                 if entry.outcome == outcome:
                     return TaskOutcome(
-                        entry=entry, event=None, changed=False, follow_ups=[], moved=[],
+                        entry=entry, event=None, changed=False, moved=[],
                         warnings=[f"{entry_id} was already closed {outcome}; nothing changed"],
                     )  # fmt: skip
                 raise ValidationError(
@@ -1273,20 +1308,6 @@ class EntryStore(Store):
                         for item in replacements
                         if item != source
                     ]
-            created: list[str] = []
-            parents = graph.parents.get(entry_id, [])
-            for item in follow_ups:
-                follow_id = self.new_entry_id("task")
-                created.append(follow_id)
-                statements += self._follow_up_statements(
-                    follow_id,
-                    item,
-                    closed=entry,
-                    parents=parents,
-                    graph=graph,
-                    moment=event.created_at,
-                    provenance=provenance,
-                )
             warnings: list[str] = []
             if moved:
                 for item in moved:
@@ -1296,24 +1317,9 @@ class EntryStore(Store):
                     if item.to_id not in targets:
                         targets.append(item.to_id)
                 warnings += cycle_warnings(graph, sorted({item.source_id for item in moved}))
-            warnings += _secret_warnings(
-                {
-                    "summary": normal_summary,
-                    **{
-                        f"follow_ups[{n}].{part}": text
-                        for n, item in enumerate(follow_ups)
-                        for part, text in (("title", item.title), ("body", item.body))
-                    },
-                }
-            )
+            warnings += _secret_warnings({"summary": normal_summary})
             self._commit_events(statements, f"close {entry_id} {outcome}", event, provenance)
-        still_open = graph.open_children(entry_id)
-        if still_open:
-            warnings.append(
-                f"{entry_id} was closed with children not closed: {', '.join(still_open)}; their "
-                "state is unchanged"
-            )
-        return self._task_outcome(entry, event, follow_ups=created, moved=moved, warnings=warnings)
+        return self._task_outcome(entry, event, moved=moved, warnings=warnings)
 
     def retire_entry(self, entry_id: str, reason: str) -> RetireOutcome:
         """Mark an entry no longer true without replacing it. Retiring twice keeps the first
@@ -1413,70 +1419,10 @@ class EntryStore(Store):
             )  # fmt: skip
         return statements
 
-    def _follow_up_statements(
-        self,
-        follow_id: str,
-        item: FollowUp,
-        *,
-        closed: Entry,
-        parents: Sequence[str],
-        graph: TaskGraph,
-        moment: datetime,
-        provenance: Provenance,
-    ) -> list[str]:
-        author = current_author()
-        version = EntryVersion(
-            entry_id=follow_id,
-            version=1,
-            title=_validated_title(item.title),
-            body=item.body,
-            tags=_normalise_tags(item.tags),
-            value=None,
-            priority=item.priority,
-            stated_by=None,
-            artifacts=[],
-            code=[],
-            reason=None,
-            author=author,
-            harness=provenance.harness,
-            session_id=provenance.session_id,
-            created_at=moment,
-        )
-        links: list[tuple[LinkRelation, str, int | None]] = [
-            ("discovered_from", closed.id, closed.current.version),
-            *(
-                ("part_of", parent, graph.nodes[parent].version if parent in graph.nodes else None)
-                for parent in parents
-            ),
-        ]
-        project_ids = sorted(ref.id for ref in closed.projects)
-        return [
-            _insert("entry", {"id": follow_id, "kind": "task", "created_at": moment}),
-            *_version_inserts(version),
-            *(
-                _link_insert(
-                    self._link_event(
-                        follow_id, relation, target, action="add", sequence=0,
-                        target_version=target_version, reason=None, provenance=provenance,
-                        moment=moment,
-                    )
-                )
-                for relation, target, target_version in links
-            ),
-            *(
-                _membership_insert(
-                    follow_id, project_id, sequence=0, action="add", reason=None,
-                    author=author, provenance=provenance, created_at=moment,
-                )
-                for project_id in project_ids
-            ),
-        ]  # fmt: skip
-
     def _task_outcome(
         self,
         before: Entry,
         event: TaskEvent,
-        follow_ups: Sequence[str] = (),
         moved: Sequence[MovedLink] = (),
         warnings: Sequence[str] = (),
     ) -> TaskOutcome:
@@ -1490,7 +1436,6 @@ class EntryStore(Store):
             entry=after,
             event=event,
             changed=True,
-            follow_ups=list(follow_ups),
             moved=list(moved),
             warnings=list(warnings),
         )
@@ -1683,7 +1628,7 @@ class EntryStore(Store):
         editor's base_version stale.
 
         A comment with `addresses` is a response: it closes those comments. Each must be an
-        open comment on the same entry. On a goal or task the comment pins the current version
+        open comment on the same entry. On a task the comment pins the current version
         of every descendant, so a later `changes_since_comment` can list exactly what moved.
 
         Raises:
@@ -1982,7 +1927,7 @@ def current_links(events: Iterator[LinkEvent] | Sequence[LinkEvent]) -> list[Lin
 def task_state(
     kind: Kind, events: Sequence[TaskEvent]
 ) -> tuple[TaskState | None, Outcome | None, TaskEvent | None]:
-    """State, outcome and held claim from a goal's or task's events, in sequence order."""
+    """State, outcome and held claim from a task's events, in sequence order."""
     if kind not in WORK_KINDS:
         return None, None, None
     state: TaskState = "open"
@@ -2015,27 +1960,11 @@ def _validated_priority(kind: Kind, priority: int | None) -> int | None:
     if priority is None:
         return None
     if kind not in WORK_KINDS:
-        raise ValidationError(f"priority is a goal and task field; a {kind} has none")
+        raise ValidationError(f"priority is a task field; a {kind} has none")
     low, high = PRIORITY_RANGE
     if isinstance(priority, bool) or not low <= priority <= high:
         raise ValidationError(f"priority must be an integer from {low} to {high}; 0 is highest")
     return priority
-
-
-def _validated_stated_by(
-    kind: Kind, stated_by: StatedBy | None, inherited: StatedBy | None
-) -> StatedBy | None:
-    if kind not in STATED_KINDS:
-        if stated_by is not None:
-            raise ValidationError(
-                f"stated_by is recorded on claims and preferences; a {kind} has none"
-            )
-        return None
-    if stated_by is None:
-        return inherited or "agent"
-    if stated_by not in STATED_BY_VALUES:
-        raise ValidationError(f"stated_by must be one of {', '.join(STATED_BY_VALUES)}")
-    return stated_by
 
 
 def _validate_content(
@@ -2074,7 +2003,6 @@ def _merged(kind: Kind, current: EntryVersion, draft: EntryDraft) -> EntryVersio
     priority = (
         current.priority if draft.priority is None else _validated_priority(kind, draft.priority)
     )
-    stated_by = _validated_stated_by(kind, draft.stated_by, inherited=current.stated_by)
     _validate_content(body, artifacts, code)
     _value_text(value)
     return current.model_copy(
@@ -2086,7 +2014,6 @@ def _merged(kind: Kind, current: EntryVersion, draft: EntryDraft) -> EntryVersio
             "artifacts": artifacts,
             "code": code,
             "priority": priority,
-            "stated_by": stated_by,
         }
     )
 
@@ -2100,7 +2027,6 @@ def _content(version: EntryVersion) -> tuple[Any, ...]:
         tuple((a.location, a.digest, a.notes) for a in version.artifacts),
         tuple((c.repo_path, c.head_sha, c.captured_sha, c.dirty) for c in version.code),
         version.priority,
-        version.stated_by,
     )
 
 
@@ -2125,24 +2051,17 @@ def _stale_message(
     return f"base_version={given} is stale and would overwrite a newer version: {who}; {advice}"
 
 
-def _target_warnings(
-    entry_id: str, relations: Sequence[tuple[LinkRelation, str]], found: dict[str, Entry]
-) -> list[str]:
-    """Warnings about links whose target cannot play the role the relation gives it (D10)."""
-    warnings = []
-    for relation, target in relations:
-        entry = found.get(target)
-        if entry is None or relation not in {"part_of", "waits_on"}:
-            continue
-        if entry.kind not in WORK_KINDS:
-            role = "parent" if relation == "part_of" else "dependency"
-            warnings.append(
-                f"{entry_id} {relation} {target}, which is a {entry.kind}: only a goal or task "
-                f"counts as a {role}, so this link is stored and ignored for readiness"
+def _require_relation_kinds(
+    relation: LinkRelation, source_kind: Kind, target_kind: Kind, source: str, target: str
+) -> None:
+    """Work relations join two tasks; evidence relations join two notes, preferences or
+    skills. Anything else is malformed."""
+    allowed = WORK_KINDS if relation in WORK_RELATIONS else KNOWLEDGE_KINDS
+    for which, entry, kind in (("source", source, source_kind), ("target", target, target_kind)):
+        if kind not in allowed:
+            raise ValidationError(
+                f"{relation} joins {' or '.join(allowed)} entries; the {which} {entry} is a {kind}"
             )
-        if entry.retired:
-            warnings.append(f"{entry_id} {relation} {target}, which is retired")
-    return warnings
 
 
 def _scanned_fields(version: EntryVersion) -> dict[str, str]:
@@ -2172,7 +2091,6 @@ def _version_inserts(version: EntryVersion) -> list[str]:
                 "body": version.body,
                 "value": _value_text(version.value),
                 "priority": version.priority,
-                "stated_by": version.stated_by,
                 "reason": version.reason,
                 "author": version.author,
                 "harness": version.harness,
@@ -2339,7 +2257,6 @@ def _version(
         tags=sorted(tags),
         value=_as_value(row.get("value")),
         priority=int(priority) if priority is not None else None,
-        stated_by=_as_stated_by(row.get("stated_by")),
         artifacts=artifacts,
         code=code,
         reason=_optional_str(row.get("reason")),
@@ -2428,15 +2345,6 @@ def _as_outcome(value: Any) -> Outcome | None:
         if outcome == str(value):
             return outcome
     raise DoltError(f"task event has unknown outcome {value!r}")
-
-
-def _as_stated_by(value: Any) -> StatedBy | None:
-    if value is None:
-        return None
-    for stated in STATED_BY_VALUES:
-        if stated == str(value):
-            return stated
-    raise DoltError(f"version has unknown stated_by {value!r}")
 
 
 def _task_insert(event: TaskEvent) -> str:

@@ -13,7 +13,7 @@ from trails.errors import UsageError
 from trails.ops import context
 from trails.ops._entry_types import ProjectHit, SearchHit, SearchResult
 from trails.ops._marks import Operation
-from trails.present import evidence_users, node_state, standing
+from trails.present import evidence_links, node_state
 from trails.vocab import Kind, SearchStatus
 
 PROJECT_HIT_LIMIT = 3
@@ -34,8 +34,8 @@ async def search(  # noqa: PLR0917 — public query contract
         SearchStatus | None,
         Field(
             description=(
-                "Goals and tasks only: open, claimed or closed, or the outcome of a close "
-                "(completed, dropped, failed, superseded)."
+                "A task state, open, claimed or closed, or the outcome of a close (completed, "
+                "dropped, failed, superseded). Matches tasks."
             )
         ),
     ] = None,
@@ -46,7 +46,7 @@ async def search(  # noqa: PLR0917 — public query contract
         bool,
         Field(
             description=(
-                "Keep only entries that a current entry contradicts, such as the claims prime "
+                "Keep only entries that a current entry contradicts, such as the ones prime "
                 "counts as contradicted."
             )
         ),
@@ -61,7 +61,7 @@ async def search(  # noqa: PLR0917 — public query contract
 
     Use instead: show, once you have an id; ready, for the next task; prime, to orient in a project.
 
-    Returns: up to three project matches, then one page of entries, each with its state, a claim's standing (observation or assertion, supported, contradicted), the open comment count, for a note the entries that use it as evidence, and an excerpt. Notes rank below other kinds.
+    Returns: up to three project matches, then one page of entries, each with its state, the entries that support or contradict it, the open comment count, and an excerpt. Every kind ranks the same; filter by kind to narrow.
     """
     if limit < 1:
         raise UsageError(f"limit must be at least 1, not {limit}")
@@ -98,7 +98,7 @@ async def search(  # noqa: PLR0917 — public query contract
     )
     page = ranked.order[offset : offset + limit]
     found = store.get_entries(page)
-    incoming = store.incoming_links(page, ["supports", "contradicts", "references"])
+    incoming = store.incoming_links(page, ["supports", "contradicts"])
     counts = store.open_comment_counts(page)
     graph = store.task_graph()
     hits = []
@@ -118,8 +118,7 @@ async def search(  # noqa: PLR0917 — public query contract
                 else ("retired" if entry.retired else entry.kind),
                 tags=entry.current.tags,
                 projects=[ref.id for ref in entry.projects],
-                standing=standing(entry, links),
-                evidence_for=evidence_users(entry, links),
+                evidence=evidence_links(links),
                 open_comments=counts.get(entry.id, 0),
                 matched=sorted(ranked.rankers.get(entry_id, {})),
                 excerpt=entry_search.excerpt(entry.current.body, query),

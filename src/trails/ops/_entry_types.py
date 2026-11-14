@@ -87,7 +87,6 @@ class TaskResult(RenderedResult):
     event: str
     changed: bool
     state: str
-    follow_ups: list[str]
     moved: list[MovedLink]
     dependents: list[GraphLine]
     graph: list[GraphLine]
@@ -98,7 +97,6 @@ class TaskResult(RenderedResult):
         if not self.changed:
             head = f"{self.id} · [{self.state}] · nothing changed"
         lines = [head]
-        lines += [f"follow-up created: {item}" for item in self.follow_ups]
         lines += [
             f"moved: {item.source_id} waits_on {item.from_id} -> {item.to_id}"
             for item in self.moved
@@ -126,14 +124,11 @@ class ReadyItem(BaseModel):
 
 
 class ReadyResult(RenderedResult):
-    """Ready tasks, and the entries waiting on a decision."""
+    """Ready tasks."""
 
     project: ProjectRef | None
     ready: list[ReadyItem]
     total: int
-    ready_to_close: list[GraphLine]
-    needs_decision: list[GraphLine]
-    needs_replanning: list[GraphLine]
 
     def render_text(self) -> str:
         scope = f" in {self.project.id} ({self.project.name})" if self.project else ""
@@ -141,19 +136,42 @@ class ReadyResult(RenderedResult):
         for item in self.ready:
             priority = f"P{item.priority}" if item.priority is not None else "P-"
             lines.append(f"  {item.id}  {priority}  [{item.state}]  {item.title}")
-        for label, group in (
-            ("ready to close", self.ready_to_close),
-            ("needs a decision", self.needs_decision),
-            ("needs replanning", self.needs_replanning),
-        ):
-            if group:
-                lines.append(f"{label}:")
-                lines += [f"  {item.id}  [{item.state}]  {item.title}" for item in group]
+        project = {"project": self.project.id} if self.project else {}
         hints = (
             [call("claim", self.ready[0].id, base_version=self.ready[0].version)]
             if self.ready
-            else [call("search", kinds=["task"], status="open")]
+            else [call("blocked", **project)]
         )
+        lines.append(next_line(hints))
+        return "\n".join(lines)
+
+
+class BlockedItem(BaseModel):
+    id: str
+    version: int
+    title: str
+    priority: int | None
+    state: str
+    waits_on: list[str]
+
+
+class BlockedResult(RenderedResult):
+    """Tasks waiting on a task that is not closed completed."""
+
+    project: ProjectRef | None
+    blocked: list[BlockedItem]
+    total: int
+
+    def render_text(self) -> str:
+        scope = f" in {self.project.id} ({self.project.name})" if self.project else ""
+        lines = [f"blocked{scope}: {len(self.blocked)} of {self.total} shown"]
+        for item in self.blocked:
+            priority = f"P{item.priority}" if item.priority is not None else "P-"
+            lines.append(f"  {item.id}  {priority}  {item.title}")
+            lines += [f"    waits on {target}" for target in item.waits_on]
+        project = {"project": self.project.id} if self.project else {}
+        hints = [call("show", self.blocked[0].id)] if self.blocked else []
+        hints.append(call("ready", **project))
         lines.append(next_line(hints))
         return "\n".join(lines)
 
@@ -231,13 +249,10 @@ class ShownEntry(BaseModel):
     tags: list[str]
     value: dict[str, Any] | None
     priority: int | None
-    stated_by: str | None
     artifacts: list[str]
     code: list[str]
     projects: list[ProjectRef]
     state: str
-    standing: list[str]
-    evidence_for: list[str]
     links: list[ShownLink]
     task_events: list[str]
     retired_reason: str | None
@@ -247,6 +262,7 @@ class ShownEntry(BaseModel):
     transcript: str | None
     agent: str | None
     created_at: datetime
+    created_while: list[str] | None
     comments: list[ShownComment]
     comment_total: int
     comment_open: int
@@ -298,10 +314,6 @@ def _entry_text(item: ShownEntry) -> str:  # noqa: PLR0912, PLR0915 — one sect
     lines = [f"{item.id}  {item.kind}  v{item.version}  [{item.state}]  {item.title}"]
     if item.retired_reason is not None:
         lines.append(f"retired: {item.retired_reason}")
-    if item.standing:
-        lines.append("standing: " + "; ".join(item.standing))
-    if item.stated_by:
-        lines.append(f"stated by: {item.stated_by}")
     if item.priority is not None:
         lines.append(f"priority: {item.priority}")
     if item.tags:
@@ -315,14 +327,15 @@ def _entry_text(item: ShownEntry) -> str:  # noqa: PLR0912, PLR0915 — one sect
     )
     if item.transcript:
         lines.append(f"transcript: {item.transcript}")
+    if item.created_while is not None:
+        held = ", ".join(item.created_while) if item.created_while else "none"
+        lines.append(f"tasks its creating session held claims on when it was created: {held}")
     if item.body:
         lines.append(item.body)
     if item.value is not None:
         lines.append(f"value: {item.value}")
     lines += [f"artifact: {artifact}" for artifact in item.artifacts]
     lines += [f"code: {code}" for code in item.code]
-    if item.evidence_for:
-        lines.append("used as evidence by: " + ", ".join(item.evidence_for))
     if item.links:
         lines.append("links:")
         for link in item.links:
@@ -387,7 +400,7 @@ def _show_hints(items: list["ShownEntry | ShownProject"]) -> list[str]:
         call("write", id=first.id, base_version=first.version, reason="..."),
         call("add_comment", first.id, comment="..."),
     ]
-    if first.kind in {"goal", "task"}:
+    if first.kind == "task":
         hints.insert(0, call("ready"))
     return hints
 
@@ -400,8 +413,7 @@ class SearchHit(BaseModel):
     state: str
     tags: list[str]
     projects: list[str]
-    standing: list[str]
-    evidence_for: list[str]
+    evidence: list[str]
     open_comments: int
     matched: list[str]
     excerpt: str
@@ -435,10 +447,8 @@ class SearchResult(RenderedResult):
         for hit in self.hits:
             lines.append(f"{hit.id}  {hit.kind}  v{hit.version}  [{hit.state}]  {hit.title}")
             details = []
-            if hit.standing:
-                details.append("standing: " + "; ".join(hit.standing))
-            if hit.evidence_for:
-                details.append("used as evidence by: " + ", ".join(hit.evidence_for))
+            if hit.evidence:
+                details.append("; ".join(hit.evidence))
             if hit.open_comments:
                 details.append(f"{hit.open_comments} open comments")
             if hit.tags:
@@ -465,7 +475,7 @@ class PrimePreference(BaseModel):
     full: bool
 
 
-class PrimeGoal(BaseModel):
+class PrimeInitiative(BaseModel):
     id: str
     title: str
     state: str
@@ -475,7 +485,7 @@ class PrimeProjectRow(BaseModel):
     id: str
     name: str
     framing_title: str | None
-    open_goals: int
+    open_initiatives: int
 
 
 class PrimeResult(RenderedResult):
@@ -491,8 +501,8 @@ class PrimeResult(RenderedResult):
     # Preferences and conflicts left out entirely, when even their title lines pass the cap.
     preferences_omitted: int = 0
     preference_conflicts_omitted: int = 0
-    goals: list[PrimeGoal]
-    goal_total: int
+    initiatives: list[PrimeInitiative]
+    initiative_total: int
     ready: int
     open_comments: int
     contradicted: list[str]
@@ -508,7 +518,7 @@ class PrimeResult(RenderedResult):
         if self.project is None:
             lines.append(f"projects: {len(self.projects)} of {self.project_total} shown")
             lines += [
-                f"  {row.id}  {row.name}  {row.open_goals} open goals"
+                f"  {row.id}  {row.name}  {row.open_initiatives} open parent tasks"
                 + (f"  {row.framing_title}" if row.framing_title else "")
                 for row in self.projects
             ]
@@ -526,13 +536,16 @@ class PrimeResult(RenderedResult):
         for path in project.paths:
             label = f" ({path.label})" if path.label else ""
             lines.append(f"path: {path.path}{label}")
-        if self.goals:
-            lines.append(f"open goals: {len(self.goals)} of {self.goal_total} shown")
-            lines += [f"  {goal.id}  [{goal.state}]  {goal.title}" for goal in self.goals]
-            if self.goal_total > len(self.goals):
+        if self.initiatives:
+            lines.append(
+                "open top-level tasks with children: "
+                f"{len(self.initiatives)} of {self.initiative_total} shown"
+            )
+            lines += [f"  {item.id}  [{item.state}]  {item.title}" for item in self.initiatives]
+            if self.initiative_total > len(self.initiatives):
                 lines.append(
-                    "  more: "
-                    + call("search", kinds=["goal"], projects=[project.id], status="open")
+                    "  every open task: "
+                    + call("search", kinds=["task"], projects=[project.id], status="open")
                 )
         lines.append(f"ready tasks: {self.ready} · {call('ready', project=project.id)}")
         if self.open_comments:
@@ -542,14 +555,11 @@ class PrimeResult(RenderedResult):
             )
         if self.contradicted:
             lines.append(
-                f"contradicted claims: {len(self.contradicted)} of {self.contradicted_total} shown"
+                f"contradicted entries: {len(self.contradicted)} of {self.contradicted_total} shown"
             )
             lines += [f"  {item}" for item in self.contradicted]
             if self.contradicted_total > len(self.contradicted):
-                lines.append(
-                    "  more: "
-                    + call("search", kinds=["claim"], projects=[project.id], contradicted=True)
-                )
+                lines.append("  more: " + call("search", projects=[project.id], contradicted=True))
         if self.counts:
             lines.append("counts:")
             for kind, states in self.counts.items():

@@ -11,9 +11,7 @@ Three rankers run in ONE dolt invocation and are fused by reciprocal rank, as be
 - vector: the nearest entries by their best chunk of the current version, cosine at least
   `retrieval.VECTOR_MIN_COSINE`.
 
-A note's fused score is halved before sorting (D5): notes are scratch, and a claim, task or
-skill about the same thing should come first. The penalty is fixed because "about the same
-thing" needs judgment the store does not have.
+Every kind ranks the same; an agent that wants one kind filters by it.
 
 Only current versions are searched. An earlier version is read with `show(id, versions=True)`.
 """
@@ -33,7 +31,6 @@ from trails.errors import ValidationError
 from trails.vector import KNOWN_MODEL_IDS, VectorMatch, chunk_texts
 from trails.vocab import OUTCOMES, WORK_KINDS, Kind
 
-NOTE_PENALTY = 0.5
 _CURRENT = (
     "NOT EXISTS (SELECT 1 FROM entry_version n WHERE n.entry_id = x.entry_id "
     "AND n.version > x.version)"
@@ -61,7 +58,7 @@ class EntryRanked(BaseModel):
     vector: dict[str, VectorMatch]
 
 
-def run_entry_search(  # noqa: PLR0912 — three rankers and their fusion
+def run_entry_search(
     store: EntryStore,
     filters: EntryFilters,
     *,
@@ -97,20 +94,17 @@ def run_entry_search(  # noqa: PLR0912 — three rankers and their fusion
         )
         return EntryRanked(order=[str(row["id"]) for row in rows], rankers={}, vector={})
     results = dict(zip(names, dolt.read_result_sets(store.db_path, statements), strict=True))
-    kinds: dict[str, str] = {}
     created: dict[str, str] = {}
     rankings: dict[str, list[str]] = {}
     for name in ("keyword", "exact"):
         if name in results:
             rankings[name] = list(dict.fromkeys(str(row["id"]) for row in results[name]))
             for row in results[name]:
-                kinds[str(row["id"])] = str(row["kind"])
                 created[str(row["id"])] = str(row["created_at"])
     nearest: list[VectorMatch] = []
     seen: set[str] = set()
     for row in results.get("vector", []):
         entry_id = str(row["entry_id"])
-        kinds.setdefault(entry_id, str(row["kind"]))
         created.setdefault(entry_id, str(row["created_at"]))
         if entry_id in seen or len(nearest) >= retrieval.VECTOR_DEPTH:
             continue
@@ -128,9 +122,6 @@ def run_entry_search(  # noqa: PLR0912 — three rankers and their fusion
     if nearest:
         rankings["vector"] = [match.record_id for match in nearest]
     scores = retrieval.rrf_scores(list(rankings.values()))
-    for entry_id in scores:
-        if kinds.get(entry_id) == "note":
-            scores[entry_id] *= NOTE_PENALTY
     fused = sorted(scores)
     fused.sort(key=lambda item: created.get(item, ""), reverse=True)
     fused.sort(key=lambda item: scores[item], reverse=True)
@@ -242,7 +233,7 @@ def unembedded_ids(store: EntryStore, model_id: str) -> list[str]:
 
 
 def status_condition(status: str) -> str:
-    """A goal or task's state or close outcome, from its latest task event, over alias `e`."""
+    """A task's state or close outcome, from its latest task event, over alias `e`."""
     latest = (
         "EXISTS (SELECT 1 FROM task_event t WHERE t.entry_id = e.id AND {condition} AND NOT "
         "EXISTS (SELECT 1 FROM task_event later WHERE later.entry_id = t.entry_id AND "

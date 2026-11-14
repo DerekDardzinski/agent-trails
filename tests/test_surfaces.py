@@ -332,7 +332,7 @@ def test_real_search_has_structural_parity_between_cli_and_mcp(
     other emits the operation model unchanged."""
     record = store.write_entry(
         EntryDraft(
-            kind="claim",
+            kind="note",
             title="Batching cut p99 latency",
             body="The measured p99 fell after batching.",
         )
@@ -360,8 +360,7 @@ def test_real_search_has_structural_parity_between_cli_and_mcp(
         "state",
         "tags",
         "projects",
-        "standing",
-        "evidence_for",
+        "evidence",
         "open_comments",
         "matched",
         "excerpt",
@@ -509,16 +508,16 @@ def test_write_help_shows_field_descriptions_and_the_object_format(
 
     assert code == 0
     assert "One line saying what this is. Required for a new entry." in out
-    assert "skill: written only by the offline consolidation pass, never by an agent" in out
+    assert "skill: how to do something, written by the offline consolidation pass." in out
     assert 'with keys "location", "digest" (optional), "notes" (optional)' in out
     assert '"sha256:<64 lowercase hex>"' in out
 
 
-def test_cli_takes_each_artifact_and_follow_up_as_one_json_object(
+def test_cli_takes_each_artifact_as_one_json_object(
     store: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """labbook-79y.6 item 17. Silent failure: an artifact or follow-up accepted in a form the
-    help does not describe, or a malformed one stored rather than refused as a usage error."""
+    """labbook-79y.6 item 17. Silent failure: an artifact accepted in a form the help does not
+    describe, or a malformed one stored rather than refused as a usage error."""
     db = ["--db", str(store.db_path)]
     artifact = json.dumps({"location": "s3://bucket/key", "digest": None})
     code, out, _ = _run_cli(
@@ -527,15 +526,6 @@ def test_cli_takes_each_artifact_and_follow_up_as_one_json_object(
         ["write", "--kind", "task", "--title", "a", "--artifacts", artifact, "--json", *db],
     )
     task = json.loads(out)["id"]
-    follow_up = json.dumps({"title": "fix the flaky test", "priority": 1})
-    closed, _, _ = _run_cli(
-        monkeypatch,
-        capsys,
-        [
-            "close", task, "--outcome", "completed", "--summary", "done",
-            "--follow-ups", follow_up, *db,
-        ],
-    )  # fmt: skip
     bad, _, err = _run_cli(
         monkeypatch,
         capsys,
@@ -543,11 +533,9 @@ def test_cli_takes_each_artifact_and_follow_up_as_one_json_object(
     )
 
     entry = store.get_entry(task)
-    assert (code, closed) == (0, 0)
+    assert code == 0
     assert [(x.location, x.digest, x.notes) for x in entry.current.artifacts] == [
         ("s3://bucket/key", None, "")
     ]
-    [follow] = store.incoming_links([task], ["discovered_from"])[task]
-    assert store.get_entry(follow.source_id).current.priority == 1
     assert bad == 2
     assert err.startswith("usage: not a valid ArtifactRef")

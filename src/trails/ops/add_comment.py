@@ -34,7 +34,7 @@ async def add_comment(
 ) -> CommentResult:
     """Comment on an entry without writing a version: review feedback, or the response that closes it.
 
-    Use this when: you review a plan, a claim or a change and need a response, or you answer feedback. A comment on a goal or task records the version of every task under it, so the next review can list exactly what changed.
+    Use this when: you review a plan, a note or a change and need a response, or you answer feedback. A comment on a task records the version of every task under it, so the next review can list exactly what changed.
 
     Use instead: write(id=..., reason=...), for your own working thoughts, which belong in a version's reason or body; never a comment.
 

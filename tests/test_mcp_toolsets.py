@@ -178,6 +178,7 @@ def test_the_default_toolset_is_exactly_the_agent_tools(
 
     assert sorted(_tools(store)) == [
         "add_comment",
+        "blocked",
         "claim",
         "close",
         "link",
@@ -253,7 +254,7 @@ def test_show_array_is_exposed_through_mcp_with_partial_missing_ids(store: Store
     assert "\n\nnot found: note-zzzzz\n\n" in result.content[0].text
 
 
-def test_write_schema_exposes_kind_and_stated_by_choices(store: Store) -> None:
+def test_write_schema_exposes_the_kind_choices(store: Store) -> None:
     """Catches literal choices degrading to unconstrained strings in the agent tool schema."""
     server = mcp_surface.build_mcp_server(store.db_path)
 
@@ -263,15 +264,8 @@ def test_write_schema_exposes_kind_and_stated_by_choices(store: Store) -> None:
             return tools["write"]["properties"]
 
     properties = asyncio.run(go())
-    assert properties["kind"]["anyOf"][0]["enum"] == [
-        "goal",
-        "task",
-        "note",
-        "claim",
-        "preference",
-        "skill",
-    ]
-    assert properties["stated_by"]["anyOf"][0]["enum"] == ["agent", "person"]
+    assert properties["kind"]["anyOf"][0]["enum"] == ["task", "note", "preference", "skill"]
+    assert "stated_by" not in properties
 
 
 def test_an_mcp_write_records_the_harness_its_client_names(

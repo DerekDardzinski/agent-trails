@@ -30,7 +30,7 @@ async def show(
         Field(
             description=(
                 "A comment id on this entry: also list the versions that changed and the "
-                "links added or removed since it, under a goal or task too."
+                "links added or removed since it, under a task too."
             )
         ),
     ] = None,
@@ -41,7 +41,7 @@ async def show(
 
     Use instead: search, to find entries by meaning; ready, for the next task.
 
-    Returns: each item in request order; for an entry its state, standing, links ("written against vN, now vM" when the target moved on), comments with total and the paging call, task events, and the harness, session, transcript and agent that wrote the current version. Missing ids are named.
+    Returns: each item in request order; for an entry its state as stored facts, links ("written against vN, now vM" when the target moved on), comments with total and the paging call, task events, the harness, session, transcript and agent that wrote the current version, and the tasks the creating session held claims on when the entry was created. Missing ids are named.
     """
     if comments < 0:
         raise UsageError(f"comments must be 0 or more, not {comments}")

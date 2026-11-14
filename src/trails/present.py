@@ -1,4 +1,4 @@
-"""Plain-text pieces every entry response shares: one-line states, graph lines, standing.
+"""Plain-text pieces every entry response shares: one-line states and graph lines.
 
 Every state word here is computed from stored links, events and version fields through
 `TaskGraph`; nothing reads what an entry says.
@@ -13,10 +13,10 @@ from datetime import UTC, datetime
 from pydantic import BaseModel
 
 from trails.capture import human_size
-from trails.models import CaptureSummary, Entry, EntryLink, TaskEvent
+from trails.models import CaptureSummary, EntryLink, TaskEvent
 from trails.render import call
 from trails.taskgraph import TaskGraph
-from trails.vocab import WORK_KINDS
+from trails.vocab import EVIDENCE_RELATIONS, WORK_KINDS
 
 
 class GraphLine(BaseModel):
@@ -47,7 +47,9 @@ def age(then: datetime, now: datetime) -> str:
 
 
 def node_state(graph: TaskGraph, entry_id: str) -> str:
-    """One phrase for where a goal or task stands; the kind for anything else."""
+    """Where a task stands, as stored facts; the kind for anything else. "ready" is the one
+    state trails works out (principle 3); the rest is what the children and the waits_on
+    targets recorded."""
     node = graph.nodes.get(entry_id)
     if node is None:
         return "unknown"
@@ -58,30 +60,32 @@ def node_state(graph: TaskGraph, entry_id: str) -> str:
     if node.state == "closed":
         return f"closed {node.outcome}"
     parts: list[str] = []
+    if graph.is_ready(entry_id):
+        parts.append("ready")
     if node.claim is not None:
         parts.append(claim_text(node.claim))
-    failed = graph.failed_children(entry_id)
-    if failed:
-        parts.append(f"needs a decision: {', '.join(failed)} failed")
-    elif graph.is_ready_to_close(entry_id):
-        parts.append("ready to close: every child is closed")
-    open_children = graph.open_children(entry_id)
-    if open_children:
-        parts.append(f"{len(open_children)} of {len(graph.children(entry_id))} children not closed")
-    causes = graph.replanning_causes(entry_id)
-    if causes:
+    counts = graph.child_counts(entry_id)
+    if counts:
         parts.append(
-            "needs replanning: waits on "
-            + ", ".join(f"{item} (closed {graph.nodes[item].outcome})" for item in causes)
+            "children: " + ", ".join(f"{count} {label}" for label, count in sorted(counts.items()))
         )
-    waiting = [item for item in graph.unfinished_targets(entry_id) if item not in causes]
-    if waiting:
-        parts.append(f"waiting on {', '.join(waiting)}")
-    if node.kind == "task" and graph.is_ready(entry_id):
-        parts.insert(0, "ready")
+    for target, via in graph.waiting_on(entry_id):
+        through = f" through {via}" if via is not None else ""
+        parts.append(f"waits on {target}{through} ({target_state(graph, target)})")
     if not parts:
         parts.append("open")
     return "; ".join(parts)
+
+
+def target_state(graph: TaskGraph, entry_id: str) -> str:
+    """A waits_on target's stored state in a few words: open, claimed, closed <outcome>,
+    retired."""
+    node = graph.nodes[entry_id]
+    if node.retired:
+        return "retired"
+    if node.state == "closed":
+        return f"closed {node.outcome}"
+    return str(node.state)
 
 
 def graph_lines(graph: TaskGraph, entry_ids: Sequence[str]) -> list[GraphLine]:
@@ -114,31 +118,13 @@ def graph_text(lines: Sequence[GraphLine]) -> list[str]:
     return out
 
 
-def standing(entry: Entry, incoming: Sequence[EntryLink]) -> list[str]:
-    """A claim's standing, every applicable word together: observation or assertion from the
-    current version, supported and contradicted from current incoming links."""
-    if entry.kind != "claim":
-        return []
-    current = entry.current
-    method = bool(current.artifacts or current.code or current.value is not None)
-    words = ["observation" if method else "assertion"]
-    supporters = [link.source_id for link in incoming if link.relation == "supports"]
-    contradicters = [link.source_id for link in incoming if link.relation == "contradicts"]
-    if supporters:
-        words.append(f"supported by {', '.join(supporters)}")
-    if contradicters:
-        words.append(f"contradicted by {', '.join(contradicters)}")
-    return words
-
-
-def evidence_users(entry: Entry, incoming: Sequence[EntryLink]) -> list[str]:
-    """For a note, the entries that use it as evidence."""
-    if entry.kind != "note":
-        return []
+def evidence_links(incoming: Sequence[EntryLink]) -> list[str]:
+    """The current supports and contradicts links into an entry, as plain facts."""
+    words = {"supports": "supported by", "contradicts": "contradicted by"}
     return [
-        f"{link.source_id} {link.relation}"
+        f"{words[link.relation]} {link.source_id}"
         for link in incoming
-        if link.relation in {"supports", "contradicts", "references"}
+        if link.relation in EVIDENCE_RELATIONS
     ]
 
 

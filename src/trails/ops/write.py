@@ -19,7 +19,7 @@ from trails.ops._common import capture_code, discard_capture, embed_after_write,
 from trails.ops._entry_types import WriteResult
 from trails.ops._guidance import CapturedRepo, uncaptured_location_warnings
 from trails.ops._marks import FromFile, Operation
-from trails.vocab import WORK_KINDS, Kind, StatedBy
+from trails.vocab import WORK_KINDS, Kind
 
 OPERATION = Operation(toolset="agent", read_only=False, destructive=False, idempotent=False)
 
@@ -29,12 +29,10 @@ async def write(  # noqa: PLR0917 — the public write contract
         Kind | None,
         Field(
             description=(
-                "Required for a new entry; fixed after. goal: one initiative's framing and "
-                "success criteria, never claimed. task: something to do. note: your scratch "
-                "pad, evidence for other entries. claim: anything stated as true or possibly "
-                "true; its standing comes from what backs it. preference: how the person wants "
-                "work done, loaded at session start. skill: written only by the offline "
-                "consolidation pass, never by an agent in a session."
+                "Required for a new entry; fixed after. task: something to do; a task with "
+                "children is a parent. note: anything known or found. preference: how the "
+                "person wants work done, loaded at session start. skill: how to do something, "
+                "written by the offline consolidation pass."
             )
         ),
     ] = None,
@@ -66,7 +64,7 @@ async def write(  # noqa: PLR0917 — the public write contract
             description=(
                 "Git repositories whose whole working tree, uncommitted files included, is "
                 "captured into the store without touching your files. Pass every repository "
-                "whose code produced a claim. [] clears the previous version's captures."
+                "whose code produced a result. [] clears the previous version's captures."
             )
         ),
     ] = None,
@@ -86,28 +84,16 @@ async def write(  # noqa: PLR0917 — the public write contract
             )
         ),
     ] = None,
-    priority: Annotated[
-        int | None, Field(description="Goals and tasks only: 0 (highest) to 4.")
-    ] = None,
-    stated_by: Annotated[
-        StatedBy | None,
-        Field(
-            description=(
-                "Claims and preferences only: person when you are recording what the person "
-                "said, agent (the default) otherwise."
-            )
-        ),
-    ] = None,
+    priority: Annotated[int | None, Field(description="Tasks only: 0 (highest) to 4.")] = None,
     parent: Annotated[
         str | None,
-        Field(description="New entries only: the goal or task this is part_of."),
+        Field(description="New tasks only: the task this is part_of."),
     ] = None,
     waits_on: Annotated[
         list[str],
         Field(
             description=(
-                "New entries only: goals or tasks that must be closed completed before this "
-                "one is ready. Create dependencies first so their ids exist."
+                "New tasks only: tasks that must be closed completed before this one is ready."
             )
         ),
     ] = [],  # noqa: B006 — contracted default; never mutated
@@ -125,18 +111,16 @@ async def write(  # noqa: PLR0917 — the public write contract
 ) -> WriteResult:
     """Create an entry, or write the next version of one. Every write records the harness, session and transcript that made it; you never pass them.
 
-    Use this when: you plan work (one task per call, in dependency order, so parent and waits_on name ids that exist), record something true or a person's preference, keep a note, or edit any entry. An edit keeps the id: pass id, the base_version you read and a reason; omitted fields keep their values and [] clears a list.
+    Use this when: you plan work (one task per call), record something known or a person's preference, or edit any entry. An edit keeps the id: pass id, the base_version you read and a reason; omitted fields keep their values and [] clears a list.
 
     Use instead: link, to add an edge after creation; claim, close, reopen and release, to change a task's state; add_comment, for feedback that needs a response; retire, when an entry is no longer true.
 
-    Returns: the id and version, the task graph around a goal or task with each entry's state, warnings (a possible secret, a dependency cycle, a link to an entry that cannot be a parent or dependency), and the show call.
+    Returns: the id and version, the task graph around a task with each entry's state, warnings (a possible secret, a dependency cycle, data outside a repository), and the show call.
     """
     store = context.store()
     creating = id is None
     if creating and kind is None:
-        raise ValidationError(
-            "a new entry needs kind: goal, task, note, claim, preference or skill"
-        )
+        raise ValidationError("a new entry needs kind: task, note, preference or skill")
     draft = EntryDraft(
         kind=kind,
         id=id,
@@ -148,7 +132,6 @@ async def write(  # noqa: PLR0917 — the public write contract
         value=value,
         artifacts=artifacts,
         priority=priority,
-        stated_by=stated_by,
         projects=projects,
         parent=parent,
         waits_on=waits_on,

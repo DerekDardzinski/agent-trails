@@ -42,10 +42,10 @@ def test_a_new_version_keeps_the_id_and_the_history(entries: EntryStore) -> None
     """Silent failure caught: an edit replacing the content in place, losing what the entry
     said before, or minting a new id that breaks every link to it."""
     first = entries.write_entry(
-        EntryDraft(kind="claim", title="Lift is 3%", body="from run 1", tags=["ab-test"])
+        EntryDraft(kind="note", title="Lift is 3%", body="from run 1", tags=["ab-test"])
     )
     entry_id = first.entry.id
-    assert entry_id.startswith("clm-")
+    assert entry_id.startswith("note-")
     second = entries.write_entry(
         EntryDraft(
             id=entry_id,
@@ -142,12 +142,8 @@ def test_a_lost_response_retry_with_the_old_base_is_recognised(entries: EntrySto
 
 def test_kind_specific_fields_are_refused_on_other_kinds(entries: EntryStore) -> None:
     """Silent failure caught: a priority stored on a note, where nothing ever reads it."""
-    with pytest.raises(ValidationError, match="priority is a goal and task field"):
+    with pytest.raises(ValidationError, match="priority is a task field"):
         entries.write_entry(EntryDraft(kind="note", title="n", priority=1))
-    with pytest.raises(ValidationError, match="stated_by is recorded on claims"):
-        entries.write_entry(EntryDraft(kind="task", title="t", stated_by="person"))
-    claim = entries.write_entry(EntryDraft(kind="claim", title="c")).entry
-    assert claim.current.stated_by == "agent"
 
 
 def test_harness_is_recorded_when_there_is_no_session(entries: EntryStore) -> None:
@@ -200,7 +196,7 @@ def test_an_old_schema_database_is_refused(tmp_path: Path) -> None:
 
 def test_parent_and_waits_on_are_only_set_at_creation(entries: EntryStore) -> None:
     """Silent failure caught: an edge passed with a version being dropped silently."""
-    parent = entries.write_entry(EntryDraft(kind="goal", title="g")).entry.id
+    parent = entries.write_entry(EntryDraft(kind="task", title="g")).entry.id
     task = entries.write_entry(EntryDraft(kind="task", title="t", parent=parent)).entry
     assert [(link.relation, link.target_id, link.target_version) for link in task.links] == [
         ("part_of", parent, 1)

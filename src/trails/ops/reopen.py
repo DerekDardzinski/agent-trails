@@ -16,14 +16,14 @@ OPERATION = Operation(toolset="agent", read_only=False, destructive=False, idemp
 
 
 async def reopen(
-    id: Annotated[str, Field(description="The closed goal or task.")],  # noqa: A002
+    id: Annotated[str, Field(description="The closed task.")],  # noqa: A002
     reason: Annotated[str, Field(description="Why it needs more work.")],
 ) -> TaskResult:
-    """Move a closed goal or task back to open. Links that a supersede moved stay moved.
+    """Move a closed task back to open. Links that a supersede moved stay moved.
 
     Use this when: closed work turns out not to be finished, or you closed it with the wrong outcome and want to close it again.
 
-    Use instead: write with a new task linked discovered_from the old one, when the new work is separate.
+    Use instead: write, to create a new task when the new work is separate.
 
     Returns: the new state, its dependents and the task graph around it. Reopening an entry that is not closed changes nothing.
     """

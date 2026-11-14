@@ -20,7 +20,7 @@ def task_result(store: EntryStore, event: str, outcome: TaskOutcome) -> TaskResu
         # dependents, now waiting on the replacements.
         moved = list(dict.fromkeys(item.source_id for item in outcome.moved))
         dependent_ids = list(dict.fromkeys([*graph.dependents(entry_id), *moved]))
-        lines = graph_lines(graph, [entry_id, *outcome.follow_ups, *moved])
+        lines = graph_lines(graph, [entry_id, *moved])
         wanted = set(dependent_ids)
         dependents = [line for line in graph_lines(graph, dependent_ids) if line.id in wanted]
         state = node_state(graph, entry_id)
@@ -33,7 +33,6 @@ def task_result(store: EntryStore, event: str, outcome: TaskOutcome) -> TaskResu
         event=event,
         changed=outcome.changed,
         state=state,
-        follow_ups=outcome.follow_ups,
         moved=outcome.moved,
         dependents=dependents,
         graph=lines,

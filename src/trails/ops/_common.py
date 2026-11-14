@@ -12,14 +12,7 @@ from trails.entry_store import EntryStore, is_open_comment, unchanged_responses
 from trails.errors import ValidationError
 from trails.models import CaptureSummary, CodeCapture, Entry
 from trails.ops._entry_types import ShownComment, ShownEntry, ShownLink, ShownVersion
-from trails.present import (
-    GraphLine,
-    evidence_users,
-    graph_lines,
-    node_state,
-    stale_link_text,
-    standing,
-)
+from trails.present import GraphLine, graph_lines, node_state, stale_link_text
 
 
 def redraw(store: EntryStore, entry_ids: Sequence[str]) -> tuple[list[GraphLine], list[str]]:
@@ -126,6 +119,7 @@ def shown_entries(
     others = {link.source_id for links in incoming.values() for link in links}
     related = store.get_entries(sorted(targets | others))
     sessions = store.get_sessions([entry.current.session_id or "" for entry in entries])
+    held_at_creation = store.claims_held_at_creation(ids)
     shown: list[ShownEntry] = []
     for entry in entries:
         current = entry.current
@@ -177,7 +171,6 @@ def shown_entries(
                 tags=current.tags,
                 value=current.value,
                 priority=current.priority,
-                stated_by=current.stated_by,
                 artifacts=[
                     artifact.location
                     + (f" {artifact.digest}" if artifact.digest else "")
@@ -192,8 +185,6 @@ def shown_entries(
                 ],
                 projects=entry.projects,
                 state=node_state(graph, entry.id) if entry.id in graph.nodes else entry.kind,
-                standing=standing(entry, incoming.get(entry.id, [])),
-                evidence_for=evidence_users(entry, incoming.get(entry.id, [])),
                 links=links,
                 task_events=[
                     f"{event.created_at.isoformat()} {event.event}"
@@ -209,6 +200,7 @@ def shown_entries(
                 transcript=session.transcript if session is not None else None,
                 agent=session.agent if session is not None else None,
                 created_at=current.created_at,
+                created_while=held_at_creation.get(entry.id),
                 comments=[
                     ShownComment(
                         id=item.id,

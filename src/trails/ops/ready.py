@@ -11,7 +11,7 @@ from trails.errors import UsageError
 from trails.ops import context
 from trails.ops._entry_types import ReadyItem, ReadyResult
 from trails.ops._marks import Operation
-from trails.present import graph_lines, node_state
+from trails.present import node_state
 
 OPERATION = Operation(toolset="agent", read_only=True, destructive=False, idempotent=True)
 
@@ -22,26 +22,20 @@ async def ready(
     ] = None,
     limit: Annotated[int, Field(description="Most ready tasks to list.")] = 20,
 ) -> ReadyResult:
-    """List the tasks ready to work on, most urgent first, and the goals and tasks waiting on a decision.
+    """List the tasks ready to work on, most urgent first.
 
-    Use this when: you need the next thing to do, or to see what is blocked on replanning.
+    Use this when: you need the next thing to do.
 
-    Use instead: show, for one task's full state; search(status=...), to list tasks by state.
+    Use instead: blocked, for the tasks waiting on other tasks and the state of each; show, for one task's full state; search(status=...), to list tasks by state.
 
-    Returns: ready tasks by priority then age, each with its claim if one is held; entries ready to close; parents with a failed child that need a decision; and entries whose dependency was dropped, failed or superseded and need replanning.
+    Returns: ready tasks by priority then age, each with its claim if one is held, and the call that claims the first. A task is ready when it is not closed, none of its children is open, and every task it or an ancestor waits on is closed completed.
     """
     if limit < 1:
         raise UsageError(f"limit must be at least 1, not {limit}")
     store = context.store()
     ref = store.resolve_project(project) if project is not None else None
     graph = store.task_graph()
-    scope = ref.id if ref is not None else None
-    ready_ids = graph.ready(scope)
-
-    def in_scope(entry_id: str) -> bool:
-        return scope is None or scope in graph.nodes[entry_id].projects
-
-    work = [item for item in graph.nodes if graph.is_work(item) and in_scope(item)]
+    ready_ids = graph.ready(ref.id if ref is not None else None)
     items = []
     for item in ready_ids[:limit]:
         node = graph.nodes[item]
@@ -57,16 +51,4 @@ async def ready(
                 claimed_at=held.created_at if held is not None else None,
             )
         )
-
-    def lines(ids: list[str]) -> list:
-        wanted = set(ids)
-        return [line for line in graph_lines(graph, ids) if line.id in wanted]
-
-    return ReadyResult(
-        project=ref,
-        ready=items,
-        total=len(ready_ids),
-        ready_to_close=lines([item for item in work if graph.is_ready_to_close(item)]),
-        needs_decision=lines([item for item in work if graph.needs_decision(item)]),
-        needs_replanning=lines(graph.needs_replanning(scope)),
-    )
+    return ReadyResult(project=ref, ready=items, total=len(ready_ids))

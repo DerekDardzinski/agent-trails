@@ -6,10 +6,11 @@ from typing import Any
 import pytest
 
 from trails.entry_store import EntryStore
-from trails.models import ArtifactRef, FollowUp
+from trails.models import ArtifactRef
 from trails.ops import context
 from trails.ops._entry_types import preference_section
 from trails.ops.add_comment import add_comment
+from trails.ops.blocked import blocked
 from trails.ops.claim import claim
 from trails.ops.close import close
 from trails.ops.link import link
@@ -112,45 +113,35 @@ def test_prime_preference_conflicts_are_cut_at_the_cap_with_the_call_that_lists_
 
 def test_prime_index_lists_projects_and_counts_unscoped(store: EntryStore) -> None:
     store.write_project("alpha", host="h", paths=[], remove_paths=[])
-    new(store, "goal", "g", projects=["alpha"])
+    parent = new(store, "task", "g", projects=["alpha"])
+    new(store, "task", "child", parent=parent, projects=["alpha"])
+    new(store, "task", "a task with no children", projects=["alpha"])
     new(store, "note", "loose")
     result = run(store, prime)
-    assert [(row.name, row.open_goals) for row in result.projects] == [("alpha", 1)]
+    assert [(row.name, row.open_initiatives) for row in result.projects] == [("alpha", 1)]
     assert result.unscoped == 1
 
 
-def test_a_note_hit_names_the_entries_that_use_it_as_evidence(store: EntryStore) -> None:
-    """Silent failure caught: a note that already backs a claim looking like stray scratch,
-    so it gets re-derived or deleted by hand (dec-ix8zd)."""
-    note = new(store, "note", "Kafka lag spikes at deploy", body="observed lag spikes")
-    claim_id = new(store, "claim", "Deploys cause lag")
-    run(store, link, source=claim_id, relation="supports", target=note)
-    found = run(store, search, kinds=["note"])
-    [hit] = found.hits
-    assert hit.evidence_for == [f"{claim_id} supports"]
-    shown = run(store, show, id=note).entries[0]
-    assert shown.evidence_for == [f"{claim_id} supports"]
-
-
-def test_claim_standing_shows_every_word_together(store: EntryStore) -> None:
-    """Silent failure caught: a contradicted observation shown only as supported, or a claim
-    with nothing behind it shown as an observation."""
+def test_a_hit_shows_supporting_and_contradicting_entries_as_plain_links(
+    store: EntryStore,
+) -> None:
+    """Silent failure caught: a note shown with a verdict-like label (observation, assertion)
+    derived by trails, or a contradiction missing from the hit, instead of the stored links."""
     measured = new(
         store,
-        "claim",
+        "note",
         "p99 fell 12%",
         artifacts=[ArtifactRef(location="s3://bench/run1.csv")],
     )
-    bare = new(store, "claim", "the cache is the cause")
     backer = new(store, "note", "load test notes")
-    rival = new(store, "claim", "p99 did not fall")
+    rival = new(store, "note", "p99 did not fall")
     run(store, link, source=backer, relation="supports", target=measured)
     run(store, link, source=rival, relation="contradicts", target=measured)
-    shown = {item.id: item.standing for item in run(store, show, id=[measured, bare]).entries}
-    assert shown == {
-        measured: ["observation", f"supported by {backer}", f"contradicted by {rival}"],
-        bare: ["assertion"],
-    }
+    [hit] = [item for item in run(store, search, kinds=["note"]).hits if item.id == measured]
+    assert hit.evidence == [f"supported by {backer}", f"contradicted by {rival}"]
+    text = run(store, search, kinds=["note"]).render_text()
+    assert "observation" not in text
+    assert "standing" not in text
 
 
 def _graph_ids(result: Any) -> list[str]:
@@ -160,15 +151,15 @@ def _graph_ids(result: Any) -> list[str]:
 def test_every_task_changing_response_redraws_the_affected_graph(store: EntryStore) -> None:
     """Silent failure caught: a missing or reversed link that nothing shows, because the
     response to the change that made it named only the entry changed (dec-o0gww)."""
-    goal = run(store, write, kind="goal", title="g")
+    goal = run(store, write, kind="task", title="g")
     assert _graph_ids(goal) == [goal.id]
     first = run(store, write, kind="task", title="a", parent=goal.id)
     assert _graph_ids(first) == [goal.id, first.id]
     second = run(store, write, kind="task", title="b", parent=goal.id, waits_on=[first.id])
     assert _graph_ids(second) == [goal.id, second.id, first.id]
     assert [line.state for line in second.graph] == [
-        "2 of 2 children not closed",
-        f"waiting on {first.id}",
+        "children: 2 open",
+        f"waits on {first.id} (open)",
         "ready",
     ]
     linked = run(store, link, source=second.id, relation="part_of", target=goal.id)
@@ -193,21 +184,21 @@ def test_close_names_dependents_with_their_new_state(store: EntryStore) -> None:
     waiting = new(store, "task", "b", waits_on=[first])
     closed = run(store, close, id=first, outcome="dropped", summary="not needed")
     [dependent] = closed.dependents
-    assert (dependent.id, dependent.state) == (
-        waiting,
-        f"needs replanning: waits on {first} (closed dropped)",
-    )
-    queue = run(store, ready)
-    assert [line.id for line in queue.needs_replanning] == [waiting]
+    assert (dependent.id, dependent.state) == (waiting, f"waits on {first} (closed dropped)")
+    held_up = run(store, blocked)
+    assert [(item.id, item.waits_on) for item in held_up.blocked] == [
+        (waiting, [f"{first} (closed dropped)"])
+    ]
 
 
-def test_search_ranks_a_note_below_a_claim_with_the_same_words(store: EntryStore) -> None:
-    """Silent failure caught: scratch notes crowding out the claim distilled from them (D5)."""
+def test_search_ranks_every_kind_the_same(store: EntryStore) -> None:
+    """Silent failure caught: a fixed penalty pushing notes below other kinds, a judgment of
+    worth the store does not make. With equal scores the newer entry comes first."""
+    preference = new(store, "preference", "retry budget exhausted under load")
     note = new(store, "note", "retry budget exhausted under load")
-    claim_id = new(store, "claim", "retry budget exhausted under load")
     assert [hit.id for hit in run(store, search, query="retry budget exhausted").hits] == [
-        claim_id,
         note,
+        preference,
     ]
 
 
@@ -233,7 +224,7 @@ def test_search_status_selects_by_the_latest_task_event(store: EntryStore) -> No
 
 
 def test_show_since_comment_lists_what_changed_after_a_review(store: EntryStore) -> None:
-    goal = new(store, "goal", "g")
+    goal = new(store, "task", "g")
     task = new(store, "task", "t", parent=goal)
     review = run(store, add_comment, id=goal, comment="looks right", verdict="approve")
     run(store, write, id=task, base_version=1, reason="feedback", body="more detail")
@@ -246,7 +237,7 @@ def test_show_since_comment_on_another_entry_warns_instead_of_printing_nothing(
 ) -> None:
     """Silent failure caught: an agent reading `show(id, since_comment=C)` with C on another
     entry sees no change list and no sign that it asked the wrong entry."""
-    goal = new(store, "goal", "g")
+    goal = new(store, "task", "g")
     task = new(store, "task", "t", parent=goal)
     review = run(store, add_comment, id=goal, comment="looks right", verdict="approve")
     result = run(store, show, id=task, since_comment=review.comment_id)
@@ -266,7 +257,7 @@ def test_retired_dependency_keeps_its_dependent_waiting(store: EntryStore) -> No
     run(store, retire, id=first, reason="wrong plan")
     assert [item.id for item in run(store, ready).ready] == []
     assert run(store, search, query="", kinds=["task"]).total == 1
-    assert run(store, show, id=waiting).entries[0].state == f"waiting on {first}"
+    assert run(store, show, id=waiting).entries[0].state == f"waits on {first} (retired)"
 
 
 def test_set_projects_moves_an_entry_between_projects(store: EntryStore) -> None:
@@ -293,7 +284,7 @@ def test_a_secret_in_a_set_projects_reason_is_warned_about(store: EntryStore) ->
     assert "warning: possible secret: AWSKeyDetector in reason line 1" in result.render_text()
 
 
-@pytest.mark.parametrize("kind", ["note", "claim", "preference", "skill"])
+@pytest.mark.parametrize("kind", ["note", "preference", "skill"])
 def test_a_non_work_write_draws_no_graph(store: EntryStore, kind: str) -> None:
     assert run(store, write, kind=kind, title="x").graph == []
 
@@ -309,7 +300,7 @@ def test_a_script_artifact_in_a_temporary_directory_is_warned_about(
     script.write_text("print(1)\n")
     monkeypatch.setattr(locations, "temporary_roots", lambda: (tmp_path.resolve(),))
     result = run(
-        store, write, kind="claim", title="x", artifacts=[ArtifactRef(location=str(script))]
+        store, write, kind="note", title="x", artifacts=[ArtifactRef(location=str(script))]
     )
     [warning] = result.warnings
     assert "is a script in the temporary directory" in warning
@@ -339,24 +330,18 @@ def test_a_supersede_that_closes_a_cycle_warns_and_shows_the_moved_dependent(
 
 
 def test_every_free_text_write_is_scanned_for_secrets(store: EntryStore) -> None:
-    """Review finding 2. Silent failure caught: a key pasted into a comment, a close summary, a
-    follow-up or a reason stored without the warning that tells the person."""
+    """Review finding 2. Silent failure caught: a key pasted into a comment, a close summary or
+    a reason stored without the warning that tells the person."""
     task = new(store, "task", "t")
-    other = new(store, "task", "o")
+    note = new(store, "note", "n")
+    other = new(store, "note", "o")
     comment = run(store, add_comment, id=task, comment=f"aws_key = {AWS_KEY}")
-    linked = run(store, link, source=task, relation="references", target=other, reason=AWS_KEY)
-    closed = run(
-        store,
-        close,
-        id=task,
-        outcome="completed",
-        summary=f"used {AWS_KEY}",
-        follow_ups=[FollowUp(title="rotate", body=f"key {AWS_KEY}")],
-    )
+    linked = run(store, link, source=note, relation="supports", target=other, reason=AWS_KEY)
+    closed = run(store, close, id=task, outcome="completed", summary=f"used {AWS_KEY}")
     assert any("AWSKeyDetector in comment" in w for w in comment.warnings)
     assert any("AWSKeyDetector in reason" in w for w in linked.warnings)
     found = {w.split(" in ")[1].split(" line")[0] for w in closed.warnings if "AWSKeyDetector" in w}
-    assert found == {"summary", "follow_ups[0].body"}
+    assert found == {"summary"}
     assert all(AWS_KEY not in text for text in (comment.render_text(), closed.render_text()))
 
 
@@ -372,62 +357,43 @@ def test_a_stale_claim_names_the_claim_retry(store: EntryStore) -> None:
     assert "write(" not in str(refused.value)
 
 
-def test_follow_ups_are_embedded(store: EntryStore, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Review finding 4. Silent failure caught: a follow-up task search by meaning cannot find."""
-    from tests.fakes import FakeEngine, basis
-    from trails import engine as engine_seam
-
-    class Engine(FakeEngine):
-        def embed(self, text: str) -> Any:
-            return basis(0)
-
-    monkeypatch.setattr(engine_seam, "build_engine", Engine)
-    task = new(store, "task", "t")
-    closed = run(
-        store, close, id=task, outcome="completed", summary="s", follow_ups=[FollowUp(title="next")]
-    )
-    embedded = {
-        str(r["entry_id"]) for r in store.query("SELECT entry_id FROM entry_chunk_embedding")
-    }
-    assert set(closed.follow_ups) <= embedded
-
-
 def test_scoped_prime_bounds_its_lists(store: EntryStore, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Review finding 5. Silent failure caught: prime growing with every contradicted claim
-    and open goal until the session-start page is dropped. The limit is lowered to 2 so the
+    """Review finding 5. Silent failure caught: prime growing with every contradicted entry
+    and open parent task until the session-start page is dropped. The limit is lowered to 2 so the
     test writes a handful of entries rather than dozens."""
     from trails.ops import prime as prime_module
 
     monkeypatch.setattr(prime_module, "LIST_LIMIT", 2)
     limit = 2
     store.write_project("alpha", host="h", paths=[], remove_paths=[])
-    rival = new(store, "claim", "rival", projects=["alpha"])
+    rival = new(store, "note", "rival", projects=["alpha"])
     for n in range(limit + 2):
-        target = new(store, "claim", f"c{n}", projects=["alpha"])
+        target = new(store, "note", f"c{n}", projects=["alpha"])
         store.add_entry_link(rival, "contradicts", target)
-        new(store, "goal", f"g{n}", projects=["alpha"])
+        parent = new(store, "task", f"g{n}", projects=["alpha"])
+        new(store, "task", f"child {n}", parent=parent, projects=["alpha"])
     result = run(store, prime, project="alpha")
     assert (len(result.contradicted), result.contradicted_total) == (limit, limit + 2)
-    assert (len(result.goals), result.goal_total) == (limit, limit + 2)
+    assert (len(result.initiatives), result.initiative_total) == (limit, limit + 2)
 
 
 def test_search_contradicted_lists_only_currently_contradicted_entries(
     store: EntryStore,
 ) -> None:
-    """Silent failure caught: prime's `more:` call for hidden contradicted claims listing every
-    claim, or listing a claim whose contradiction was unlinked or whose contradicting entry was
+    """Silent failure caught: prime's `more:` call for hidden contradicted entries listing every
+    note, or listing a claim whose contradiction was unlinked or whose contradicting entry was
     retired, so the agent cannot find the corrections prime counted."""
     store.write_project("alpha", host="h", paths=[], remove_paths=[])
-    rival = new(store, "claim", "rival", projects=["alpha"])
-    retired_rival = new(store, "claim", "retired rival", projects=["alpha"])
-    contradicted = new(store, "claim", "contradicted", projects=["alpha"])
-    unlinked = new(store, "claim", "was contradicted", projects=["alpha"])
-    by_retired = new(store, "claim", "contradicted by a retired claim", projects=["alpha"])
-    new(store, "claim", "never contradicted", projects=["alpha"])
+    rival = new(store, "note", "rival", projects=["alpha"])
+    retired_rival = new(store, "note", "retired rival", projects=["alpha"])
+    contradicted = new(store, "note", "contradicted", projects=["alpha"])
+    unlinked = new(store, "note", "was contradicted", projects=["alpha"])
+    by_retired = new(store, "note", "contradicted by a retired claim", projects=["alpha"])
+    new(store, "note", "never contradicted", projects=["alpha"])
     store.add_entry_link(rival, "contradicts", contradicted)
     store.add_entry_link(rival, "contradicts", unlinked)
     store.remove_entry_link(rival, "contradicts", unlinked, "rival was about something else")
     store.add_entry_link(retired_rival, "contradicts", by_retired)
     run(store, retire, id=retired_rival, reason="wrong")
-    result = run(store, search, kinds=["claim"], projects=["alpha"], contradicted=True)
+    result = run(store, search, kinds=["note"], projects=["alpha"], contradicted=True)
     assert [hit.id for hit in result.hits] == [contradicted]

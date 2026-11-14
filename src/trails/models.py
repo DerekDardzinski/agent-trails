@@ -16,7 +16,6 @@ from trails.vocab import (
     LinkRelation,
     Outcome,
     ProjectAction,
-    StatedBy,
     TaskEventKind,
     TaskState,
     Verdict,
@@ -180,7 +179,6 @@ class EntryVersion(BaseModel):
     tags: list[str]
     value: dict[str, Any] | None
     priority: int | None
-    stated_by: StatedBy | None
     artifacts: list[ArtifactRef]
     code: list[CodeCapture]
     reason: str | None
@@ -219,7 +217,7 @@ class LinkEvent(BaseModel):
 
 
 class TaskEvent(BaseModel):
-    """One append-only claim, release, close or reopen of a goal or task."""
+    """One append-only claim, release, close or reopen of a task."""
 
     entry_id: str
     sequence: int
@@ -235,7 +233,7 @@ class TaskEvent(BaseModel):
 class Entry(BaseModel):
     """An entry as a read assembles it: identity, current version and current state.
 
-    `state`, `outcome` and `claim` are set for goals and tasks only. `claim` is the claim event
+    `state`, `outcome` and `claim` are set for tasks only. `claim` is the claim event
     currently held, if any.
     """
 
@@ -274,7 +272,6 @@ class EntryDraft(BaseModel):
     artifacts: list[ArtifactRef] | None = None
     code: list[CodeCapture] | None = None
     priority: int | None = None
-    stated_by: StatedBy | None = None
     projects: list[str] | None = None
     parent: str | None = None
     waits_on: list[str] = []
@@ -317,15 +314,6 @@ class SessionRow(BaseModel):
     first_seen: datetime
 
 
-class FollowUp(BaseModel):
-    """A task to create when closing an entry; it is linked `discovered_from` the closed one."""
-
-    title: str
-    body: str = ""
-    priority: int | None = None
-    tags: list[str] = []
-
-
 class LinkOutcome(BaseModel):
     """A link added or removed. `changed` is False when the link was already in that state."""
 
@@ -352,7 +340,6 @@ class TaskOutcome(BaseModel):
     entry: Entry
     event: TaskEvent | None
     changed: bool
-    follow_ups: list[str]
     moved: list[MovedLink]
     warnings: list[str]
 

@@ -19,7 +19,7 @@ def run_lint(store: EntryStore, **arguments: Any) -> Any:
 def test_lint_reports_a_link_written_against_an_older_version(store: EntryStore) -> None:
     """Silent failure caught: a claim still counted as support for a statement that has since
     changed under it (dec-o0gww: "supports v2, now v3")."""
-    claim = store.write_entry(EntryDraft(kind="claim", title="lift is 3%")).entry.id
+    claim = store.write_entry(EntryDraft(kind="note", title="lift is 3%")).entry.id
     note = store.write_entry(EntryDraft(kind="note", title="run log")).entry.id
     store.add_entry_link(note, "supports", claim)
     store.write_entry(EntryDraft(id=claim, base_version=1, reason="rerun", title="lift is 2%"))

@@ -107,7 +107,7 @@ def test_capture_writes_nothing_to_the_repository_and_holds_the_new_contents(
     before = _user_state(git_repo)
     head = git_cmd(git_repo, "rev-parse", "HEAD")
 
-    result = _run(store, title="t", kind="claim", repos=[str(git_repo)])
+    result = _run(store, title="t", kind="note", repos=[str(git_repo)])
 
     assert _user_state(git_repo) == before
     [code] = store.get_entry(result.id).current.code
@@ -188,7 +188,7 @@ def test_a_capture_is_readable_after_the_repository_is_deleted(
     """labbook-79y.10 criterion 1. Catches a capture whose unchanged files were only ever read
     through the repository's own objects, so it vanishes with the repository."""
     (git_repo / "new.txt").write_text("n\n")
-    result = _run(store, title="t", kind="claim", repos=[str(git_repo)])
+    result = _run(store, title="t", kind="note", repos=[str(git_repo)])
     [code] = store.get_entry(result.id).current.code
 
     shutil.rmtree(git_repo)
@@ -543,8 +543,8 @@ def test_malformed_fields_are_refused_before_repository_capture(
     store: EntryStore, git_repo: Path
 ) -> None:
     """Catches a refused write leaving an unreported capture ref or capture store."""
-    with pytest.raises(ValidationError, match="priority is a goal and task field"):
-        _run(store, kind="claim", title="bad priority", priority=1, repos=[str(git_repo)])
+    with pytest.raises(ValidationError, match="priority is a task field"):
+        _run(store, kind="note", title="bad priority", priority=1, repos=[str(git_repo)])
     with pytest.raises(ValidationError, match="no entry has id"):
         _run(
             store,

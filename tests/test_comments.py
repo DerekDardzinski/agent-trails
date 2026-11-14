@@ -61,7 +61,7 @@ def test_a_same_version_response_is_detectable(entries: EntryStore) -> None:
 
 def test_a_comment_on_a_goal_pins_every_descendant(entries: EntryStore) -> None:
     """Silent failure caught: a plan review that cannot later say which tasks changed."""
-    goal = make(entries, "goal", "g")
+    goal = make(entries, "task", "g")
     task = make(entries, "task", "t", parent=goal)
     subtask = make(entries, "task", "s", parent=task)
     entries.write_entry(EntryDraft(id=subtask, base_version=1, reason="r", body="v2"))
@@ -72,7 +72,7 @@ def test_a_comment_on_a_goal_pins_every_descendant(entries: EntryStore) -> None:
 def test_since_comment_lists_exactly_the_changed_versions_and_links(entries: EntryStore) -> None:
     """Silent failure caught: a re-review missing an edited task, a task added after the
     review, or a removed dependency, or listing untouched tasks as changed."""
-    goal = make(entries, "goal", "g")
+    goal = make(entries, "task", "g")
     edited = make(entries, "task", "edited", parent=goal)
     untouched = make(entries, "task", "untouched", parent=goal)
     blocker = make(entries, "task", "blocker", parent=goal, waits_on=[])

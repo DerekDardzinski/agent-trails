@@ -1,46 +1,46 @@
 # trails
 
-A memory and task store for agents, shared across harnesses: goals and tasks with dependencies
-and claims, notes, claims about what is true, a person's preferences, and the links between
-them, each write attributed to the harness, session and transcript that made it. Binaries:
+A memory and task store for agents, shared across harnesses: tasks with dependencies and
+claims, notes on what is known, a person's preferences, skills, and the links between them, each write attributed to the harness, session and transcript that made it. Binaries:
 `trails` (CLI) and `trails-mcp` (MCP server on stdio). Distribution name `agent-trails`; import
 name `trails`.
 
 ## What it does, and what it does not
 
 trails stores, presents, links and tracks entries. **It decides nothing about their meaning.**
-Every state it reports (a task is ready, a goal is ready to close, a claim is an observation)
-is derived from stored links, events and version fields, never from what an entry says. No LLM
-runs inside any operation.
+The one state it works out is whether a task is ready; everything else it reports is a stored
+fact, such as how each child task ended or the state of a task another one waits on. No LLM
+runs inside any operation. `docs/philosophy.md` holds the seven principles every change is
+checked against.
 
 The store refuses exactly two things, both as `ValidationError`:
 
-1. **Malformed input**: an empty title, a link to an entry that does not exist, a priority on a
-   note, `addresses` naming a comment that is not open on the same entry, a value wider than its
+1. **Malformed input**: an empty title, a link to an entry that does not exist, a link between
+   the wrong kinds (work links join tasks, evidence links join notes, preferences and skills), a
+   priority on a note, `addresses` naming a comment that is not open on the same entry, a value wider than its
    column, or two tags the database's case- and accent-insensitive comparison treats as one.
 2. **An attempt to overwrite**: a new version written from a stale or missing `base_version`,
    or a claim on a task another session holds without `take_over_reason`.
 
-Everything else is recorded as given, with a warning where it is worth noticing.
+Everything else is recorded as given. Warnings cover only what happens outside the store: data
+in a temporary folder, code outside git, a path that does not exist, a possible secret, or an
+operational failure such as an embedding error.
 
 ## Entries
 
 Every entry has one kind, fixed at creation:
 
 ```
-goal        one initiative's framing and success criteria; never claimed; closed by judgment
-task        something to do; ready queue, claims, close outcomes
-note        an agent's scratch pad; evidence for other entries; ranks below other kinds
-claim       anything stated as true or possibly true; standing comes from what backs it
+task        something to do; ready queue, claims, close outcomes; a task with children is a parent
+note        anything known or found; evidence for other notes
 preference  how the person wants work done; printed in full at session start
-skill       how to do something; written only by the offline consolidation pass
+skill       how to do something; written by the offline consolidation pass
 ```
 
-Ids are the kind's prefix (`gol`, `tsk`, `note`, `clm`, `prf`, `skl`) plus five lowercase base36
+A goal is a tag on a parent task. Ids are the kind's prefix (`tsk`, `note`, `prf`, `skl`) plus five lowercase base36
 characters, six after repeated collisions. An entry has append-only versions on that one id.
 A version carries the full content: title, Markdown body, tags, an optional JSON `value`,
-artifact references, code captures, `priority` (0 to 4, goals and tasks) and `stated_by`
-(`agent` or `person`, claims and preferences). `write(id=..., base_version=..., reason=...)`
+artifact references, code captures and `priority` (0 to 4, tasks). `write(id=..., base_version=..., reason=...)`
 writes the next version; omitted fields keep their values and `[]` clears a list.
 
 Every write records the OS user, the harness, and the session. The harness comes from the MCP
@@ -50,20 +50,21 @@ Each session's transcript path and agent name are stored once.
 
 ## Links, tasks and comments
 
-Seven relations: `waits_on`, `part_of`, `discovered_from`, `supersedes`, `contradicts`,
-`supports`, `references`. Links are add and remove events, and each add records the target
+Work relations `waits_on` and `part_of` join tasks; evidence relations `supports` and
+`contradicts` join notes, preferences and skills; `supersedes` is written only when a task is
+closed superseded. Links are add and remove events, and each add records the target
 version it was written against, so `show` and `lint` can say "written against v2, now v3".
 
 A task is **ready** when it is not closed or retired, none of its children is open, and every
-goal or task it or an ancestor waits on is closed `completed`. Close outcomes: `completed`
-unblocks dependents; `dropped` and `failed` leave them waiting and flag them for replanning;
-`superseded` with `by=[ids]` moves every dependent onto every replacement. A parent with every
-child closed and none failed is **ready to close**; a failed child means it **needs a
-decision**. Every task-changing response redraws the graph around the change with each entry's
-state.
+task it or an ancestor waits on is closed `completed`. Close outcomes: `completed` unblocks
+dependents; `dropped` and `failed` leave them waiting; `superseded` with `by=[ids]` moves every
+dependent onto every replacement. A task's state is shown as facts: "children: 2 completed, 1
+failed", "waits on tsk-x (closed dropped)". `blocked` lists the tasks waiting on a task that is
+not closed completed. `show` names the tasks the creating session held claims on when an entry
+was created. Every task-changing response redraws the graph around the change.
 
 Comments sit beside an entry and never create a version. A comment is open until another
-comment `addresses` it. A comment on a goal or task pins the version of everything under it, and
+comment `addresses` it. A comment on a task pins the version of everything under it, and
 `show(id, since_comment=...)` lists what changed after it.
 
 ## Code capture
@@ -99,11 +100,12 @@ the same signature and docstring. The MCP server's default toolset:
 
 ```
 prime             start a session: preferences in full, then where work stands
-ready             the next tasks, and what needs a decision or replanning
+ready             the next tasks
+blocked           the tasks waiting on another task, with that task's state
 write             create an entry or write its next version
 link / unlink     add or remove a link
 claim / release   take or give back a task
-close / reopen    close a goal or task with an outcome, or reopen it
+close / reopen    close a task with an outcome, or reopen it
 add_comment       feedback that needs a response, or the response that closes it
 show              read entries or projects by id
 search            find entries by meaning, id or filters; also projects
