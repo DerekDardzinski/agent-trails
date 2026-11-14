@@ -296,6 +296,36 @@ def test_an_mcp_write_records_the_harness_its_client_names(
     assert (written.harness, written.session_id) == ("claude", "claude-session-1")
 
 
+def test_an_mcp_client_with_an_empty_name_never_takes_the_inherited_kiro_session(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Follow-up review finding. Silent failure caught: an MCP client that sends an empty name
+    treated as the CLI, so its write is attributed to the KIRO_SESSION_ID the server inherited
+    from the shell that launched it, which is another session (trails fac-x8s2n). The session
+    has a live lease, which is what the CLI path accepts."""
+    leases = tmp_path / ".kiro" / "session-leases"
+    leases.mkdir(parents=True)
+    (leases / "sess_launching_shell.lease").write_text('{"pid": 999999}')
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KIRO_SESSION_ID", "sess_launching_shell")
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    server = mcp_surface.build_mcp_server(store.db_path, "agent")
+
+    async def go() -> Any:
+        async with Client(server, client_info=Implementation(name="", version="1")) as client:
+            return await client.call_tool("write", {"kind": "note", "title": "nameless"})
+
+    result = asyncio.run(go())
+    written = store.get_entry(result.structured_content["id"]).current
+    assert written.session_id is None
+
+
+def test_the_mcp_client_name_outside_a_request_is_empty_not_none() -> None:
+    """Silent failure caught: the binder reporting None when it cannot read the request, which
+    session detection takes to mean the CLI."""
+    assert mcp_surface._client_name() == ""
+
+
 def test_project_tools_separate_creation_from_mutation(store: Store) -> None:
     """Catches update parameters leaking back into registration or update_project losing them."""
     server = mcp_surface.build_mcp_server(store.db_path)

@@ -146,16 +146,18 @@ def _translating(bound: Any) -> Any:
     return called
 
 
-def _client_name() -> str | None:
+def _client_name() -> str:
     """The MCP client's name from its `initialize` request, which decides the harness a write
-    is attributed to (`sessions`). None when the request context carries none."""
+    is attributed to (`sessions`). The empty string when the request carries none, NEVER None:
+    None tells `sessions` the write came from the CLI, which may read `KIRO_SESSION_ID`, and an
+    MCP server's copy of that variable belongs to another session (trails `fac-x8s2n`)."""
     try:
         params = get_context().session.client_params
     except Exception:  # no request context, or a transport without client params
-        return None
+        return ""
     info = getattr(params, "clientInfo", None) if params is not None else None
     name = getattr(info, "name", None)
-    return name if isinstance(name, str) and name else None
+    return name if isinstance(name, str) else ""
 
 
 def _output_schema(operation: Any) -> dict[str, Any]:

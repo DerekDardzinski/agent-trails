@@ -114,6 +114,19 @@ def test_stale_lease_with_a_reused_pid_loses_to_the_live_one(tmp_path: Path) -> 
     assert found == Provenance(harness="kiro", session_id="sess_aa_live")
 
 
+def test_an_empty_mcp_client_name_is_not_the_cli(tmp_path: Path) -> None:
+    """Silent failure caught: an MCP client with no name taking the CLI path, which accepts
+    `KIRO_SESSION_ID` and so attributes the write to the launching shell's session."""
+    kiro_home(tmp_path, "sess_launching_shell", pid=900)
+    env = {"KIRO_SESSION_ID": "sess_launching_shell"}
+    assert sessions.resolve("", env=env, home=tmp_path, chain=chain()) == Provenance(
+        harness="unknown"
+    )
+    assert sessions.resolve(
+        "", env=env, home=tmp_path, chain=chain(ProcessRow(200, 1, KIRO_NODE))
+    ) == Provenance(harness="kiro")
+
+
 def test_claude_reads_its_variable_and_ignores_an_inherited_kiro_one(tmp_path: Path) -> None:
     """Silent failure caught: a Claude Code session started from a Kiro shell attributed to the
     Kiro session whose variable it inherited (trails fac-ahxap)."""

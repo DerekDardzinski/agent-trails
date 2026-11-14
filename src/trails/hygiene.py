@@ -31,7 +31,7 @@ def _near_duplicates(tags: Sequence[str]) -> tuple[tuple[str, str], ...]:
 
 
 def research_refs(store: Path) -> list[str] | None:
-    """The record ids named by `refs/research/<id>/<n>` refs in the capture store, sorted.
+    """The record ids named by `refs/research/<id>/...` refs in the capture store, sorted.
 
     None when the store cannot be read as a git repository, which is a different statement
     from "no refs". A store that does not exist yet holds no refs and gives [].

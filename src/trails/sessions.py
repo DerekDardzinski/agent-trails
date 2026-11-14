@@ -55,7 +55,8 @@ from pathlib import Path
 
 from trails.models import Provenance
 
-# Bound per MCP call by the MCP binder from the client's `initialize` info. None on the CLI.
+# Bound per MCP call by the MCP binder from the client's `initialize` info: the empty string
+# when the client gave no name. None means the CLI, and only the CLI reads KIRO_SESSION_ID.
 CLIENT_NAME: ContextVar[str | None] = ContextVar("trails_mcp_client_name", default=None)
 
 UNKNOWN_HARNESS = "unknown"

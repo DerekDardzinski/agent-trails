@@ -154,7 +154,7 @@ def _unreachable_code(entries: Sequence[Entry], store: Path) -> list[LintItem]:
 
 
 def _orphan_refs(store: EntryStore, capture_store: Path) -> list[LintItem]:
-    """Capture-store refs `refs/research/<id>/<n>` whose id names no entry in the store.
+    """Capture-store refs `refs/research/<id>/...` whose id names no entry in the store.
 
     The capture store is one per database, so this check reads every ref whatever project
     was named.
