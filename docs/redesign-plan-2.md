@@ -73,8 +73,9 @@ and `changes(since, until, session)`. Full toolset: everything, plus `lint`, `al
 `version`.
 
 `repos` is a list of `{path, exclude, allow_large}` objects, so the capture options cannot be
-written without a repository. Closing or claiming a task that is already closed changes nothing
-and warns with its state (Derek: acceptable). Reads are not bound by principle 5.
+written without a repository. Closing or claiming a task that is already closed is refused as an
+overwrite: the refusal states the task's current outcome, who closed it and when, and names no
+other operation (Derek's review fix 1, `trails-round2-review-fixes.md`). Reads are not bound by principle 5.
 
 ## Steps
 

@@ -37,7 +37,7 @@ async def claim(
 
     Use instead: release, to give a task back without closing it; close, when the work is done or abandoned.
 
-    Returns: the task's new state and the task graph around it. A holder that is not the current one is refused like a stale base_version, with the call to retry. Claiming a task this session already holds changes nothing; claiming a closed task changes nothing and names its state.
+    Returns: the task's new state and the task graph around it. A holder that is not the current one is refused like a stale base_version, with the call to retry. Claiming a task this session already holds changes nothing; a closed task is refused with its outcome, who closed it and when.
     """
     store = context.store()
     return task_result(store, "claim", store.claim(id, base_version, holder))

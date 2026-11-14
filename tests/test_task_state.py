@@ -7,7 +7,7 @@ import pytest
 from trails import sessions
 from trails.entry_store import EntryStore
 from trails.errors import ValidationError
-from trails.models import EntryDraft
+from trails.models import EntryDraft, Provenance
 from trails.present import node_state
 
 
@@ -115,25 +115,35 @@ def test_claim_refusals(entries: EntryStore) -> None:
     assert (taken.changed, taken.event.harness) == (True, "other-harness")
 
 
-def test_claiming_or_closing_a_closed_task_changes_nothing_and_names_its_state(
-    entries: EntryStore,
+def test_claiming_or_closing_a_closed_task_is_refused_with_its_state(
+    entries: EntryStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Silent failure caught: a closed task's outcome overwritten by a second close, or a
-    claim reopening closed work, or a refusal pointing at another operation (principle 5);
-    the call is a no-op with a warning naming the state (dec-d1krx item 4)."""
+    """Silent failure caught (Derek's review fix 1): a second close with a different outcome
+    answered with "nothing changed" and a warning, so the agent's outcome was lost without a
+    refusal; a claim reopening closed work; or a refusal pointing at another operation
+    (principle 5). Both are refused as overwrites, and nothing is written."""
+    provenance = Provenance(harness="kiro", session_id="session-closer")
+    monkeypatch.setattr(sessions, "current_provenance", lambda: provenance)
+    monkeypatch.setattr("trails.entry_store.current_author", lambda: "closer")
     done = make(entries, "task", "done")
     entries.close(done, "completed", "ok")
-    claimed = entries.claim(done, 1)
-    closed_again = entries.close(done, "failed", "second thoughts")
-    assert (claimed.changed, claimed.warnings) == (
-        False,
-        [f"{done} is closed completed; nothing changed"],
-    )
-    assert (closed_again.changed, closed_again.warnings) == (
-        False,
-        [f"{done} is closed completed; nothing changed"],
-    )
-    assert entries.get_entry(done).outcome == "completed"
+    events_before = len(entries.get_entry(done).task_events)
+    refusals = []
+    for attempt in (
+        lambda: entries.close(done, "failed", "oops"),
+        lambda: entries.claim(done, 1),
+    ):
+        with pytest.raises(ValidationError) as refused:
+            attempt()
+        refusals.append(str(refused.value))
+    for text in refusals:
+        assert text.startswith(
+            f"{done} is already closed completed, by closer (kiro, session session-closer) at "
+        )
+        assert text.endswith("; nothing was written")
+        assert "reopen" not in text
+    after = entries.get_entry(done)
+    assert (after.outcome, len(after.task_events)) == ("completed", events_before)
 
 
 def test_supersede_moves_every_dependent_onto_every_replacement(entries: EntryStore) -> None:
@@ -241,21 +251,28 @@ def test_closing_a_parent_with_open_children_stores_it_without_a_warning(
     assert entries.task_graph().is_ready(child) is True
 
 
-def test_show_names_the_tasks_the_creating_session_held_claims_on(entries: EntryStore) -> None:
+def test_show_names_the_tasks_the_creating_session_held_claims_on(
+    entries: EntryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Silent failure caught: the fact that replaced `discovered_from` naming a task another
-    session held, a task this session had already released, or a task claimed afterwards."""
+    session held, a task this session had already released, or a task claimed afterwards. The
+    sessions are fixed here, so the result never depends on the session the suite runs in."""
+
+    def in_session(session_id: str) -> None:
+        provenance = Provenance(harness="kiro", session_id=session_id)
+        monkeypatch.setattr(sessions, "current_provenance", lambda: provenance)
+
+    in_session("session-this")
     held = make(entries, "task", "held")
     released = make(entries, "task", "released")
     later = make(entries, "task", "later")
     entries.claim(held, 1)
     entries.claim(released, 1)
     entries.release(released, "paused")
-    token = as_client("other-harness")
-    try:
-        theirs = make(entries, "task", "theirs")
-        entries.claim(theirs, 1)
-    finally:
-        sessions.CLIENT_NAME.reset(token)
+    in_session("session-other")
+    theirs = make(entries, "task", "theirs")
+    entries.claim(theirs, 1)
+    in_session("session-this")
     found = make(entries, "note", "found while working")
     entries.claim(later, 1)
     assert entries.claims_held_at_creation([found, held]) == {found: [held], held: []}

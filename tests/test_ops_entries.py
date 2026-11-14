@@ -372,6 +372,79 @@ def test_a_script_artifact_in_a_temporary_directory_is_warned_about(
     )
 
 
+def test_a_local_artifact_missing_at_write_time_is_warned_about_with_the_corrected_call(
+    store: EntryStore, tmp_path: Any
+) -> None:
+    """Silent failure caught (Derek's review fix 3): a note pointing at a local file that does
+    not exist stored without a word, so the missing data surfaced only if someone ran lint.
+    A cloud URI is not checked. The note is still stored."""
+    missing = tmp_path / "data" / "x.parquet"
+    digest = "sha256:" + "0" * 64
+    result = run(
+        store,
+        create_note,
+        title="x",
+        artifacts=[
+            ArtifactRef(location="s3://bucket/kept.csv"),
+            ArtifactRef(location=str(missing), digest=digest),
+        ],
+    )
+    [warning] = result.warnings
+    assert warning.startswith(f"artifact[1] {missing} does not exist on this machine")
+    assert warning.endswith(
+        f'revise_note("{result.id}", base_version=1, reason="...", artifacts=['
+        '{"location": "s3://bucket/kept.csv", "digest": null, "notes": ""}, '
+        f'{{"location": "<corrected path>", "digest": "{digest}", "notes": ""}}])'
+    )
+    assert store.get_entry(result.id).current.version == 1
+
+
+def test_every_guidance_warning_ends_in_a_call_to_a_real_operation(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, make_git_repo: Any
+) -> None:
+    """Silent failure caught (Derek's review fix 4): a guidance warning that describes the fix
+    in words ("write a new version with ... captured") or names an operation that no longer
+    exists, so the agent cannot paste the call (principle 7 promises the exact call)."""
+    import re
+
+    from trails import locations, ops
+    from trails.ops._guidance import uncaptured_location_warnings
+
+    temp = tmp_path / "tmp"
+    temp.mkdir()
+    monkeypatch.setattr(locations, "temporary_roots", lambda: (temp.resolve(),))
+    repo_in_temp = make_git_repo("tmp/repo")
+    (repo_in_temp / "a.py").write_text("print(1)\n")
+    (temp / "data.csv").write_text("1\n")
+    (temp / "loose.py").write_text("print(1)\n")
+    elsewhere = tmp_path / "plain"
+    elsewhere.mkdir()
+    (elsewhere / "b.py").write_text("print(1)\n")
+    other_repo = make_git_repo("other")
+    (other_repo / "c.py").write_text("print(1)\n")
+    artifacts = [
+        ArtifactRef(location=str(tmp_path / "missing.csv")),
+        ArtifactRef(location=str(repo_in_temp / "a.py")),
+        ArtifactRef(location=str(temp / "data.csv")),
+        ArtifactRef(location=str(temp / "loose.py")),
+        ArtifactRef(location=str(elsewhere / "b.py")),
+        ArtifactRef(location=str(other_repo / "c.py")),
+    ]
+    note_warnings = uncaptured_location_warnings(
+        "note", "note-abcde", 1, artifacts, [f"see {temp}/notes.txt"], []
+    )
+    task_warnings = uncaptured_location_warnings(
+        "task", "tsk-abcde", 1, [], [f"see {temp}/notes.txt"], []
+    )
+    warnings = note_warnings + task_warnings
+    assert len(warnings) == 8
+    names = {ops.operation_name(operation) for operation in ops.operations()}
+    called = [re.findall(r"([a-z_]+)\(\"", text)[-1] for text in warnings]
+    assert called == ["revise_note"] * 7 + ["revise_task"]
+    assert set(called) <= names
+    assert not any("with it captured" in text or "captured:" in text for text in warnings)
+
+
 AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
 
 

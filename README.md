@@ -20,12 +20,12 @@ The store refuses exactly two things, both as `ValidationError`:
    priority on a note, `addresses` naming a comment that is not open on the same entry, a value wider than its
    column, or two tags the database's case- and accent-insensitive comparison treats as one.
 2. **An attempt to overwrite**: a new version written from a stale or missing `base_version`,
-   or a claim on a task another session holds that does not name that session as `holder`.
+   a claim on a task another session holds that does not name that session as `holder`, or a
+   claim or close on a task that is already closed.
 
 Everything else is recorded as given. Warnings cover only what happens outside the store: data
 in a temporary folder, code outside git, a path that does not exist, a possible secret, or an
-operational failure such as an embedding error. The one exception is a claim or close on a task
-that is already closed, which changes nothing and names the task's state.
+operational failure such as an embedding error.
 
 ## Entries
 
@@ -66,7 +66,8 @@ A task is **ready** when it is not closed or retired, none of its children is op
 task it or an ancestor waits on is closed `completed`. `close` records `completed`, which
 unblocks dependents, or `dropped` or `failed`, which leave them waiting; `replace` closes a task
 `superseded` by other tasks and moves every dependent onto every replacement. Claiming or
-closing a task that is already closed changes nothing and names its state. A task's state is shown as facts: "children: 2 completed, 1
+closing a task that is already closed is refused as an overwrite, with its outcome, who closed
+it and when. A task's state is shown as facts: "children: 2 completed, 1
 failed", "waits on tsk-x (closed dropped)". `blocked` lists the tasks waiting on a task that is
 not closed completed. `show` names the tasks the creating session held claims on when an entry
 was created. Every task-changing response redraws the graph around the change.

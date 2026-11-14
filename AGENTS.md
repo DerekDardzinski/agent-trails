@@ -89,11 +89,10 @@ test compares its whole `.git` before and after.
 
 THE STORE REFUSES EXACTLY TWO THINGS, both as `ValidationError`: malformed input, and an
 attempt to overwrite, which is a version written from a stale or missing `base_version`, or a
-claim on a task another session holds whose `holder` does not name that session. Everything
-else is recorded as given. Warnings cover only what happens outside the store (data in a
-temporary folder, code outside git, a missing path, a possible secret, an embedding failure)
-and a claim or close on an already closed task, which changes nothing and names the task's
-state. A no-op such as an unchanged revision or a release of an unclaimed task is reported as
+claim on a task another session holds whose `holder` does not name that session, or a claim
+or close on a task that is already closed. Everything else is recorded as given. Warnings cover
+only what happens outside the store: data in a temporary folder, code outside git, a missing
+path, a possible secret, an embedding failure. A no-op such as an unchanged revision or a release of an unclaimed task is reported as
 "nothing changed", not as a warning. Malformed includes a value wider than its
 column and two tags the case- and accent-insensitive collation treats as one; the database
 itself decides the second, on the failure path of a write.

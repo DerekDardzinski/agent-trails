@@ -1231,21 +1231,18 @@ class EntryStore(Store):
         event: its session id, or its harness when it recorded none), or None when it was
         unclaimed. Like `base_version`, it names the state the claim replaces: a task another
         session holds is taken over only when `holder` names that session, and refused as an
-        overwrite otherwise. A closed task is left as it is, with a warning naming its state
-        (dec-d1krx item 4). Claiming a task this session already holds changes nothing.
+        overwrite otherwise. Claiming a task this session already holds changes nothing.
 
-        Refused: an entry of another kind (malformed), a stale or missing `base_version`, and
-        a held task whose holder the caller did not name (both attempted overwrites).
+        Refused: an entry of another kind (malformed), a stale or missing `base_version`, a
+        held task whose holder the caller did not name, and a closed task (all attempted
+        overwrites of state the caller did not read).
         """
         with dolt.exclusive(self.db_path):
             entry = self.get_entry(entry_id)
             if entry.kind != "task":
                 raise ValidationError(f"{entry_id} is a {entry.kind}; only a task is claimed")
             if entry.state == "closed":
-                return TaskOutcome(
-                    entry=entry, event=None, changed=False, moved=[],
-                    warnings=[f"{entry_id} is closed {entry.outcome}; nothing changed"],
-                )  # fmt: skip
+                raise ValidationError(_closed_refusal(entry))
             retry = f'claim("{entry_id}", base_version={entry.current.version}'
             held = entry.claim
             if held is not None:
@@ -1353,10 +1350,7 @@ class EntryStore(Store):
                     f"{', '.join(not_work)} is not a task; only a task can replace one"
                 )
             if entry.state == "closed":
-                return TaskOutcome(
-                    entry=entry, event=None, changed=False, moved=[],
-                    warnings=[f"{entry_id} is closed {entry.outcome}; nothing changed"],
-                )  # fmt: skip
+                raise ValidationError(_closed_refusal(entry))
             provenance = sessions.current_provenance()
             graph = self.task_graph()
             event = self._task_event(
@@ -2508,6 +2502,19 @@ def _same_session(event: TaskEvent, provenance: Provenance) -> bool:
     """Whether a claim was made by the session now writing. Two writes with no session id
     from the same harness count as one claimant, because nothing tells them apart."""
     return (event.harness, event.session_id) == (provenance.harness, provenance.session_id)
+
+
+def _closed_refusal(entry: Entry) -> str:
+    """The refusal for a claim or close on a closed task: its current state and nothing more.
+
+    A request made from a state that is no longer current is an attempted overwrite
+    (principles 5 and 6). The refusal names no other operation for the same intent."""
+    closing = next((item for item in reversed(entry.task_events) if item.event == "close"), None)
+    text = f"{entry.id} is already closed {entry.outcome}"
+    if closing is not None:
+        when = closing.created_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+        text += f", by {_claimant(closing)} at {when}"
+    return text + "; nothing was written"
 
 
 def claim_holder(event: TaskEvent) -> str:

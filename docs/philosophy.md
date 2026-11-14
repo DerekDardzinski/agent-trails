@@ -39,7 +39,7 @@ and changes nothing else.
 
 ## 3. trails stores, links and shows. It does not judge
 
-trails never decides what an entry means or whether it is right. It does not label a claim as
+trails never decides what an entry means or whether it is right. It does not label a note as
 proven, a plan as finished or a result as good. No language model runs inside trails, and every
 word it prints comes either from stored data or from a fixed template.
 

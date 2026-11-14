@@ -38,7 +38,7 @@ async def close(
 
     Use instead: replace, when other tasks take this one over; release, to stop working on a task that is not finished; create_task, to create follow-up tasks.
 
-    Returns: the new state, the dependents with their new state, and the task graph with each task's children and waits_on targets as stored facts. The outcome is shown as your word, with your harness and session. Closing a task that is already closed changes nothing and names its state.
+    Returns: the new state, the dependents with their new state, and the task graph with each task's children and waits_on targets as stored facts. The outcome is shown as your word, with your harness and session. A task that is already closed is refused with its outcome, who closed it and when.
     """
     store = context.store()
     closed = store.close(id, outcome, summary)

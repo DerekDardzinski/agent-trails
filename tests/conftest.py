@@ -54,10 +54,15 @@ def no_harness_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every write resolves its harness and session from the process tree, and a test run
     inside Kiro or Claude Code would otherwise record the developer's real session. The process
     table is the external boundary, so it is empty by default and every write records the
-    harness `unknown`. Session tests set their own table and home directory."""
+    harness `unknown`. The session variables are removed for the same reason: with
+    KIRO_SESSION_ID naming a live lease, a CLI-path write records the developer's session, and
+    a test can pass inside an agent and fail in a plain terminal. Session tests set their own
+    table, environment and home directory."""
     from trails import sessions
 
     monkeypatch.setattr(sessions, "process_table", dict)
+    for name in ("KIRO_SESSION_ID", "CLAUDE_CODE_SESSION_ID"):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture

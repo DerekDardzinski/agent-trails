@@ -32,7 +32,7 @@ async def replace(
 
     Use instead: close, when a task is done, dropped or failed with no replacement.
 
-    Returns: the new state, the waits_on links that moved, the dependents with their new state, and the task graph. Each replacement records a supersedes link to the replaced task. Moves that would close a dependency cycle are refused. Replacing a task that is already closed changes nothing and names its state.
+    Returns: the new state, the waits_on links that moved, the dependents with their new state, and the task graph. Each replacement records a supersedes link to the replaced task. Moves that would close a dependency cycle are refused. A task that is already closed is refused with its outcome, who closed it and when.
     """
     store = context.store()
     replaced = store.close(id, "superseded", reason, by)
