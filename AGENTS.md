@@ -32,46 +32,53 @@ the write lock.
 
 ## What this package is
 
-A store for agents' memory. It stores, presents, links and tracks records, and **it decides
-nothing**: no verdicts, no statistics, no workflow, no gate. If you find yourself writing a
-rule that judges a record, stop; that is a misreading of the scope.
+A memory and task store for agents across harnesses. It stores, presents, links and tracks
+entries, and **it decides nothing about their meaning**: no verdicts, no statistics, no gate.
+Derived state (readiness, ready to close, claim standing) comes only from stored links, events
+and version fields. If you find yourself writing a rule that reads what an entry says, stop;
+that is a misreading of the scope.
 
-A record has one explicit entry type, an id whose prefix matches that type plus five lowercase
-base36 characters normally and six after repeated collisions, an `open | closed` work status,
-title, Markdown body, descriptive tags, zero or more stable project references, author (the OS
-user), created_at, an optional JSON `value`, artifact references and code captures.
-`vocab.ENTRY_TYPES` defines problem-statement, hypothesis, procedure, result, verification, fact,
-insight, decision, report and note. An entry type is never repeated in tags. `vocab.WORK_STATUSES` says only whether the caller expects another action on this exact
-record; it imposes no workflow conditions.
+An entry has one fixed kind (`vocab.KINDS`: goal, task, note, claim, preference, skill), an id
+whose prefix matches the kind (`gol`, `tsk`, `note`, `clm`, `prf`, `skl`) plus five lowercase
+base36 characters normally and six after repeated collisions, and append-only versions. A
+version carries the full content: title, Markdown body, tags, an optional JSON `value`,
+artifact references, code captures, `priority` (goals and tasks) and `stated_by` (claims and
+preferences). Every version, link event, task event, comment, retirement and membership event
+records `author` (the OS user), `harness` and `session_id`; `sessions.py` resolves the harness
+and session, and the agent never passes them. One `session` row per session id holds its
+transcript path and agent name.
 
-Four link relations: `builds_on`, `supersedes`, `contradicts`, `cites`. History is append-only: a
-revision is a new record with a `supersedes` link and a required `reason`; `set_work_status`
-appends a reasoned status event after the initial publication; `retire` marks a record no longer
-true; nothing updates or deletes a record, status event, membership event, or framing version.
-There is no deletion operation: removing a record from history requires a manual database-history
-rewrite by the user. Current project paths are metadata edited in place.
+Seven link relations (`vocab.LINK_RELATIONS`): `waits_on`, `part_of`, `discovered_from`,
+`supersedes`, `contradicts`, `supports`, `references`. A link is current when the latest event
+for its (source, relation, target) is `add`, and each add records the target version it was
+written against. Task events are claim, release, close (with an outcome from
+`vocab.OUTCOMES`) and reopen. Comments sit beside an entry and write no version; a comment
+with `addresses` closes the open comments it names.
+
+History is append-only. A new version requires `base_version` equal to the current version
+and a reason; nothing updates or deletes a version, an event or a comment. There is no
+deletion operation: removing data from history requires a manual database-history rewrite by
+the user. Current project paths are metadata edited in place.
 
 A project has a generated `prj-` id, unique human name, provenance, current paths and optional
 append-only framing. `register_project` creates or returns without mutating existing state;
 `update_project` applies effective path and framing changes. Changed post-registration framing
-requires the current base version and a reason; base 0 adds the first framing, and unchanged
-framing is a no-op. Path-only changes do not increment framing. Records have zero-to-many project
-memberships through `record_project_event`; the latest event for each pair sets current state.
-`set_projects` appends effective changes. A superseding publish with `projects=None` inherits
-current memberships under the same exclusive lock; an explicit list replaces them and `[]`
-intentionally leaves the revision unscoped.
+requires the current base version and a reason; base 0 adds the first framing. Entries have
+zero-to-many project memberships through `entry_project_event`; a preference with none is
+global.
 
 trails writes only to its own data: the database, its locks, the model cache and the capture
-store `<db>/captures.git`. Read `docs/philosophy.md` before adding anything that writes. The
-one exception is a write the agent names, such as export to a given path. Code capture builds
-its commit with `GIT_OBJECT_DIRECTORY` set to the store and the user's repository as an
-alternate, in a temporary index, so the user's repository is never written; a test compares
-its whole `.git` before and after.
+store `<db>/captures.git`. Read `docs/philosophy.md` before adding anything that writes. Code
+capture builds its commit with `GIT_OBJECT_DIRECTORY` set to the store and the user's
+repository as an alternate, in a temporary index, so the user's repository is never written; a
+test compares its whole `.git` before and after.
 
 THE STORE REFUSES EXACTLY TWO THINGS, both as `ValidationError`: malformed input, and an
-attempt to overwrite a record. Everything else is recorded as given. Malformed includes a
-value wider than its column and two tags the case- and accent-insensitive collation treats as
-one; the database itself decides the second, on the failure path of `write_record`.
+attempt to overwrite, which is a version written from a stale or missing `base_version`, or a
+claim on a task another session holds without `take_over_reason`. Everything else is recorded
+as given, with a warning where it is worth noticing. Malformed includes a value wider than its
+column and two tags the case- and accent-insensitive collation treats as one; the database
+itself decides the second, on the failure path of a write.
 
 A possible secret never blocks a write. `secret_scan.scan_for_secrets` runs detect-secrets
 through its Python API with the two high-entropy plugins off (with them on, every sha256
@@ -87,6 +94,10 @@ digest is flagged) and returns field, line and detector, never the matched text.
   per-operation branch. Add an operation module rather than editing a binder.
 - **`surfaces/cli.py` must never import fastmcp**, directly or transitively. Measured:
   `import fastmcp` costs 480ms against 62ms for `import cyclopts`. A test asserts it.
+- **The MCP binder binds the client's name per call** into `sessions.CLIENT_NAME`, which is how
+  a write learns its harness on that surface. Session detection decides the harness before it
+  reads any harness variable, because a harness launched from another's shell inherits its
+  variables (trails `fac-ahxap`).
 - Rules for an operation, each with a reason not visible from either surface alone:
   1. **A signature contains ONLY operation parameters.** The store, `--db`, `--json` and every
      `--<name>-from-file` twin are synthesized by the binder.
@@ -110,39 +121,32 @@ digest is flagged) and returns field, line and detector, never the matched text.
      which breaks the signature equality `context.bind` must preserve. The binders omit it too.
 - **NO response model uses a pydantic serialization alias.** fastmcp honours an alias and the
   CLI's `model_dump(mode="json")` ignores it, so the two surfaces would emit different keys.
-- **SEARCH HITS ARE COMPACT PREVIEWS, NOT RECORDS.** `SearchHit` carries identity, lifecycle,
-  latest work status, tags, matched methods, located keyword fields, and one body excerpt when
-  known. A body-keyword hit gets a window of at most 240 characters centered on its first match; a
-  semantic hit without a body-keyword match gets the complete selected embedding chunk. It does
-  not carry a `Record`, full body, status history, provenance, rank, cosine, or chunk number.
-  `retrieval.Ranked` keeps diagnostics internally; `show` returns the full record.
-  A `work_status` filter returns current versions unless `include_history=true`; searches without
-  `work_status` continue to include superseded versions.
-- **SCOPED PRIME IS A PAGE WHOSE SIZE DOES NOT GROW WITH HISTORY.** It lists only open problem
-  statements and current records that a current record contradicts, each as a `PrimeRecordRef`
-  (id, entry type, title, work status, never a body), and counts every entry type by work status
-  with the `search` calls that list each. Listing records made one 10,612,327-byte MCP reply on
-  a 317-record project (Kiro dropped the connection), and even open records alone were 35,264
-  bytes of text there. Warnings about a record (its current contradictions and verifications)
-  travel on `SearchHit`, so they reach a record however it is found. What prime lists is chosen
-  only from stored fields: work status and stored `contradicts` links.
-- Vocabularies (`ENTRY_TYPES`, `WORK_STATUSES`, `PROJECT_ACTIONS`, `ENTRY_TYPE_PREFIXES`,
-  `RELATIONS`, the record and project id patterns, and `stale_days()`) are defined once in `src/trails/vocab.py`, which also generates
-  the schema's ENUM columns.
+- **EVERY TASK-CHANGING RESPONSE REDRAWS THE AFFECTED GRAPH** (`present.graph_lines`): the
+  changed entry, its parent chain, its children and both ends of its `waits_on` links, each with
+  its state. The store cannot know which links the agent meant to add; this is the only guard
+  against a forgotten or reversed one.
+- **SEARCH HITS ARE COMPACT PREVIEWS, NOT ENTRIES.** A hit carries id, kind, version, title,
+  state, tags, projects, claim standing, open comment count, a note's evidence users, the
+  rankers that matched, and an excerpt. `show` returns the full entry. Search reads current
+  versions only, and a note's fused score is halved.
+- **PRIME'S SIZE DOES NOT GROW WITH HISTORY**, except the preference section, which prints
+  preferences in full under a 10,000-character cap (Claude Code's SessionStart limit) and then
+  title lines. Listing every record once made one 10,612,327-byte MCP reply on a 317-record
+  project, which Kiro dropped.
+- Vocabularies (`KINDS`, `KIND_PREFIXES`, `LINK_RELATIONS`, `OUTCOMES`, `VERDICTS`,
+  `STATED_BY_VALUES`, `TASK_STATES`, `TASK_EVENTS`, `SEARCH_STATUSES`, `PROJECT_ACTIONS` and
+  the id patterns) are defined once in `src/trails/vocab.py`, which also generates the schema's
+  ENUM columns.
 - `author` is the OS user, from `author.current_author()`. There is no `--author` flag.
 - The vector arm is the `search` extra. Everything must keep working when it is absent.
   `engine.build_engine()` is THE construction seam for the embedding engine; the test suite
-  patches it to keep the default gate offline.
+  patches it to keep the default gate offline. Embeddings are keyed by entry, version and chunk.
 - Never commit ONNX model weights. `models/` is gitignored.
-- The record file (`record_file.py`) is Markdown with TOML front matter between `+++` lines.
-  TOML, not YAML, because YAML coerces `no` to false. `value` is one TOML string holding JSON,
-  because TOML has no null. An export omits the record's own `supersedes` link: publishing the
-  file supersedes the exported record. Exported files always write explicit stable project IDs;
-  current names appear only in a TOML comment.
 - `reachability.py` reads local files and the capture store only, never a remote location; a
-  URI, query or free text is `unresolvable`, which means not checked. `show` summary checks
-  existence only; provenance and lint compare digests. A directory is `referenced`.
-- There is no migration. A database is created with the current schema on first open.
+  URI, query or free text is `unresolvable`, which means not checked. A directory is
+  `referenced`.
+- There is no migration. A database is created with the current schema on first open, and a
+  database holding the old record schema is refused. The default is `~/.agent-trails/db`.
 
 ## Dolt constraints, all established by probe
 
@@ -157,12 +161,13 @@ digest is flagged) and returns field, line and detector, never the matched text.
   SHARED. Measured on dolt 2.4.0: with writes alone locked, 8 x 50 writers failed 4 of 4
   runs; with reads locked shared as well, 400 of 400 in every run, about 52 s. No retries.
 - **Every read is a subprocess, and invocations are the cost** (about 70ms each). Reads are
-  batch-first: `Store.get_records` assembles any number of records in ONE invocation, ten SELECTs through `dolt.read_result_sets` (dolt prints one JSON document per statement, `{}`
-  for an empty set). A plain `write_record` performs one candidate-existence read, then one write
-  invocation. The exclusive lock spans both so an older equal-timestamp row cannot be mistaken for
-  this command landing before it reported failure.
+  batch-first: `EntryStore.get_entries` assembles any number of entries in ONE invocation, and
+  `EntryStore.task_graph` loads every goal, task and their links in one, through
+  `dolt.read_result_sets` (dolt prints one JSON document per statement, `{}` for an empty set).
+  A write holds the exclusive lock across its reads and its one write invocation, so the
+  `base_version` check and the insert are one serialized decision.
 - **A failed write is classified by re-reading, never by matching Dolt's message**
-  (`Store._classify_failed_write`).
+  (`EntryStore._commit`).
 - **`dolt sql -r json` omits a NULL column** from the row object; read nullable columns with
   `.get`.
 - **An ENUM column returns its ORDINAL once it passes through `COALESCE`**; compare each value

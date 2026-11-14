@@ -382,19 +382,5 @@ def _project_keyword_statement(query: str) -> str:
     )
 
 
-# ------------------------------------------------------------------ show and lineage
-
-LINEAGE_DEPTH = 5
-
-
-# --------------------------------------------------------------------- prime
-
-
-_LIVE = "NOT EXISTS (SELECT 1 FROM retirement t WHERE t.record_id = r.id)"
-_NOT_SUPERSEDED = (
-    "NOT EXISTS (SELECT 1 FROM link s WHERE s.relation = 'supersedes' AND s.target_id = r.id)"
-)
-
-
 def _dedupe(ids: Iterator[str] | Sequence[str]) -> list[str]:
     return list(dict.fromkeys(ids))

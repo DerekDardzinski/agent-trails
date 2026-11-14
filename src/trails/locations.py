@@ -1,7 +1,7 @@
 """Fixed facts about where a referenced file lives: a temporary directory, or code by suffix.
 
 Read-only, local, and judgment-free: every answer is a fixed rule over a path string and the
-local filesystem. Used by publish to warn when the code or data behind a record sits where a
+local filesystem. Used by write to warn when the code or data behind an entry sits where a
 later reader cannot find it.
 """
 

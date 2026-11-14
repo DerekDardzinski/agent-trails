@@ -1,154 +1,128 @@
 # trails
 
-A general memory store for agents: records, the links between them, the data they point at,
-and the code that produced them. Binaries: `trails` (CLI) and `trails-mcp` (MCP server on
-stdio). Distribution name `agent-trails`; import name `trails`.
+A memory and task store for agents, shared across harnesses: goals and tasks with dependencies
+and claims, notes, claims about what is true, a person's preferences, and the links between
+them, each write attributed to the harness, session and transcript that made it. Binaries:
+`trails` (CLI) and `trails-mcp` (MCP server on stdio). Distribution name `agent-trails`; import
+name `trails`.
 
 ## What it does, and what it does not
 
-trails stores, presents, links and tracks records. **It decides nothing.** It computes no
-statistics, judges no result, enforces no workflow and holds no opinion about which record is
-right. It serves an ad hoc analysis, a design session and a formal study the same way. No LLM
+trails stores, presents, links and tracks entries. **It decides nothing about their meaning.**
+Every state it reports (a task is ready, a goal is ready to close, a claim is an observation)
+is derived from stored links, events and version fields, never from what an entry says. No LLM
 runs inside any operation.
 
 The store refuses exactly two things, both as `ValidationError`:
 
-1. **Malformed input**: an empty title, a supersession with no reason, a link to a record that
-   does not exist, a malformed id or digest, a value wider than its column, or two tags the
-   database's case- and accent-insensitive comparison treats as one (`cafe` and `café`).
-2. **An attempt to overwrite a record**: publishing under an id that already exists.
+1. **Malformed input**: an empty title, a link to an entry that does not exist, a priority on a
+   note, `addresses` naming a comment that is not open on the same entry, a value wider than its
+   column, or two tags the database's case- and accent-insensitive comparison treats as one.
+2. **An attempt to overwrite**: a new version written from a stale or missing `base_version`,
+   or a claim on a task another session holds without `take_over_reason`.
 
-Everything else is recorded as given.
+Everything else is recorded as given, with a warning where it is worth noticing.
 
-## Records
+## Entries
 
-Every record has one explicit entry type and one caller-selected work status.
+Every entry has one kind, fixed at creation:
 
 ```
-id          type prefix + "-" + 5 lowercase base36 characters normally; 6 after repeated collisions
-entry_type  problem-statement, hypothesis, procedure, result, verification, fact,
-            insight, decision, report, or note
-work_status open when another action is expected on this exact record; closed otherwise
-title       one line, required
-body        Markdown
-tags        sorted, lowercase descriptive labels; an entry type is not a tag
-projects    zero or more stable project IDs with current human names
-author      the operating system user
-created_at  UTC
-value       optional JSON object: structured numbers or fields
-artifacts   references to data: a local path, an s3:// URI, a query, or free text,
-            each with an optional sha256 digest and notes; data is never copied
-code        captured commits of the repositories that produced the record, held in
-            trails' own git store
+goal        one initiative's framing and success criteria; never claimed; closed by judgment
+task        something to do; ready queue, claims, close outcomes
+note        an agent's scratch pad; evidence for other entries; ranks below other kinds
+claim       anything stated as true or possibly true; standing comes from what backs it
+preference  how the person wants work done; printed in full at session start
+skill       how to do something; written only by the offline consolidation pass
 ```
 
-Generated record id prefixes are `prb-`, `hyp-`, `pro-`, `res-`, `ver-`, `fac-`, `ins-`,
-`dec-`, `rpt-`, and `note-`, matching the entry types above. Projects use generated `prj-`
-ids. Generation tries ten five-character
-base36 candidates, then ten six-character candidates, checking the complete ID for a collision.
-The old `rec-` plus 16-hex form and the prior type-prefixed 16-hex form remain recognizable for
-archived identifiers but are not generated.
+Ids are the kind's prefix (`gol`, `tsk`, `note`, `clm`, `prf`, `skl`) plus five lowercase base36
+characters, six after repeated collisions. An entry has append-only versions on that one id.
+A version carries the full content: title, Markdown body, tags, an optional JSON `value`,
+artifact references, code captures, `priority` (0 to 4, goals and tasks) and `stated_by`
+(`agent` or `person`, claims and preferences). `write(id=..., base_version=..., reason=...)`
+writes the next version; omitted fields keep their values and `[]` clears a list.
 
-`publish` requires an entry type and initial work status. The initial status needs no reason.
-`set_work_status` appends an `open` or `closed` transition with its time, author and required
-reason. Any entry type may move in either direction; trails records the caller's decision and
-imposes no workflow conditions. This work status is separate from the derived lifecycle of
-current, superseded or retired.
+Every write records the OS user, the harness, and the session. The harness comes from the MCP
+client name or the process tree, decided before any harness variable is read; Kiro sessions are
+found through `~/.kiro/session-leases`, Claude Code sessions through `CLAUDE_CODE_SESSION_ID`.
+Each session's transcript path and agent name are stored once.
 
-Four link relations: `builds_on`, `supersedes`, `contradicts`, `cites`.
+## Links, tasks and comments
 
-History is append-only. A revision is a new record linked `supersedes` onto the old one, with
-a required one-sentence `reason`; the old record then reports `superseded_by`. `retire` marks a
-record no longer true without replacing it. Work-status and project-membership changes append
-events. A superseding publish inherits current memberships when `projects` is omitted; an explicit
-list replaces them, and `projects=[]` intentionally makes the revision unscoped. Nothing updates
-or deletes a record, status event, membership event, or framing version. Current project paths are
-metadata edited in place, with Dolt's history keeping every version.
+Seven relations: `waits_on`, `part_of`, `discovered_from`, `supersedes`, `contradicts`,
+`supports`, `references`. Links are add and remove events, and each add records the target
+version it was written against, so `show` and `lint` can say "written against v2, now v3".
+
+A task is **ready** when it is not closed or retired, none of its children is open, and every
+goal or task it or an ancestor waits on is closed `completed`. Close outcomes: `completed`
+unblocks dependents; `dropped` and `failed` leave them waiting and flag them for replanning;
+`superseded` with `by=[ids]` moves every dependent onto every replacement. A parent with every
+child closed and none failed is **ready to close**; a failed child means it **needs a
+decision**. Every task-changing response redraws the graph around the change with each entry's
+state.
+
+Comments sit beside an entry and never create a version. A comment is open until another
+comment `addresses` it. A comment on a goal or task pins the version of everything under it, and
+`show(id, since_comment=...)` lists what changed after it.
 
 ## Code capture
 
-`publish(repos=[...])` captures each repository's whole working tree, uncommitted and
-untracked files included, as a commit in `<db>/captures.git`, a bare repository trails owns.
-Nothing is written to your repository: the commit is built through a temporary index with git's
-object directory pointed at the store, and the repository's own objects are read as an
-alternate. Every object the capture needs is then packed into the store, so the capture reads
-after the repository is gone. The capture commit has no parent; the commit you had checked out
-is recorded beside it.
+`write(repos=[...])` captures each repository's whole working tree, uncommitted and untracked
+files included, as a commit in `<db>/captures.git`, a bare repository trails owns. Nothing is
+written to your repository: the commit is built through a temporary index with git's object
+directory pointed at the store, and the repository's own objects are read as an alternate. The
+capture reads after the repository is gone.
 
-A file over 50 MiB (`TRAILS_MAX_CAPTURE_BYTES`) refuses the publish, and the refusal prints
-two complete calls: one leaving the file out with `exclude` and referencing it as an artifact,
-one keeping it with `allow_large`. A committed large file already in the store is not refused
-again.
+A file over 50 MiB (`TRAILS_MAX_CAPTURE_BYTES`) refuses the write, and the refusal prints two
+complete calls: one leaving the file out with `exclude`, one keeping it with `allow_large`.
 
 ## Projects
 
 A project is a stable body of work, not a repository. `register_project` creates a generated
-`prj-` id for a unique one-line human name and records its creator, host, creation time, initial
-paths and optional initial framing. Repeating registration returns the existing project without
-mutating it. `update_project` applies later path or framing changes. Neither command creates
-anything at a registered path, and missing local paths produce warnings.
-
-Optional project framing is attached to the project. Its one-line title and Markdown body state
-purpose and motivation: why the project exists, who it serves, long-term success, and what is out
-of scope. Operational knowledge belongs in paths or ordinary records. Initial framing supplied
-at registration becomes version 1 without a base or reason. Later changed framing requires the
-current `base_version` and a reason; use base 0 to add the first framing after registration. The
-store writes `base_version + 1`. Unchanged title and body are a no-op, and path-only changes do
-not increment framing. Old versions and embeddings remain; current framing is searchable.
-
-Records belong to zero, one or several projects through append-only membership events.
-`publish(projects=[...])` writes initial memberships atomically. `set_projects` changes grouping
-later without changing the record. `prime()` lists a small project index page and current unscoped count; its default page holds 100
-projects because the measured 1,000-project JSON response without paging was 155,184 bytes.
-`prime(project=...)` is a page whose size does not grow with history: the project's current framing
-and paths in full, its open problem statements as title lines with the `show` call that reads
-them, every current record that a current record contradicts, and per entry type the open and
-closed counts with the `search` calls that list each. It lists no other record; `search` finds
-them, and each search hit names the current records that contradict it and the current
-verifications built on it. Listing every current record once made one 10,612,327-byte MCP reply
-on a 317-record project, which Kiro dropped.
+`prj-` id for a unique human name with paths and optional framing; `update_project` changes them,
+and changed framing needs the current `base_version` and a reason. Entries belong to zero or more
+projects through append-only membership events; `set_projects` changes grouping without a new
+version. A preference with no project is global.
 
 ## A possible secret is a warning
 
 Every write is scanned with detect-secrets (keyword, AWS key, token and private-key detectors;
 the two high-entropy detectors are off, because they flag every sha256 digest). A finding names
-the field, the line and the detector, never the matched text, and the record is still stored.
-The agent is told to tell the user. Removing a written secret requires the user to perform a
-manual database-history rewrite. A secret written in plain prose is not detected.
-
-## Record files
-
-A record exports to Markdown with TOML front matter between `+++` lines. The header includes the
-record's required `entry_type`, latest `work_status`, and an explicit `projects` list of stable
-IDs. Current project names appear in a TOML comment for readability and are not parsed as identity;
-`publish(from_file=...)` reads the IDs back. A file whose header names an existing id publishes a superseding record and needs a
-`reason` line in the header. TOML rather than YAML, because YAML silently coerces values such as
-`no` to false.
+the field, the line and the detector, never the matched text, and the entry is still stored.
+Removing a written secret requires a manual database-history rewrite by the user.
 
 ## Operations
 
 Each operation is one async function under `src/trails/ops/`, registered on both surfaces from
-the same signature and docstring. Every result renders as text: the CLI prints it (or the model
-as JSON with `--json`), and MCP returns the text together with the model as structured content.
-Search returns separately ranked current-framing project matches before compact record hits.
-Project matches are capped at three and report `project_total`; record-only filters suppress them.
-Record hits contain compact metadata and a body excerpt when the matching passage is known. A body-keyword hit gets a window of at most 240 characters centered on its first match; a
-semantic hit without a body-keyword match gets the complete selected embedding chunk. Hits omit
-status history, provenance, and retrieval scores. Use `show` to read the complete record. A record-writing operation ends with a `Next:` line naming the `show()` call for the record it wrote.
+the same signature and docstring. The MCP server's default toolset:
 
-The MCP server's default toolset is the twelve agent operations: `prime`, `search`, `show`,
-`lineage`, `register_project`, `update_project`, `publish`, `set_projects`, `set_work_status`,
-`link`, `retire` and `export`. `trails-mcp --toolset full` adds `lint`, `alias`, `mark_verified`, `embed` and `version`. The CLI has every operation; `trails <name> --help` describes each.
+```
+prime             start a session: preferences in full, then where work stands
+ready             the next tasks, and what needs a decision or replanning
+write             create an entry or write its next version
+link / unlink     add or remove a link
+claim / release   take or give back a task
+close / reopen    close a goal or task with an outcome, or reopen it
+add_comment       feedback that needs a response, or the response that closes it
+show              read entries or projects by id
+search            find entries by meaning, id or filters; also projects
+retire            mark an entry no longer true
+register_project / update_project / set_projects
+```
+
+`trails-mcp --toolset full` adds `lint`, `alias`, `embed` and `version`. The CLI has every
+operation, with multi-word names split (`trails add comment`, `trails register project`);
+`trails <name> --help` describes each.
 
 ## Concurrency
 
 Every write goes through `dolt.run_script`, which holds an exclusive `fcntl.flock` on
 `<db>/.trails-write.lock`; every read holds the same lock shared. Without the shared read
 lock, a read that overlaps a commit makes that commit fail on dolt 2.4.0 ("cannot update
-manifest: database is read only"). An earlier stress measurement persisted 400 of 400 writes
-from 8 processes in about 52 seconds, about 8 writes per second. The default regression holds
-the real lock in one process and verifies that another process waits before writing once; the
-ordinary suite does not repeat the stress run. There is no retry.
+manifest: database is read only"). A write holds the lock across its `base_version` check and
+its insert, so two processes writing from one base cannot both land; a test runs exactly that
+race. There is no retry.
 
 ## Development
 
@@ -161,11 +135,12 @@ uv run pytest -m slow        # tests that download the ONNX model
 ```
 
 `ty check` exits 0 even when it prints a diagnostic, so read its output. The suite runs in
-parallel via `pytest-xdist` against real Dolt, about a minute; there is no fake store, because
-the properties worth testing are the ones a fake would stub out.
+parallel via `pytest-xdist` against real Dolt; there is no fake store, because the properties
+worth testing are the ones a fake would stub out.
 
-The store lives at `~/.trails/db`, overridable with `TRAILS_DB`. A database is created with
-the current schema on first use; there is no migration.
+The store lives at `~/.agent-trails/db`, overridable with `TRAILS_DB`. A database is created
+with the current schema on first use; there is no migration, and a database holding the old
+record schema (such as `~/.trails/db`) is refused rather than read.
 
 ## License
 

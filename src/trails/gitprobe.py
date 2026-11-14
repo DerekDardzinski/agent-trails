@@ -9,7 +9,7 @@ silent:
   a query then returns half its claims and looks merely unlucky.
 
 Captured commits live in trails' own bare repository, `<db_path>/captures.git`, pinned
-under `refs/research/<record_id>/<n>` where n is the repository's position in the publish
+under `refs/research/<record_id>/<n>` where n is the repository's position in the write
 call's repos list. A pin is never moved once written.
 """
 

@@ -115,7 +115,7 @@ def store_path(db_path: Path) -> Path:
     return db_path / STORE_DIR
 
 
-def discard_unpublished_refs(store: Path, record_id: str) -> None:
+def discard_unwritten_refs(store: Path, record_id: str) -> None:
     """Delete capture refs for one record ID that failed before its record was stored.
 
     Callers must establish that no durable record has `record_id`. Objects remain in the bare

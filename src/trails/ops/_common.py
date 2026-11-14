@@ -87,7 +87,7 @@ def capture_code(
 
 
 def discard_capture(store: EntryStore, ref_name: str) -> None:
-    capture.discard_unpublished_refs(capture.store_path(store.db_path), ref_name)
+    capture.discard_unwritten_refs(capture.store_path(store.db_path), ref_name)
 
 
 def _distinct_repos(repos: Sequence[str]) -> list[Path]:
