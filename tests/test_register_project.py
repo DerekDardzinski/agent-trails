@@ -18,7 +18,8 @@ from trails.errors import ValidationError
 from trails.models import ProjectFramingDraft, ProjectPath
 from trails.ops import context
 from trails.ops.register_project import register_project
-from trails.ops.update_project import update_project
+from trails.ops.revise_framing import revise_framing
+from trails.ops.set_paths import set_paths
 
 AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
 
@@ -30,11 +31,24 @@ def _run(store: Store, **arguments: Any) -> Any:
     return asyncio.run(go())
 
 
-def _update(store: Store, **arguments: Any) -> Any:
+def _call(store: Store, operation: Any, **arguments: Any) -> Any:
     async def go() -> Any:
-        return await context.bind(update_project, lambda: store.db_path)(**arguments)
+        return await context.bind(operation, lambda: store.db_path)(**arguments)
 
     return asyncio.run(go())
+
+
+def _update(store: Store, **arguments: Any) -> Any:
+    """set_paths for paths and remove_paths, then revise_framing for framing, as the old
+    update_project did in one call; returns the last result."""
+    project = arguments.pop("project")
+    result = None
+    path_args = {k: arguments.pop(k) for k in ("paths", "remove_paths") if k in arguments}
+    if path_args or not arguments:
+        result = _call(store, set_paths, project=project, **path_args)
+    if "framing" in arguments:
+        result = _call(store, revise_framing, project=project, **arguments)
+    return result
 
 
 def _dolt_commits(store: Store) -> int:
@@ -153,9 +167,8 @@ def test_stale_registration_paths_refuse_without_mutation(
         )
 
     assert str(caught.value) == (
-        "project 'Stale registration paths' is already registered as "
-        f"{first.project.id}; use update_project(project='{first.project.id}', "
-        "paths=[{'path': 's3://bucket/original'}])"
+        f"the project name 'Stale registration paths' is taken by {first.project.id}, which "
+        "has other paths or framing; a name names one project"
     )
     stored = store.get_project(first.project.id)
     assert stored is not None
@@ -214,44 +227,13 @@ def test_changed_registration_path_metadata_refuses(
     with pytest.raises(ValidationError) as caught:
         _run(store, name="Changed path metadata", paths=[requested])
 
-    rendered = [requested.model_dump(exclude_defaults=True)]
     assert str(caught.value) == (
-        f"project 'Changed path metadata' is already registered as {first.project.id}; use "
-        f"update_project(project='{first.project.id}', paths={rendered!r})"
+        f"the project name 'Changed path metadata' is taken by {first.project.id}, which has "
+        "other paths or framing; a name names one project"
     )
     stored = store.get_project(first.project.id)
     assert stored is not None
     assert stored.paths == [original]
-    assert _dolt_commits(store) == commits_before_refusal
-
-
-def test_local_path_refusal_omits_auto_filled_host(store: Store, tmp_path: Path) -> None:
-    """Catches copyable update guidance exposing a machine host the caller did not supply."""
-    current = tmp_path / "current"
-    requested = tmp_path / "requested"
-    first = _run(
-        store,
-        name="Local path guidance",
-        paths=[ProjectPath(path=str(current), label="current")],
-    )
-    commits_before_refusal = _dolt_commits(store)
-
-    with pytest.raises(ValidationError) as caught:
-        _run(
-            store,
-            name="Local path guidance",
-            paths=[ProjectPath(path=str(requested), label="logs")],
-        )
-
-    expected_paths = [{"path": str(requested), "label": "logs"}]
-    assert str(caught.value) == (
-        f"project 'Local path guidance' is already registered as {first.project.id}; use "
-        f"update_project(project='{first.project.id}', paths={expected_paths!r})"
-    )
-    stored = store.get_project(first.project.id)
-    assert stored is not None
-    assert [(item.path, item.label) for item in stored.paths] == [(str(current), "current")]
-    assert stored.paths[0].host == socket.gethostname()
     assert _dolt_commits(store) == commits_before_refusal
 
 
@@ -288,7 +270,7 @@ def test_registration_path_refusal_compares_under_exclusive_lock(
         return real_eq(self, other)
 
     monkeypatch.setattr(ProjectPath, "__eq__", checking)
-    with pytest.raises(ValidationError, match=r"update_project.*paths"):
+    with pytest.raises(ValidationError, match="is taken by"):
         store.write_project(
             "Locked registration paths",
             "host",
@@ -300,37 +282,45 @@ def test_registration_path_refusal_compares_under_exclusive_lock(
     assert held and all(held)
 
 
-def test_different_framing_refusal_precedes_different_paths(store: Store) -> None:
-    """Catches path guidance hiding the required framing base and reason guidance."""
-    first = _run(
-        store,
-        name="Framing precedence",
-        paths=[ProjectPath(path="s3://bucket/current")],
-        framing=ProjectFramingDraft(title="Current purpose", body="Serve current users."),
-    )
-    commits_before_refusal = _dolt_commits(store)
-
+def test_a_registration_refusal_names_no_other_operation(store: Store) -> None:
+    """Silent failure caught: a refusal that tells the agent to use another operation for the
+    same intent (principle 5), where the request is simply malformed: the name is taken."""
+    _run(store, name="Taken name", framing=ProjectFramingDraft(title="Current purpose"))
     with pytest.raises(ValidationError) as caught:
-        _run(
+        _run(store, name="Taken name", framing=ProjectFramingDraft(title="Other purpose"))
+    assert "update_project" not in str(caught.value)
+    assert "revise_framing" not in str(caught.value)
+    assert "set_paths" not in str(caught.value)
+
+
+def test_project_writes_record_the_harness_and_session(store: Store) -> None:
+    """Silent failure caught: a project, path, framing or alias write with no trace of the
+    harness and session that made it, although every entry write records them (the
+    philosophy's opening: every write records its agent tool and session)."""
+    from trails import sessions
+
+    token = sessions.CLIENT_NAME.set("claude-code")
+    try:
+        first = _run(
             store,
-            name="Framing precedence",
-            paths=[ProjectPath(path="s3://bucket/wrong")],
-            framing=ProjectFramingDraft(title="Different purpose", body="Serve different users."),
+            name="Attributed",
+            paths=[ProjectPath(path="s3://bucket/a")],
+            framing=ProjectFramingDraft(title="Purpose"),
         )
-
-    assert str(caught.value) == (
-        f"project 'Framing precedence' is already registered as {first.project.id}; use "
-        f"update_project(project='{first.project.id}', framing=..., base_version=1, reason=...)"
-    )
-    stored = store.get_project(first.project.id)
-    assert stored is not None
-    assert [item.path for item in stored.paths] == ["s3://bucket/current"]
-    assert stored.current_framing is not None
-    assert stored.current_framing.title == "Current purpose"
-    assert _dolt_commits(store) == commits_before_refusal
+        store.write_tag_alias("ml", "machine-learning")
+    finally:
+        sessions.CLIENT_NAME.reset(token)
+    rows = [
+        store.query(f"SELECT harness FROM {table}")[0]["harness"]
+        for table in ("project", "project_path", "project_framing_version", "tag_alias")
+    ]
+    assert rows == ["claude"] * 4
+    assert first.project.name == "Attributed"
 
 
-def test_update_unchanged_framing_changes_only_effective_paths(store: Store) -> None:
+def test_set_paths_and_an_unchanged_framing_write_only_what_changed(store: Store) -> None:
+    """Silent failure caught: a framing equal to the current one (up to line endings) written
+    as a new version, or a path change that writes nothing."""
     first = _run(
         store,
         name="No-op update",
@@ -338,47 +328,38 @@ def test_update_unchanged_framing_changes_only_effective_paths(store: Store) -> 
         framing=ProjectFramingDraft(title="Purpose", body="Serve devices.\r\n"),
     )
     before = _dolt_commits(store)
-
-    changed_paths = _update(
+    changed_paths = _call(
         store,
+        set_paths,
         project=first.project.id,
         paths=[ProjectPath(path="s3://bucket/new")],
         remove_paths=["s3://bucket/old"],
+    )
+    after_paths = _dolt_commits(store)
+    no_change = _call(
+        store,
+        revise_framing,
+        project=first.project.id,
         framing=ProjectFramingDraft(title="Purpose", body="Serve devices.\n"),
         base_version=1,
         reason="No content change.",
     )
-    after_paths = _dolt_commits(store)
-    no_change = _update(
-        store,
-        project=first.project.id,
-        paths=[ProjectPath(path="s3://bucket/new")],
-        framing=ProjectFramingDraft(title="Purpose", body="Serve devices.\n"),
-        base_version=1,
-        reason="Still no content change.",
-    )
 
     assert changed_paths.changed is True
-    assert changed_paths.framing_changed is False
-    assert changed_paths.framing is not None and changed_paths.framing.version == 1
     assert [item.path for item, _state in changed_paths.paths] == ["s3://bucket/new"]
     assert after_paths == before + 1
-    assert no_change.changed is False
-    assert no_change.framing_changed is False
+    assert (no_change.changed, no_change.framing_changed) == (False, False)
     assert "no change detected" in no_change.render_text()
     assert [item.version for item in store.project_framing_history(first.project.id)] == [1]
     assert _dolt_commits(store) == after_paths
 
 
-def test_update_adds_first_framing_with_base_zero_and_reason(store: Store) -> None:
+def test_revise_framing_adds_the_first_framing_with_base_zero_and_a_reason(
+    store: Store,
+) -> None:
+    """Silent failure caught: a first framing written after registration with an empty
+    reason, so its history says nothing about why."""
     project = _run(store, name="Later framing")
-
-    with pytest.raises(ValidationError, match="base_version=0 and a reason"):
-        _update(
-            store,
-            project=project.project.id,
-            framing=ProjectFramingDraft(title="Purpose", body="Serve users."),
-        )
     with pytest.raises(ValidationError, match="base_version=0 and a nonempty reason"):
         _update(
             store,
@@ -394,9 +375,7 @@ def test_update_adds_first_framing_with_base_zero_and_reason(store: Store) -> No
         base_version=0,
         reason="Added project purpose.",
     )
-
-    assert result.changed is True
-    assert result.framing_changed is True
+    assert (result.changed, result.framing_changed) == (True, True)
     assert result.framing is not None and result.framing.version == 1
 
 
@@ -496,38 +475,6 @@ def test_framing_versions_retry_and_stale_conflict_are_append_only(store: Store)
             base_version=1,
             reason="Conflicting edit.",
         )
-
-
-def test_registration_rolls_back_paths_when_framing_conflicts(store: Store) -> None:
-    """Catches a stale framing refusal replaying path mutations before recognizing conflict."""
-    first = _run(
-        store,
-        name="Atomic",
-        paths=[ProjectPath(path="s3://bucket/old")],
-        framing=ProjectFramingDraft(title="Initial", body="Purpose"),
-    )
-    _update(
-        store,
-        project="Atomic",
-        framing=ProjectFramingDraft(title="Current", body="Purpose"),
-        base_version=1,
-        reason="Updated.",
-    )
-
-    with pytest.raises(ValidationError, match="stale"):
-        _update(
-            store,
-            project="Atomic",
-            paths=[ProjectPath(path="s3://bucket/new")],
-            remove_paths=["s3://bucket/old"],
-            framing=ProjectFramingDraft(title="Conflict", body="Purpose"),
-            base_version=1,
-            reason="Stale.",
-        )
-
-    project = store.get_project(first.project.id)
-    assert project is not None
-    assert [item.path for item in project.paths] == ["s3://bucket/old"]
 
 
 class _AnyText(FakeEngine):

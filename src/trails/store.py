@@ -37,7 +37,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from trails import dolt
+from trails import dolt, sessions
 from trails.author import current_author
 from trails.errors import DoltError, ValidationError
 from trails.models import (
@@ -47,6 +47,7 @@ from trails.models import (
     ProjectPath,
     ProjectRef,
     ProjectWriteOutcome,
+    Provenance,
 )
 from trails.vocab import (
     ID_ALPHABET,
@@ -66,6 +67,8 @@ _TEXT = "COLLATE utf8mb4_0900_ai_ci"
 
 # VARCHAR widths, in characters. A value over its width is refused as ValidationError rather
 # than left to fail inside the transaction as a DoltError.
+AGENT_NAME_CHARS = 200
+SESSION_CHARS = 200
 TITLE_CHARS = 1000
 TAG_CHARS = 200
 NAME_CHARS = 200
@@ -206,7 +209,7 @@ class Store:
                 "SELECT project_id, path, label, access_instructions, host FROM project_path"
                 f"{path_where} ORDER BY project_id, path",
                 "SELECT f.project_id, f.version, f.title, f.body, f.reason, f.author, "
-                "f.created_at FROM project_framing_version f WHERE NOT EXISTS ("
+                "f.harness, f.session_id, f.created_at FROM project_framing_version f WHERE NOT EXISTS ("
                 "SELECT 1 FROM project_framing_version newer WHERE newer.project_id = "
                 "f.project_id AND newer.version > f.version)"
                 f"{framing_where} ORDER BY f.project_id",
@@ -240,7 +243,8 @@ class Store:
         """Every framing version newest first for one exact project id."""
         rows = self._read(
             _bind(
-                "SELECT project_id, version, title, body, reason, author, created_at "
+                "SELECT project_id, version, title, body, reason, author, harness, session_id, "
+                "created_at "
                 "FROM project_framing_version WHERE project_id = ? "
                 "ORDER BY version DESC",
                 [project_id],
@@ -336,6 +340,8 @@ class Store:
         framing_title, framing_body = _validated_framing(framing)
 
         with dolt.exclusive(self.db_path):
+            provenance = sessions.current_provenance()
+            moment = _now()
             existing = self.get_project(name)
             created = existing is None
             project_id = existing.id if existing is not None else self._unused_project_id()
@@ -349,33 +355,17 @@ class Store:
                     f"project {name!r} is not registered; run register_project(name={name!r})"
                 )
             if intent == "register" and existing is not None:
-                if framing is not None and (
-                    current is None or not _same_framing(current, framing_title, framing_body)
-                ):
-                    base = current.version if current is not None else 0
-                    raise ValidationError(
-                        f"project {name!r} is already registered as {project_id}; use "
-                        f"update_project(project={project_id!r}, framing=..., "
-                        f"base_version={base}, reason=...)"
-                    )
+                # A project name is unique, so a registration under a taken name is a retry
+                # only when it asks for exactly what is stored; anything else is malformed.
                 current_paths = {item.path: item for item in existing.paths}
                 given_paths = {item.path: item for item in paths}
-                if paths and given_paths != current_paths:
-                    rendered_paths = [
-                        {
-                            key: value
-                            for key, value in (
-                                ("path", item.path),
-                                ("label", item.label),
-                                ("access_instructions", item.access_instructions),
-                            )
-                            if value
-                        }
-                        for item in given_paths.values()
-                    ]
+                same_framing = framing is None or (
+                    current is not None and _same_framing(current, framing_title, framing_body)
+                )
+                if not same_framing or (paths and given_paths != current_paths):
                     raise ValidationError(
-                        f"project {name!r} is already registered as {project_id}; use "
-                        f"update_project(project={project_id!r}, paths={rendered_paths!r})"
+                        f"the project name {name!r} is taken by {project_id}, which has other "
+                        "paths or framing; a name names one project"
                     )
                 return ProjectWriteOutcome(
                     project=existing,
@@ -432,7 +422,7 @@ class Store:
                         landed_rows = self._read(
                             _bind(
                                 "SELECT project_id, version, title, body, reason, author, "
-                                "created_at FROM project_framing_version WHERE project_id = ? "
+                                "harness, session_id, created_at FROM project_framing_version WHERE project_id = ? "
                                 "AND version = ?",
                                 [project_id, base_version + 1],
                             )
@@ -472,7 +462,9 @@ class Store:
                         body=framing_body,
                         reason=normal_reason,
                         author=current_author(),
-                        created_at=_now(),
+                        harness=provenance.harness,
+                        session_id=provenance.session_id,
+                        created_at=moment,
                     )
                     framing_created = True
 
@@ -488,9 +480,11 @@ class Store:
                         {
                             "id": project_id,
                             "name": name,
-                            "created_at": _now(),
+                            "created_at": moment,
                             "created_by": current_author(),
                             "created_on_host": host,
+                            "harness": provenance.harness,
+                            "session_id": provenance.session_id,
                         },
                     )
                 )
@@ -511,6 +505,10 @@ class Store:
                         "label": item.label,
                         "access_instructions": item.access_instructions,
                         "host": item.host,
+                        "author": current_author(),
+                        "harness": provenance.harness,
+                        "session_id": provenance.session_id,
+                        "set_at": moment,
                     },
                 )
                 for item in changed
@@ -526,6 +524,8 @@ class Store:
                             "body": written_framing.body,
                             "reason": written_framing.reason,
                             "author": written_framing.author,
+                            "harness": written_framing.harness,
+                            "session_id": written_framing.session_id,
                             "created_at": written_framing.created_at,
                         },
                     )
@@ -535,6 +535,7 @@ class Store:
                     [
                         "START TRANSACTION",
                         *statements,
+                        *_session_insert(provenance, moment),
                         f"CALL DOLT_COMMIT('-A','-m',{dolt.sql_literal(f'project {project_id}')})",
                     ]
                 )
@@ -575,10 +576,23 @@ class Store:
             if recorded == target:
                 return
             raise ValidationError(f"{alias!r} is already an alias of {recorded!r}")
+        provenance = sessions.current_provenance()
+        moment = _now()
         self._execute_script(
             [
                 "START TRANSACTION",
-                _insert("tag_alias", {"tag": alias, "canonical": target}),
+                _insert(
+                    "tag_alias",
+                    {
+                        "tag": alias,
+                        "canonical": target,
+                        "author": current_author(),
+                        "harness": provenance.harness,
+                        "session_id": provenance.session_id,
+                        "created_at": moment,
+                    },
+                ),
+                *_session_insert(provenance, moment),
                 f"CALL DOLT_COMMIT('-A','-m',{dolt.sql_literal(f'alias {alias} -> {target}')})",
             ]
         )
@@ -882,6 +896,8 @@ def _project_framing(row: dict[str, Any]) -> ProjectFramingVersion:
         body=str(row.get("body", "")),
         reason=_optional_str(row.get("reason")),
         author=str(row["author"]),
+        harness=str(row.get("harness", "unknown")),
+        session_id=_optional_str(row.get("session_id")),
         created_at=_as_datetime(row["created_at"]),
     )
 
@@ -904,3 +920,25 @@ def _project_suggestions(value: str, rows: Sequence[dict[str, Any]]) -> list[Pro
 def _forbidden_one_line_character(character: str) -> bool:
     """True for Unicode controls, surrogates, formatting controls, and line separators."""
     return unicodedata.category(character) in {"Cc", "Cf", "Cs", "Zl", "Zp"}
+
+
+def _session_insert(provenance: Provenance, seen_at: datetime) -> list[str]:
+    """Record a session the first time a write names it. `INSERT IGNORE` keeps the first row,
+    so a session's row is written once however many writes it makes (probed on dolt 2.4.0)."""
+    if provenance.session_id is None:
+        return []
+    _require_length("session id", provenance.session_id, SESSION_CHARS)
+    agent = provenance.agent[:AGENT_NAME_CHARS] if provenance.agent else None
+    return [
+        "INSERT IGNORE"
+        + _insert(
+            "session",
+            {
+                "id": provenance.session_id,
+                "harness": provenance.harness[:NAME_CHARS],
+                "transcript": provenance.transcript,
+                "agent": agent,
+                "first_seen": seen_at,
+            },
+        ).removeprefix("INSERT")
+    ]

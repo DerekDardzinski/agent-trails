@@ -61,10 +61,12 @@ from trails.secret_scan import scan_for_secrets
 from trails.store import (
     _DIGEST,
     _TEXT,
+    AGENT_NAME_CHARS,
     EMBEDDING_DIMENSIONS,
     HOST_CHARS,
     NAME_CHARS,
     PATH_CHARS,
+    SESSION_CHARS,
     TAG_CHARS,
     TITLE_CHARS,
     Store,
@@ -79,6 +81,7 @@ from trails.store import (
     _placeholders,
     _require_length,
     _require_text_bytes,
+    _session_insert,
     _value_text,
     resolve_db_path,
 )
@@ -114,8 +117,6 @@ from trails.vocab import (
 # Written in the database directory once the schema is known to exist. A different name from
 # the old store's marker, so an old database is always checked and refused (D13).
 SCHEMA_MARKER = ".agent-trails-schema"
-AGENT_NAME_CHARS = 200
-SESSION_CHARS = 200
 
 SCHEMA: tuple[str, ...] = (
     f"""CREATE TABLE entry (
@@ -232,7 +233,9 @@ SCHEMA: tuple[str, ...] = (
         name            VARCHAR({NAME_CHARS}) {_TEXT} NOT NULL UNIQUE,
         created_at      DATETIME(6) NOT NULL,
         created_by      VARCHAR(120) {_TEXT} NOT NULL,
-        created_on_host VARCHAR({HOST_CHARS}) {_TEXT} NOT NULL
+        created_on_host VARCHAR({HOST_CHARS}) {_TEXT} NOT NULL,
+        harness         VARCHAR({NAME_CHARS}) {_TEXT} NOT NULL,
+        session_id      VARCHAR({SESSION_CHARS}) {_TEXT}
     )""",
     f"""CREATE TABLE project_path (
         project_id          VARCHAR(32) {_TEXT} NOT NULL,
@@ -240,6 +243,10 @@ SCHEMA: tuple[str, ...] = (
         label               TEXT {_TEXT} NOT NULL,
         access_instructions TEXT {_TEXT} NOT NULL,
         host                VARCHAR({HOST_CHARS}) {_TEXT} NOT NULL,
+        author              VARCHAR(120) {_TEXT} NOT NULL,
+        harness             VARCHAR({NAME_CHARS}) {_TEXT} NOT NULL,
+        session_id          VARCHAR({SESSION_CHARS}) {_TEXT},
+        set_at              DATETIME(6) NOT NULL,
         PRIMARY KEY (project_id, path)
     )""",
     f"""CREATE TABLE project_framing_version (
@@ -249,6 +256,8 @@ SCHEMA: tuple[str, ...] = (
         body       LONGTEXT {_TEXT} NOT NULL,
         reason     TEXT {_TEXT},
         author     VARCHAR(120) {_TEXT} NOT NULL,
+        harness    VARCHAR({NAME_CHARS}) {_TEXT} NOT NULL,
+        session_id VARCHAR({SESSION_CHARS}) {_TEXT},
         created_at DATETIME(6) NOT NULL,
         PRIMARY KEY (project_id, version),
         FULLTEXT KEY ft_project_framing_title (title),
@@ -283,8 +292,12 @@ SCHEMA: tuple[str, ...] = (
         PRIMARY KEY (project_id, version, model_id, chunk_index)
     )""",
     f"""CREATE TABLE tag_alias (
-        tag       VARCHAR({TAG_CHARS}) {_TEXT} PRIMARY KEY,
-        canonical VARCHAR({TAG_CHARS}) {_TEXT} NOT NULL
+        tag        VARCHAR({TAG_CHARS}) {_TEXT} PRIMARY KEY,
+        canonical  VARCHAR({TAG_CHARS}) {_TEXT} NOT NULL,
+        author     VARCHAR(120) {_TEXT} NOT NULL,
+        harness    VARCHAR({NAME_CHARS}) {_TEXT} NOT NULL,
+        session_id VARCHAR({SESSION_CHARS}) {_TEXT},
+        created_at DATETIME(6) NOT NULL
     )""",
 )
 
@@ -1617,7 +1630,7 @@ class EntryStore(Store):
             RecordNotFoundError: no entry has this id.
         """
         text = body.strip()
-        if not text:
+        if not text and verdict is None:
             raise ValidationError("a comment needs text")
         if verdict is not None and verdict not in VERDICTS:
             raise ValidationError(f"verdict must be one of {', '.join(VERDICTS)}")
@@ -2199,28 +2212,6 @@ def _membership_insert(
             "created_at": created_at,
         },
     )
-
-
-def _session_insert(provenance: Provenance, seen_at: datetime) -> list[str]:
-    """Record a session the first time a write names it. `INSERT IGNORE` keeps the first row,
-    so a session's row is written once however many writes it makes (probed on dolt 2.4.0)."""
-    if provenance.session_id is None:
-        return []
-    _require_length("session id", provenance.session_id, SESSION_CHARS)
-    agent = provenance.agent[:AGENT_NAME_CHARS] if provenance.agent else None
-    return [
-        "INSERT IGNORE"
-        + _insert(
-            "session",
-            {
-                "id": provenance.session_id,
-                "harness": provenance.harness[:NAME_CHARS],
-                "transcript": provenance.transcript,
-                "agent": agent,
-                "first_seen": seen_at,
-            },
-        ).removeprefix("INSERT")
-    ]
 
 
 def _id_candidates(prefix: str) -> Iterator[str]:

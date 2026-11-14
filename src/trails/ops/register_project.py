@@ -5,19 +5,16 @@ NOTE: no `from __future__ import annotations` in this package. See `ops/__init__
 
 import socket
 import unicodedata
-from pathlib import Path
 from typing import Annotated
 
 from pydantic import Field
 
-from trails import engine as engine_seam, vector
-from trails.errors import ValidationError
 from trails.models import Project, ProjectFramingDraft, ProjectPath, ProjectRef
 from trails.ops import context
 from trails.ops._marks import Operation
 from trails.ops._project_types import RegisterProjectResult
-from trails.reachability import is_uri, path_state
-from trails.secret_scan import scan_for_secrets
+from trails.ops._project_write import after_project_write, normalized_paths
+from trails.reachability import path_state
 
 OPERATION = Operation(toolset="agent", read_only=False, destructive=False, idempotent=True)
 
@@ -38,7 +35,7 @@ async def register_project(
             description=(
                 'Initial places the project uses, each {"path": ..., "label": ..., '
                 '"access_instructions": ...}: repositories, data directories, or URIs. '
-                "Use update_project for later changes."
+                "set_paths changes them later."
             )
         ),
     ] = [],  # noqa: B006 — contracted default; never mutated
@@ -56,11 +53,10 @@ async def register_project(
     """Register stable project identity, paths, and optional purpose framing in one transaction.
 
     Use this when: creating a stable body of work. Repeating the same registration returns the
-    existing project without changing it. For an existing project, different framing or a
-    nonempty path list that does not exactly match all current paths refuses with an
-    update_project call.
+    existing project without changing it; a name is unique, so a registration under a taken
+    name with other paths or framing is refused.
 
-    Use instead: update_project, to change paths or framing after registration; create_task,
+    Use instead: set_paths or revise_framing, to change a registered project; create_task,
     create_note or create_preference, to record tasks, notes and preferences in zero or more projects; set_projects, to change an
     existing entry's memberships without writing a version.
 
@@ -69,66 +65,11 @@ async def register_project(
     embedding, or possible-secret warnings.
     """
     host = socket.gethostname()
-    given: list[ProjectPath] = []
-    for item in paths:
-        location = item.path.strip()
-        if not is_uri(location):
-            try:
-                location = str(Path(location).expanduser())
-            except RuntimeError as exc:
-                raise ValidationError(f"cannot expand {item.path}: {exc}") from exc
-        given.append(
-            item.model_copy(
-                update={
-                    "path": location,
-                    "host": "" if is_uri(location) else (item.host or host),
-                }
-            )
-        )
-
+    given = normalized_paths(paths, host)
     store = context.store()
-    outcome = store.write_project(
-        name,
-        host,
-        given,
-        [],
-        framing=framing,
-        intent="register",
-    )
-
+    outcome = store.write_project(name, host, given, [], framing=framing, intent="register")
     notes = _near_name_notes(outcome.project, store.list_projects()) if outcome.created else []
-    warnings: list[str] = []
-    for item in given:
-        state = path_state(item)
-        if is_uri(item.path):
-            kind = "s3 URI" if item.path.startswith("s3://") else "URI"
-            warnings.append(f"{item.path}: not checked ({kind})")
-        elif state == "missing":
-            warnings.append(f"{item.path} does not exist on {item.host}")
-    fields = {
-        f"{item.path} {part}": text
-        for item in given
-        for part, text in (
-            ("label", item.label),
-            ("access_instructions", item.access_instructions),
-        )
-    }
-    if framing is not None:
-        fields.update({"framing.title": framing.title, "framing.body": framing.body})
-    warnings += [
-        f"possible secret: {finding.detector} in {finding.field} line {finding.line}"
-        for finding in scan_for_secrets(fields)
-    ]
-
-    if outcome.framing_created and outcome.framing is not None:
-        try:
-            engine = engine_seam.build_engine()
-            if engine.is_available():
-                vector.embed_project_framings(store, engine, [(outcome.project, outcome.framing)])
-        except Exception as exc:  # framing is durable; report post-write embedding failure
-            warnings.append(
-                f"the framing was written but not embedded for similarity search: {exc}"
-            )
+    warnings = after_project_write(store, outcome, given, framing)
 
     return RegisterProjectResult(
         project=ProjectRef(id=outcome.project.id, name=outcome.project.name),

@@ -104,3 +104,5 @@ NOTE_ID = id_pattern("note")
 PREFERENCE_ID = id_pattern("preference")
 SKILL_ID = id_pattern("skill")
 KNOWLEDGE_ID = id_pattern(*KNOWLEDGE_KINDS)
+ENTRY_ID = id_pattern(*KINDS)
+COMMENT_ID = rf"^{COMMENT_ID_PREFIX}-[0-9a-z]{{5,6}}$"

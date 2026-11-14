@@ -91,6 +91,8 @@ class ProjectFramingVersion(BaseModel):
     body: str
     reason: str | None
     author: str
+    harness: str = "unknown"
+    session_id: str | None = None
     created_at: datetime
 
 

@@ -210,10 +210,30 @@ class CommentResult(RenderedResult):
             next_line(
                 [
                     call("show", self.entry_id),
-                    call("show", self.entry_id, since_comment=self.comment_id),
+                    call("changes_since_comment", self.comment_id),
                 ]
             )
         )
+        return "\n".join(lines)
+
+
+class ChangesSinceCommentResult(RenderedResult):
+    """What moved under a commented entry after the comment."""
+
+    comment_id: str
+    entry_id: str
+    entry_version: int
+    changed: list[str]
+    links: list[str]
+
+    def render_text(self) -> str:
+        lines = [
+            f"since {self.comment_id} (on {self.entry_id} v{self.entry_version}): "
+            f"{len(self.changed)} entries with new versions, {len(self.links)} link changes"
+        ]
+        lines += [f"  {line}" for line in self.changed]
+        lines += [f"  {line}" for line in self.links]
+        lines.append(next_line([call("show", self.entry_id)]))
         return "\n".join(lines)
 
 
@@ -277,7 +297,6 @@ class ShownEntry(BaseModel):
     comment_total: int
     comment_open: int
     versions: list[ShownVersion]
-    since: list[str]
 
 
 class ShownProject(BaseModel):
@@ -320,7 +339,7 @@ class ShowResult(RenderedResult):
         return "\n\n".join(blocks)
 
 
-def _entry_text(item: ShownEntry) -> str:  # noqa: PLR0912, PLR0915 — one section per field
+def _entry_text(item: ShownEntry) -> str:  # noqa: PLR0912 — one section per field
     lines = [f"{item.id}  {item.kind}  v{item.version}  [{item.state}]  {item.title}"]
     if item.retired_reason is not None:
         lines.append(f"retired: {item.retired_reason}")
@@ -362,9 +381,6 @@ def _entry_text(item: ShownEntry) -> str:  # noqa: PLR0912, PLR0915 — one sect
                 f"  v{version.version} {version.created_at.isoformat()} {version.author} "
                 f"({version.harness}) {version.title}{reason}"
             )
-    if item.since:
-        lines.append("since the comment:")
-        lines += [f"  {line}" for line in item.since]
     if item.comment_total:
         lines.append(f"comments: {item.comment_total} total, {item.comment_open} open")
         for comment in item.comments:
@@ -378,9 +394,10 @@ def _entry_text(item: ShownEntry) -> str:  # noqa: PLR0912, PLR0915 — one sect
             if comment.unchanged:
                 flags.append("addressed with no new version")
             marker = f" [{'; '.join(flags)}]" if flags else ""
+            session = f" session {comment.session_id}" if comment.session_id else ""
             lines.append(
                 f"  {comment.id} on v{comment.entry_version} by {comment.author} "
-                f"({comment.harness}){marker}: {comment.body}"
+                f"({comment.harness}{session}){marker}: {comment.body}"
             )
         if item.comment_total > len(item.comments):
             lines.append("  more: " + call("show", item.id, comments=item.comment_total))
@@ -408,7 +425,7 @@ def _show_hints(items: list["ShownEntry | ShownProject"]) -> list[str]:
         return [call("prime", project=first.id)]
     hints = [
         call(f"revise_{first.kind}", first.id, base_version=first.version, reason="..."),
-        call("add_comment", first.id, comment="..."),
+        call("comment", first.id, comment="..."),
     ]
     if first.kind == "task":
         hints.insert(0, call("ready"))

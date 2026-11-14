@@ -70,9 +70,10 @@ failed", "waits on tsk-x (closed dropped)". `blocked` lists the tasks waiting on
 not closed completed. `show` names the tasks the creating session held claims on when an entry
 was created. Every task-changing response redraws the graph around the change.
 
-Comments sit beside an entry and never create a version. A comment is open until another
-comment `addresses` it. A comment on a task pins the version of everything under it, and
-`show(id, since_comment=...)` lists what changed after it.
+Comments sit beside an entry and never create a version. `comment` leaves feedback, which stays
+open until a `reply` addresses it; `review` records a verdict on a task, shown as its author's
+word. A comment on a task pins the version of everything under it, and
+`changes_since_comment(comment)` lists what changed after it.
 
 ## Code capture
 
@@ -90,8 +91,9 @@ without a repository.
 ## Projects
 
 A project is a stable body of work, not a repository. `register_project` creates a generated
-`prj-` id for a unique human name with paths and optional framing; `update_project` changes them,
-and changed framing needs the current `base_version` and a reason. Entries belong to zero or more
+`prj-` id for a unique human name with paths and optional framing; `set_paths` changes paths, and
+`revise_framing` writes a new framing version from the current `base_version` with a reason.
+Project, path, framing and alias writes record the harness and session that made them. Entries belong to zero or more
 projects through append-only membership events; `set_projects` changes grouping without a new
 version. A preference with no project is global.
 
@@ -119,11 +121,13 @@ link_evidence / unlink_evidence  a supports or contradicts link between knowledg
 claim / release   take or give back a task (claim names the holder it takes over)
 close / reopen    close a task with an outcome, or reopen it
 replace           close a task as superseded by other tasks
-add_comment       feedback that needs a response, or the response that closes it
+comment / reply   feedback that needs an answer, and the answer that closes it
+review            a verdict on a task, pinned to versions
+changes_since_comment  what moved under an entry after a comment
 show              read entries or projects by id
 search            find entries by meaning, id or filters; also projects
 retire            mark a note, preference or skill no longer true
-register_project / update_project / set_projects
+register_project / set_paths / revise_framing / set_projects
 ```
 
 `trails-mcp --toolset dreamer` adds `create_skill` and `revise_skill` for the consolidation

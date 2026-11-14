@@ -115,7 +115,6 @@ def shown_entries(
     *,
     comments: int = 5,
     versions: bool = False,
-    since_comment: str | None = None,
 ) -> list[ShownEntry]:
     """Present entries for `show`, with a bounded number of reads for any number of ids."""
     ids = [entry.id for entry in entries]
@@ -149,25 +148,6 @@ def shown_entries(
         page = every.model_copy(update={"comments": every.comments[: max(comments, 0)]})
         unchanged = unchanged_responses(every.comments)
         session = sessions.get(current.session_id or "")
-        since_lines: list[str] = []
-        if since_comment is not None:
-            since = store.changes_since_comment(since_comment)
-            if since.comment.entry_id == entry.id:
-                since_lines = [
-                    f"{change.entry_id} {change.title}: "
-                    + (
-                        f"v{change.pinned} -> v{change.current}"
-                        if change.pinned is not None
-                        else f"new since the comment (v{change.current})"
-                    )
-                    for change in since.changed
-                ] + [
-                    f"{event.action} link {event.source_id} {event.relation} {event.target_id}"
-                    + (f" · {event.reason}" if event.reason else "")
-                    for event in since.links
-                ]
-                if not since_lines:
-                    since_lines = ["nothing changed"]
         shown.append(
             ShownEntry(
                 id=entry.id,
@@ -238,7 +218,6 @@ def shown_entries(
                     )
                     for item in (store.get_versions(entry.id) if versions else [])
                 ],
-                since=since_lines,
             )
         )
     return shown

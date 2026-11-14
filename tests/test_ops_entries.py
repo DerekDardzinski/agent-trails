@@ -9,10 +9,11 @@ from trails.entry_store import EntryStore
 from trails.models import ArtifactRef
 from trails.ops import context
 from trails.ops._entry_types import preference_section
-from trails.ops.add_comment import add_comment
 from trails.ops.blocked import blocked
+from trails.ops.changes_since_comment import changes_since_comment
 from trails.ops.claim import claim
 from trails.ops.close import close
+from trails.ops.comment import comment
 from trails.ops.create_note import create_note
 from trails.ops.create_preference import create_preference
 from trails.ops.create_skill import create_skill
@@ -23,7 +24,9 @@ from trails.ops.prime import prime
 from trails.ops.release import release
 from trails.ops.reopen import reopen
 from trails.ops.replace import replace
+from trails.ops.reply import reply
 from trails.ops.retire import retire
+from trails.ops.review import review
 from trails.ops.revise_task import revise_task
 from trails.ops.search import search
 from trails.ops.set_priority import set_priority
@@ -239,31 +242,33 @@ def test_search_status_selects_by_the_latest_task_event(store: EntryStore) -> No
     assert ids("failed") == {failed}
 
 
-def test_show_since_comment_lists_what_changed_after_a_review(store: EntryStore) -> None:
+def test_changes_since_comment_lists_what_changed_after_a_review(store: EntryStore) -> None:
+    """Silent failure caught: a returning reviewer not seeing a task under the reviewed one
+    that moved on, or being able to ask a different entry than the one the comment is on
+    (the comment id alone names the entry, so that call cannot be written)."""
     goal = new(store, "task", "g")
     task = new(store, "task", "t", parent=goal)
-    review = run(store, add_comment, id=goal, comment="looks right", verdict="approve")
+    verdict = run(store, review, id=goal, verdict="approve")
     run(store, revise_task, id=task, base_version=1, reason="feedback", body="more detail")
-    shown = run(store, show, id=goal, since_comment=review.comment_id).entries[0]
-    assert shown.since == [f"{task} t: v1 -> v2"]
+    since = run(store, changes_since_comment, comment=verdict.comment_id)
+    assert (since.entry_id, since.changed, since.links) == (goal, [f"{task} t: v1 -> v2"], [])
 
 
-def test_show_since_comment_on_another_entry_warns_instead_of_printing_nothing(
-    store: EntryStore,
-) -> None:
-    """Silent failure caught: an agent reading `show(id, since_comment=C)` with C on another
-    entry sees no change list and no sign that it asked the wrong entry."""
-    goal = new(store, "task", "g")
-    task = new(store, "task", "t", parent=goal)
-    review = run(store, add_comment, id=goal, comment="looks right", verdict="approve")
-    result = run(store, show, id=task, since_comment=review.comment_id)
-    assert result.entries[0].since == []
-    assert result.warnings == [
-        f"since_comment {review.comment_id} is on {goal}, which this call does not show, so no "
-        f'changes are listed; read them with show("{goal}", '
-        f'since_comment="{review.comment_id}")'
-    ]
-    assert f"warning: since_comment {review.comment_id} is on {goal}" in result.render_text()
+def test_reply_closes_the_comments_it_answers_on_one_entry(store: EntryStore) -> None:
+    """Silent failure caught: a reply closing a comment on another entry, or feedback left
+    open after it was answered."""
+    from trails.errors import ValidationError
+
+    first = new(store, "task", "a")
+    second = new(store, "task", "b")
+    question = run(store, comment, id=first, comment="why this order?").comment_id
+    other = run(store, comment, id=second, comment="and this one?").comment_id
+    with pytest.raises(ValidationError, match=f"{other} is not a comment on {first}"):
+        run(store, reply, addresses=[question, other], comment="answered")
+    answered = run(store, reply, addresses=[question], comment="dependency order")
+    assert answered.addresses == [question]
+    assert run(store, show, id=first).entries[0].comment_open == 0
+    assert run(store, show, id=second).entries[0].comment_open == 1
 
 
 def test_retire_takes_knowledge_ids_and_hides_them_from_search(store: EntryStore) -> None:
@@ -364,16 +369,16 @@ def test_every_free_text_write_is_scanned_for_secrets(store: EntryStore) -> None
     task = new(store, "task", "t")
     note = new(store, "note", "n")
     other = new(store, "note", "o")
-    comment = run(store, add_comment, id=task, comment=f"aws_key = {AWS_KEY}")
+    feedback = run(store, comment, id=task, comment=f"aws_key = {AWS_KEY}")
     linked = run(
         store, link_evidence, source=note, relation="supports", target=other, reason=AWS_KEY
     )
     closed = run(store, close, id=task, outcome="completed", summary=f"used {AWS_KEY}")
-    assert any("AWSKeyDetector in comment" in w for w in comment.warnings)
+    assert any("AWSKeyDetector in comment" in w for w in feedback.warnings)
     assert any("AWSKeyDetector in reason" in w for w in linked.warnings)
     found = {w.split(" in ")[1].split(" line")[0] for w in closed.warnings if "AWSKeyDetector" in w}
     assert found == {"summary"}
-    assert all(AWS_KEY not in text for text in (comment.render_text(), closed.render_text()))
+    assert all(AWS_KEY not in text for text in (feedback.render_text(), closed.render_text()))
 
 
 def test_a_stale_claim_names_the_claim_retry(store: EntryStore) -> None:

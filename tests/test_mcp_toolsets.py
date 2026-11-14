@@ -177,10 +177,11 @@ def test_the_default_toolset_is_exactly_the_agent_tools(
     monkeypatch.delenv(mcp_surface.TOOLSET_ENV, raising=False)
 
     assert sorted(_tools(store)) == [
-        "add_comment",
         "blocked",
+        "changes_since_comment",
         "claim",
         "close",
+        "comment",
         "create_note",
         "create_preference",
         "create_task",
@@ -192,17 +193,20 @@ def test_the_default_toolset_is_exactly_the_agent_tools(
         "release",
         "reopen",
         "replace",
+        "reply",
         "retire",
+        "review",
+        "revise_framing",
         "revise_note",
         "revise_preference",
         "revise_task",
         "search",
+        "set_paths",
         "set_priority",
         "set_projects",
         "show",
         "unlink_evidence",
         "unlink_work",
-        "update_project",
     ]
 
 
@@ -357,7 +361,8 @@ def test_the_mcp_client_name_outside_a_request_is_empty_not_none() -> None:
 
 
 def test_project_tools_separate_creation_from_mutation(store: Store) -> None:
-    """Catches update parameters leaking back into registration or update_project losing them."""
+    """Silent failure caught: a parameter that applies some of the time (principle 5), such
+    as base_version on a path-only change, leaking back into a project tool."""
     server = mcp_surface.build_mcp_server(store.db_path)
 
     async def go() -> dict[str, set[str]]:
@@ -365,16 +370,12 @@ def test_project_tools_separate_creation_from_mutation(store: Store) -> None:
             tools = {tool.name: tool.inputSchema for tool in await client.list_tools()}
             return {
                 name: set(tools[name]["properties"])
-                for name in ("register_project", "update_project")
+                for name in ("register_project", "set_paths", "revise_framing")
             }
 
     properties = asyncio.run(go())
-    assert properties["register_project"] == {"name", "paths", "framing"}
-    assert properties["update_project"] == {
-        "project",
-        "paths",
-        "remove_paths",
-        "framing",
-        "base_version",
-        "reason",
+    assert properties == {
+        "register_project": {"name", "paths", "framing"},
+        "set_paths": {"project", "paths", "remove_paths"},
+        "revise_framing": {"project", "framing", "base_version", "reason"},
     }
