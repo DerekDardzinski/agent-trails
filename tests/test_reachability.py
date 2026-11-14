@@ -59,7 +59,7 @@ def test_without_verify_a_file_is_checked_for_existence_and_never_hashed(
 
     assert (found.status, found.detail) == (
         "reachable",
-        f"{data} exists; its digest is compared by show detail provenance and by lint",
+        f"{data} exists; its digest is compared only by lint",
     )
 
 

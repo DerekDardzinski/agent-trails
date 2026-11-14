@@ -130,8 +130,14 @@ retire            mark a note, preference or skill no longer true
 register_project / set_paths / revise_framing / set_projects
 ```
 
-`trails-mcp --toolset dreamer` adds `create_skill` and `revise_skill` for the consolidation
-pass; `--toolset full` adds those and `lint`, `alias`, `embed` and `version`. The CLI has every
+`trails-mcp --toolset dreamer` adds, for the consolidation pass, `create_skill`, `revise_skill`,
+`merge` (retire a duplicate, naming the entry it duplicates) and `changes` (every write in a
+time window, optionally by one session); `--toolset full` adds those and `lint`, `alias`, `embed`
+and `version`. Search also ranks close summaries and comment bodies. Agent-supplied fields are
+shown as the agent's word: a digest prints "(as given)", and outcomes, verdicts and evidence
+links print with the author, harness and session that wrote them. Only `lint` hashes referenced
+local files to compare recorded digests, and it lists review verdicts written by the session
+that wrote the version they review. The CLI has every
 operation under the same name (`trails create_task`, `trails register_project`);
 `trails <name> --help` describes each.
 

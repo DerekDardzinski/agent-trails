@@ -5,10 +5,13 @@ A result that names an entry ends with a Next: line.
 NOTE: no `from __future__ import annotations` in this package. See `ops/__init__.py`.
 """
 
+from datetime import datetime
+
 from pydantic import BaseModel
 
-from trails.models import ProjectRef
+from trails.models import Change, ProjectRef
 from trails.ops.types import RenderedResult
+from trails.render import call, next_line
 
 
 class AliasResult(RenderedResult):
@@ -99,3 +102,35 @@ class VersionResult(RenderedResult):
     def render_text(self) -> str:
         """One line. No Next: line, because no entry is named."""
         return f"trails {self.version} · database {self.db_path}"
+
+
+class ChangesResult(RenderedResult):
+    """One window of the change feed."""
+
+    since: datetime
+    until: datetime | None
+    session: str | None
+    changes: list[Change]
+    total: int
+    offset: int
+
+    def render_text(self) -> str:
+        lines = [f"changes: {len(self.changes)} of {self.total} shown (offset {self.offset})"]
+        for item in self.changes:
+            session = f" session {item.session_id}" if item.session_id else ""
+            lines.append(
+                f"  {item.created_at.isoformat()} {item.entry_id} {item.kind} by {item.author} "
+                f"({item.harness}{session}): {item.text}"
+            )
+        hints = []
+        if self.total > self.offset + len(self.changes):
+            arguments: dict[str, object] = {"since": self.since.isoformat()}
+            if self.until is not None:
+                arguments["until"] = self.until.isoformat()
+            if self.session is not None:
+                arguments["session"] = self.session
+            arguments["offset"] = self.offset + len(self.changes)
+            hints.append(call("changes", **arguments))
+        if self.changes:
+            hints.append(call("show", self.changes[0].entry_id))
+        return "\n".join([*lines, *([next_line(hints)] if hints else [])])

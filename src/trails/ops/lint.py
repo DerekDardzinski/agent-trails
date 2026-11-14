@@ -35,6 +35,7 @@ CATEGORIES = (
     "unembedded",
     "unembedded-framing",
     "possible-secrets",
+    "reviews-by-the-author-session",
 )
 
 
@@ -44,7 +45,7 @@ async def lint(
         Field(description="Stable project id or exact unique name. Omit for the whole store."),
     ] = None,
 ) -> LintResult:
-    """List store problems: links written against an older version of their target, likely duplicate tags, artifacts that changed or disappeared, captured commits that disappeared, capture refs naming no entry, registered paths that do not exist, entries without similarity embeddings, and possible secrets by entry, field and line. Changes nothing.
+    """List store problems: links written against an older version of their target, likely duplicate tags, artifacts that changed or disappeared, captured commits that disappeared, capture refs naming no entry, registered paths that do not exist, entries without similarity embeddings, possible secrets by entry, field and line, and review verdicts written by the session that wrote the version they review. Changes nothing. Hashing referenced local files to compare recorded digests happens only here.
 
     Use this when: you are tidying a project, or before handing a project to another session.
 
@@ -79,6 +80,7 @@ async def lint(
         "unembedded": _unembedded(store, ids),
         "unembedded-framing": _unembedded_framing(store, projects),
         "possible-secrets": _possible_secrets(entries, projects) + _comment_secrets(store, ids),
+        "reviews-by-the-author-session": _self_reviews(store, ids),
     }
     return LintResult(project=resolved, categories={name: categories[name] for name in CATEGORIES})
 
@@ -263,6 +265,31 @@ def _possible_secrets(entries: Sequence[Entry], projects: Sequence[Project]) -> 
             for finding in scan_for_secrets(fields)
         ]
     return items
+
+
+def _self_reviews(store: EntryStore, ids: Sequence[str]) -> list[LintItem]:
+    """Review verdicts written by the same harness session that wrote the version they
+    review. Both are stored fields; trails compares them and judges neither."""
+    if not ids:
+        return []
+    rows = store.query(
+        "SELECT c.id, c.entry_id, c.entry_version, c.verdict, c.session_id FROM comment c "
+        "JOIN entry_version v ON v.entry_id = c.entry_id AND v.version = c.entry_version "
+        "WHERE c.verdict IS NOT NULL AND c.session_id IS NOT NULL AND c.session_id = "
+        f"v.session_id AND c.harness = v.harness AND c.entry_id IN ({', '.join('?' * len(ids))}) "
+        "ORDER BY c.entry_id, c.created_at, c.id",
+        list(ids),
+    )
+    return [
+        LintItem(
+            entry_id=str(row["entry_id"]),
+            detail=(
+                f"review {row['id']} ({row['verdict']}) on v{row['entry_version']} was written "
+                f"by session {row['session_id']}, which also wrote that version"
+            ),
+        )
+        for row in rows
+    ]
 
 
 def _comment_secrets(store: EntryStore, ids: Sequence[str]) -> list[LintItem]:

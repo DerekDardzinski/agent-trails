@@ -304,3 +304,15 @@ def test_unlinking_an_id_that_names_no_entry_is_refused(entries: EntryStore) -> 
     task = make(entries, "task", "t")
     with pytest.raises(ValidationError, match="no entry has id tsk-aaaaa"):
         entries.remove_entry_link(task, "waits_on", "tsk-aaaaa", "typo")
+
+
+def test_a_replace_closing_a_cycle_through_a_descendant_is_refused(entries: EntryStore) -> None:
+    """Silent failure caught: a replace whose moved waits_on link gives a parent a dependency
+    that waits on the parent's own child, stored silently; the task stays open."""
+    old = make(entries, "task", "O")
+    source = make(entries, "task", "S", waits_on=[old])
+    child = make(entries, "task", "D", parent=source)
+    replacement = make(entries, "task", "T", waits_on=[child])
+    with pytest.raises(ValidationError, match="dependency cycle"):
+        entries.close(old, "superseded", "split", by=[replacement])
+    assert entries.get_entry(old).state == "open"

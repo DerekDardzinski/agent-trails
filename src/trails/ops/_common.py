@@ -160,7 +160,7 @@ def shown_entries(
                 priority=current.priority,
                 artifacts=[
                     artifact.location
-                    + (f" {artifact.digest}" if artifact.digest else "")
+                    + (f" {artifact.digest} (as given)" if artifact.digest else "")
                     + (f" · {artifact.notes}" if artifact.notes else "")
                     for artifact in current.artifacts
                 ],
@@ -176,7 +176,9 @@ def shown_entries(
                 task_events=[
                     f"{event.created_at.isoformat()} {event.event}"
                     + (f" {event.outcome}" if event.outcome else "")
-                    + f" by {event.author} ({event.harness})"
+                    + f" by {event.author} ({event.harness}"
+                    + (f" session {event.session_id}" if event.session_id else "")
+                    + ")"
                     + (f": {event.reason}" if event.reason else "")
                     for event in entry.task_events
                 ],

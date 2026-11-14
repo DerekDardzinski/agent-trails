@@ -416,3 +416,15 @@ class SinceComment(BaseModel):
     changed: list[VersionChange]
     unchanged: list[str]
     links: list[LinkEvent]
+
+
+class Change(BaseModel):
+    """One write in the change feed: a version, link event, task event or comment."""
+
+    created_at: datetime
+    kind: str
+    entry_id: str
+    text: str
+    author: str
+    harness: str
+    session_id: str | None

@@ -111,7 +111,7 @@ def _check_file(path: Path, digest: str | None, *, compared: bool) -> Reachabili
             detail = (
                 f"{path} exists; no digest was recorded to compare"
                 if compared
-                else f"{path} exists; its digest is compared by show detail provenance and by lint"
+                else f"{path} exists; its digest is compared only by lint"
             )
             return Reachability(status="reachable", path=str(path), detail=detail)
         found = _sha256(path)

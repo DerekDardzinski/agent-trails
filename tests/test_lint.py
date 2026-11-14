@@ -37,3 +37,31 @@ def test_a_clean_store_has_no_problems(store: EntryStore) -> None:
     assert {name: items for name, items in result.categories.items() if items} == {
         "unembedded": result.categories["unembedded"]
     }
+
+
+def test_lint_flags_a_review_written_by_the_session_that_wrote_the_version(
+    store: EntryStore, monkeypatch: Any
+) -> None:
+    """Silent failure caught: a verdict an author gave its own work passing as an
+    independent review, with nothing in the store pointing it out. A review from another
+    session is not listed."""
+    from trails import sessions
+
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "author-session")
+    token = sessions.CLIENT_NAME.set("claude-code")
+    try:
+        task = store.write_entry(EntryDraft(kind="task", title="change")).entry.id
+        own = store.add_comment(task, "looks fine", verdict="approve").comment.id
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "reviewer-session")
+        store.add_comment(task, "checked", verdict="approve")
+    finally:
+        sessions.CLIENT_NAME.reset(token)
+
+    items = run_lint(store).categories["reviews-by-the-author-session"]
+
+    assert [(item.entry_id, item.detail) for item in items] == [
+        (
+            task,
+            f"review {own} (approve) on v1 was written by session author-session, which also wrote that version",
+        )
+    ]

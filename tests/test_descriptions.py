@@ -49,3 +49,40 @@ def test_every_operation_result_renders_its_own_text(operation: Any) -> None:
 
     assert issubclass(returned, RenderedResult)
     assert returned.render_text is not RenderedResult.render_text
+
+
+# Words that usually mark a parameter that applies only some of the time, which principle 5
+# rules out (docs/philosophy.md). Matched case-insensitively as whole words.
+CONDITIONAL = ("only", "required when", "never", "with id")
+# (operation, parameter, word): each a use that is not conditional, with the reason.
+ALLOWED: dict[tuple[str, str, str], str] = {}
+
+
+def _conditional_uses() -> list[tuple[str, str, str]]:
+    import re
+
+    found = []
+    for operation in ops.operations():
+        hints = get_type_hints(operation, include_extras=True)
+        for name in inspect.signature(operation).parameters:
+            text = (_description(hints[name]) or "").lower()
+            found += [
+                (ops.operation_name(operation), name, word)
+                for word in CONDITIONAL
+                if re.search(rf"\b{re.escape(word)}\b", text)
+            ]
+    return found
+
+
+def test_no_parameter_description_uses_conditional_wording() -> None:
+    """Silent failure caught: a parameter that applies only some of the time slipping back
+    into a tool (its description gives it away with "only", "required when", "never" or
+    "with id"), so the agent can write a call that the store must refuse or ignore."""
+    assert [use for use in _conditional_uses() if use not in ALLOWED] == []
+
+
+def test_every_allowlisted_wording_is_still_used() -> None:
+    """Silent failure caught: an allowlist entry outliving the description it excused, so a
+    later conditional use under the same key passes unexamined."""
+    uses = set(_conditional_uses())
+    assert [key for key in ALLOWED if key not in uses] == []

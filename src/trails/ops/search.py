@@ -23,7 +23,7 @@ OPERATION = Operation(toolset="agent", read_only=True, destructive=False, idempo
 
 async def search(  # noqa: PLR0917 — public query contract
     query: Annotated[str, Field(description="What you are looking for, in plain words.")] = "",
-    kinds: Annotated[list[Kind], Field(description="Keep only these kinds.")] = [],  # noqa: B006
+    kinds: Annotated[list[Kind], Field(description="Keep entries of these kinds.")] = [],  # noqa: B006
     projects: Annotated[
         list[str], Field(description="Keep entries in any of these project ids or names.")
     ] = [],  # noqa: B006
@@ -40,13 +40,13 @@ async def search(  # noqa: PLR0917 — public query contract
         ),
     ] = None,
     open_comments: Annotated[
-        bool, Field(description="Keep only entries with a comment still waiting for a response.")
+        bool, Field(description="Keep entries with a comment still waiting for a response.")
     ] = False,
     contradicted: Annotated[
         bool,
         Field(
             description=(
-                "Keep only entries that a current entry contradicts, such as the ones prime "
+                "Keep entries that a current entry contradicts, such as the ones prime "
                 "counts as contradicted."
             )
         ),

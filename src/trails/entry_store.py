@@ -34,6 +34,7 @@ from trails.author import current_author
 from trails.errors import DoltError, RecordNotFoundError, StoreUnavailableError, ValidationError
 from trails.models import (
     ArtifactRef,
+    Change,
     CodeCapture,
     Comment,
     CommentOutcome,
@@ -224,10 +225,11 @@ SCHEMA: tuple[str, ...] = (
     f"""CREATE TABLE retirement (
         entry_id   VARCHAR(32) {_TEXT} PRIMARY KEY,
         retired_at DATETIME(6) NOT NULL,
-        reason     TEXT {_TEXT} NOT NULL,
-        author     VARCHAR(120) {_TEXT} NOT NULL,
-        harness    VARCHAR({NAME_CHARS}) {_TEXT} NOT NULL,
-        session_id VARCHAR({SESSION_CHARS}) {_TEXT}
+        reason      TEXT {_TEXT} NOT NULL,
+        merged_into VARCHAR(32) {_TEXT},
+        author      VARCHAR(120) {_TEXT} NOT NULL,
+        harness     VARCHAR({NAME_CHARS}) {_TEXT} NOT NULL,
+        session_id  VARCHAR({SESSION_CHARS}) {_TEXT}
     )""",
     f"""CREATE TABLE project (
         id              VARCHAR(32) {_TEXT} PRIMARY KEY,
@@ -391,7 +393,11 @@ class EntryStore(Store):
                 "ORDER BY entry_id, sequence",
                 ids,
             ),
-            _bind(f"SELECT entry_id, reason FROM retirement WHERE entry_id IN ({within})", ids),
+            _bind(
+                f"SELECT entry_id, reason, merged_into FROM retirement WHERE entry_id IN "
+                f"({within})",
+                ids,
+            ),
             _bind(
                 "SELECT e.entry_id, p.id AS project_id, p.name AS project_name "
                 "FROM entry_project_event e JOIN project p ON p.id = e.project_id "
@@ -414,7 +420,11 @@ class EntryStore(Store):
         events_by: dict[str, list[TaskEvent]] = {}
         for row in task_rows:
             events_by.setdefault(str(row["entry_id"]), []).append(_task_event(row))
-        retired_by = {str(row["entry_id"]): str(row["reason"]) for row in retired}
+        retired_by = {
+            str(row["entry_id"]): str(row["reason"])
+            + (f" (duplicate of {row['merged_into']})" if row.get("merged_into") else "")
+            for row in retired
+        }
         projects_by: dict[str, list[ProjectRef]] = {}
         for row in memberships:
             projects_by.setdefault(str(row["entry_id"]), []).append(
@@ -567,6 +577,65 @@ class EntryStore(Store):
                     found.append(task_id)
             held[str(row["entry_id"])] = [item for item in found if item != str(row["entry_id"])]
         return held
+
+    def changes(self, since: datetime, until: datetime | None, session: str | None) -> list[Change]:
+        """Every version, link event, task event and comment written in [since, until), and by
+        `session` when given, oldest first, from ONE dolt invocation."""
+        clauses = ["created_at >= ?"]
+        params: list[Any] = [since]
+        if until is not None:
+            clauses.append("created_at < ?")
+            params.append(until)
+        if session is not None:
+            clauses.append("session_id = ?")
+            params.append(session)
+        where = " AND ".join(clauses)
+        versions, links, events, comments = dolt.read_result_sets(
+            self.db_path,
+            [
+                _bind(
+                    "SELECT entry_id, version, title, reason, author, harness, session_id, "
+                    f"created_at FROM entry_version WHERE {where}",
+                    params,
+                ),
+                _bind(f"SELECT * FROM link_event WHERE {where}", params),
+                _bind(f"SELECT * FROM task_event WHERE {where}", params),
+                _bind(
+                    "SELECT id, entry_id, entry_version, body, verdict, author, harness, "
+                    f"session_id, created_at FROM comment WHERE {where}",
+                    params,
+                ),
+            ],
+        )
+        found: list[Change] = []
+        for row in versions:
+            reason = f" · {row['reason']}" if row.get("reason") else ""
+            found.append(_change(row, "version", f"v{row['version']} {row['title']}{reason}"))
+        for row in links:
+            reason = f" · {row['reason']}" if row.get("reason") else ""
+            found.append(
+                _change(
+                    row,
+                    "link",
+                    f"{row['action']} {row['source_id']} {row['relation']} {row['target_id']}"
+                    + reason,
+                    entry_id=str(row["source_id"]),
+                )
+            )
+        for row in events:
+            outcome = f" {row['outcome']}" if row.get("outcome") else ""
+            reason = f" · {row['reason']}" if row.get("reason") else ""
+            found.append(_change(row, "task", f"{row['event']}{outcome}{reason}"))
+        for row in comments:
+            verdict = f" [{row['verdict']}]" if row.get("verdict") else ""
+            found.append(
+                _change(
+                    row,
+                    "comment",
+                    f"{row['id']} on v{row['entry_version']}{verdict}: {row.get('body', '')}",
+                )
+            )
+        return sorted(found, key=lambda item: (item.created_at, item.entry_id, item.kind))
 
     # ----------------------------------------------------------------- writes
 
@@ -1311,9 +1380,12 @@ class EntryStore(Store):
             self._commit_events(statements, f"close {entry_id} {outcome}", event, provenance)
         return self._task_outcome(entry, event, moved=moved, warnings=warnings)
 
-    def retire_entry(self, entry_id: str, reason: str) -> RetireOutcome:
-        """Mark an entry no longer true without replacing it. Retiring twice keeps the first
-        reason and changes nothing."""
+    def retire_entry(
+        self, entry_id: str, reason: str, merged_into: str | None = None
+    ) -> RetireOutcome:
+        """Mark an entry no longer true without replacing it, or, with `merged_into`, as a
+        duplicate of another entry of its kind. Retiring twice keeps the first reason and
+        changes nothing."""
         normal_reason = (reason or "").strip()
         if not normal_reason:
             raise ValidationError("retire needs a reason: why the entry is no longer true")
@@ -1324,6 +1396,15 @@ class EntryStore(Store):
                 raise ValidationError(
                     f"retire takes a note, preference or skill; {entry_id} is a {entry.kind}"
                 )
+            if merged_into is not None:
+                if merged_into == entry_id:
+                    raise ValidationError(f"{entry_id} cannot be merged into itself")
+                into = self._require_entries([merged_into])[merged_into]
+                if into.kind != entry.kind:
+                    raise ValidationError(
+                        f"{entry_id} is a {entry.kind} and {merged_into} a {into.kind}; a merge "
+                        "joins two entries of one kind"
+                    )
             if entry.retired:
                 return RetireOutcome(
                     entry_id=entry_id, reason=str(entry.retired_reason), already_retired=True
@@ -1339,6 +1420,7 @@ class EntryStore(Store):
                             "entry_id": entry_id,
                             "retired_at": moment,
                             "reason": normal_reason,
+                            "merged_into": merged_into,
                             "author": current_author(),
                             "harness": provenance.harness,
                             "session_id": provenance.session_id,
@@ -2372,6 +2454,18 @@ def _as_outcome(value: Any) -> Outcome | None:
         if outcome == str(value):
             return outcome
     raise DoltError(f"task event has unknown outcome {value!r}")
+
+
+def _change(row: dict[str, Any], kind: str, text: str, entry_id: str | None = None) -> Change:
+    return Change(
+        created_at=_as_datetime(row["created_at"]),
+        kind=kind,
+        entry_id=entry_id or str(row["entry_id"]),
+        text=text,
+        author=str(row["author"]),
+        harness=str(row["harness"]),
+        session_id=_optional_str(row.get("session_id")),
+    )
 
 
 def _task_insert(event: TaskEvent) -> str:

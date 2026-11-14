@@ -482,3 +482,49 @@ def test_a_temporary_path_in_a_task_body_asks_only_for_a_body_change(
         f'write the new locations in the body: revise_task("{result.id}", base_version=1, '
         'reason="...", body=...)'
     )
+
+
+def test_merge_retires_a_duplicate_naming_the_entry_it_duplicates(store: EntryStore) -> None:
+    """Silent failure caught: a merged duplicate indistinguishable from an entry retired as
+    wrong, or a merge across kinds that would drop a preference out of session start."""
+    from trails.errors import ValidationError
+    from trails.ops.merge import merge
+
+    kept = new(store, "skill", "deploy with the canary")
+    duplicate = new(store, "skill", "canary deploys")
+    preference = new(store, "preference", "use canaries")
+    with pytest.raises(ValidationError, match="a merge joins two entries of one kind"):
+        run(store, merge, id=preference, into=kept, reason="same")
+    run(store, merge, id=duplicate, into=kept, reason="same procedure")
+    shown = run(store, show, id=duplicate).entries[0]
+    assert shown.retired_reason == f"same procedure (duplicate of {kept})"
+
+
+def test_changes_lists_every_write_in_the_window_for_one_session(
+    store: EntryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Silent failure caught: the consolidation pass missing a session's close summary,
+    comment or link, or seeing another session's writes as this one's."""
+    from datetime import UTC, datetime
+
+    from trails import sessions
+    from trails.ops.changes import changes
+
+    start = datetime.now(UTC)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "dreamed-session")
+    token = sessions.CLIENT_NAME.set("claude-code")
+    try:
+        task = new(store, "task", "t")
+        run(store, comment, id=task, comment="why?")
+        run(store, close, id=task, outcome="completed", summary="done")
+    finally:
+        sessions.CLIENT_NAME.reset(token)
+    new(store, "note", "another session's note")
+    feed = run(store, changes, since=start, session="dreamed-session")
+    assert [(item.entry_id, item.kind) for item in feed.changes] == [
+        (task, "version"),
+        (task, "comment"),
+        (task, "task"),
+    ]
+    assert feed.changes[2].text == "close completed · done"
+    assert feed.total == 3

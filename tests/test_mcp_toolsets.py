@@ -299,13 +299,14 @@ def test_ids_of_the_wrong_kind_cannot_be_written_in_a_call(store: Store) -> None
 def test_skills_are_written_only_through_the_dreamer_toolset(
     store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Silent failure caught: an agent in a session able to write a skill (dec-d1krx: skills
-    come from the consolidation pass), or the dreamer missing the agent tools."""
+    """Silent failure caught: an agent in a session able to write a skill, merge entries or
+    read the change feed (dec-d1krx: these belong to the consolidation pass), or the dreamer
+    missing the agent tools."""
     monkeypatch.delenv(mcp_surface.TOOLSET_ENV, raising=False)
     agent = set(_tools(store))
     dreamer = set(_tools(store, "dreamer"))
-    assert {"create_skill", "revise_skill"} & agent == set()
-    assert dreamer - agent == {"create_skill", "revise_skill"}
+    assert {"changes", "create_skill", "merge", "revise_skill"} & agent == set()
+    assert dreamer - agent == {"changes", "create_skill", "merge", "revise_skill"}
 
 
 def test_an_mcp_write_records_the_harness_its_client_names(
