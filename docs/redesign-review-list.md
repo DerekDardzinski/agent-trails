@@ -123,3 +123,14 @@ each one is in brackets.
 41. **`prime` counts kinds other than goals and tasks as `current`** in its per-kind counts,
     since only goals and tasks have a state [step 4].
 42. **`scripts/import_beads_memories.py` now writes notes into the new store** [step 4].
+43. **Scoped `prime` lists at most 20 open goals and 20 contradicted claims**, with totals and
+    the search call for the rest [review fix]. The reviewer showed both lists grew without
+    bound, against the rule that prime's size does not grow with history.
+44. **Advisory review notes left open for you** [review]: `write` holds the store lock while it
+    captures code (the old `publish` captured outside it); project, framing, path and alias
+    writes record no harness or session; re-linking a current link keeps its old
+    `target_version`; a `waits_on` added after its target closed `superseded` is not flagged;
+    `show(since_comment=...)` on a comment of another entry prints nothing; a stale Kiro lease
+    whose pid was reused could misattribute writes; set_projects reasons are not scanned for
+    secrets; the preference cap can be exceeded when title lines alone pass 10,000 characters
+    (over 100 preferences). The full list is the reviewer's comment on `labbook-a7p.7`.

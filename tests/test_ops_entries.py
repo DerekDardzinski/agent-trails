@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from trails.entry_store import EntryStore
-from trails.models import ArtifactRef
+from trails.models import ArtifactRef, FollowUp
 from trails.ops import context
 from trails.ops._entry_types import preference_section
 from trails.ops.add_comment import add_comment
@@ -235,3 +235,96 @@ def test_a_script_artifact_in_a_temporary_directory_is_warned_about(
     assert (
         f'write(id="{result.id}", base_version=1, reason="...", repos=["<repository>"])' in warning
     )
+
+
+AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
+
+
+def test_a_supersede_that_closes_a_cycle_warns_and_shows_the_moved_dependent(
+    store: EntryStore,
+) -> None:
+    """Review finding 1. Silent failure caught: a supersede moving a child onto its own parent,
+    so the child can never become ready, with no warning and the child missing from the
+    response."""
+    parent = new(store, "task", "parent")
+    old = new(store, "task", "old")
+    child = new(store, "task", "child", parent=parent, waits_on=[old])
+    closed = run(store, close, id=old, outcome="superseded", summary="moved", by=[parent])
+    assert any(
+        w.startswith(f"dependency cycle: {child} -> {parent} -> {child}") for w in closed.warnings
+    )
+    assert [line.id for line in closed.dependents] == [child]
+    assert child in [line.id for line in closed.graph]
+
+
+def test_every_free_text_write_is_scanned_for_secrets(store: EntryStore) -> None:
+    """Review finding 2. Silent failure caught: a key pasted into a comment, a close summary, a
+    follow-up or a reason stored without the warning that tells the person."""
+    task = new(store, "task", "t")
+    other = new(store, "task", "o")
+    comment = run(store, add_comment, id=task, comment=f"aws_key = {AWS_KEY}")
+    linked = run(store, link, source=task, relation="references", target=other, reason=AWS_KEY)
+    closed = run(
+        store,
+        close,
+        id=task,
+        outcome="completed",
+        summary=f"used {AWS_KEY}",
+        follow_ups=[FollowUp(title="rotate", body=f"key {AWS_KEY}")],
+    )
+    assert any("AWSKeyDetector in comment" in w for w in comment.warnings)
+    assert any("AWSKeyDetector in reason" in w for w in linked.warnings)
+    found = {w.split(" in ")[1].split(" line")[0] for w in closed.warnings if "AWSKeyDetector" in w}
+    assert found == {"summary", "follow_ups[0].body"}
+    assert all(AWS_KEY not in text for text in (comment.render_text(), closed.render_text()))
+
+
+def test_a_stale_claim_names_the_claim_retry(store: EntryStore) -> None:
+    """Review finding 3. Silent failure caught: a refused claim telling the agent to write a
+    version, which never claims."""
+    from trails.errors import ValidationError
+
+    task = new(store, "task", "t")
+    with pytest.raises(ValidationError) as refused:
+        run(store, claim, id=task, base_version=0)
+    assert f'retry with claim("{task}", base_version=1)' in str(refused.value)
+    assert "write(" not in str(refused.value)
+
+
+def test_follow_ups_are_embedded(store: EntryStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review finding 4. Silent failure caught: a follow-up task search by meaning cannot find."""
+    from tests.fakes import FakeEngine, basis
+    from trails import engine as engine_seam
+
+    class Engine(FakeEngine):
+        def embed(self, text: str) -> Any:
+            return basis(0)
+
+    monkeypatch.setattr(engine_seam, "build_engine", Engine)
+    task = new(store, "task", "t")
+    closed = run(
+        store, close, id=task, outcome="completed", summary="s", follow_ups=[FollowUp(title="next")]
+    )
+    embedded = {
+        str(r["entry_id"]) for r in store.query("SELECT entry_id FROM entry_chunk_embedding")
+    }
+    assert set(closed.follow_ups) <= embedded
+
+
+def test_scoped_prime_bounds_its_lists(store: EntryStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review finding 5. Silent failure caught: prime growing with every contradicted claim
+    and open goal until the session-start page is dropped. The limit is lowered to 2 so the
+    test writes a handful of entries rather than dozens."""
+    from trails.ops import prime as prime_module
+
+    monkeypatch.setattr(prime_module, "LIST_LIMIT", 2)
+    limit = 2
+    store.write_project("alpha", host="h", paths=[], remove_paths=[])
+    rival = new(store, "claim", "rival", projects=["alpha"])
+    for n in range(limit + 2):
+        target = new(store, "claim", f"c{n}", projects=["alpha"])
+        store.add_entry_link(rival, "contradicts", target)
+        new(store, "goal", f"g{n}", projects=["alpha"])
+    result = run(store, prime, project="alpha")
+    assert (len(result.contradicted), result.contradicted_total) == (limit, limit + 2)
+    assert (len(result.goals), result.goal_total) == (limit, limit + 2)

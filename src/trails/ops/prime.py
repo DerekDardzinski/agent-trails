@@ -30,6 +30,9 @@ from trails.present import (
 from trails.vocab import KINDS, WORK_KINDS
 
 PROJECT_PAGE = 100
+# Prime lists at most this many open goals and contradicted claims, with the totals and the
+# search call for the rest, so its size does not grow with history.
+LIST_LIMIT = 20
 
 OPERATION = Operation(toolset="agent", read_only=True, destructive=False, idempotent=True)
 
@@ -92,9 +95,11 @@ async def prime(
             preference_cap_hit=cap_hit,
             preference_conflicts=conflicts,
             goals=[],
+            goal_total=0,
             ready=0,
             open_comments=0,
             contradicted=[],
+            contradicted_total=0,
             counts={},
             unavailable=None,
         )
@@ -162,10 +167,12 @@ async def prime(
         preferences=preferences,
         preference_cap_hit=cap_hit,
         preference_conflicts=conflicts,
-        goals=goals,
+        goals=goals[:LIST_LIMIT],
+        goal_total=len(goals),
         ready=len(graph.ready(ref.id)),
         open_comments=int(open_rows[0]["n"]),
-        contradicted=contradicted,
+        contradicted=contradicted[:LIST_LIMIT],
+        contradicted_total=len(contradicted),
         counts=ordered,
         unavailable=None,
     )
@@ -249,9 +256,11 @@ def _unavailable(detail: str) -> PrimeResult:
         preference_cap_hit=False,
         preference_conflicts=[],
         goals=[],
+        goal_total=0,
         ready=0,
         open_comments=0,
         contradicted=[],
+        contradicted_total=0,
         counts={},
         unavailable=detail,
     )

@@ -28,5 +28,8 @@ async def retire(
     """
     outcome = context.store().retire_entry(id, reason)
     return RetireResult(
-        entry_id=outcome.entry_id, reason=outcome.reason, already_retired=outcome.already_retired
+        entry_id=outcome.entry_id,
+        reason=outcome.reason,
+        already_retired=outcome.already_retired,
+        warnings=outcome.warnings,
     )

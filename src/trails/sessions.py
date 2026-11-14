@@ -50,6 +50,8 @@ from trails.models import Provenance
 CLIENT_NAME: ContextVar[str | None] = ContextVar("trails_mcp_client_name", default=None)
 
 UNKNOWN_HARNESS = "unknown"
+# The width of every harness column; a longer client name is cut rather than refusing writes.
+HARNESS_CHARS = 200
 KIRO = "kiro"
 CLAUDE = "claude"
 
@@ -136,7 +138,7 @@ def resolve(
 
     harness = harness_from_client(client_name) or harness_from_processes(processes())
     if harness is None:
-        stated = (client_name or "").strip()
+        stated = (client_name or "").strip()[:HARNESS_CHARS]
         return Provenance(harness=stated or UNKNOWN_HARNESS)
     if harness == KIRO:
         return _kiro(env, home, processes())

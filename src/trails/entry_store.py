@@ -930,6 +930,7 @@ class EntryStore(Store):
                 provenance=provenance,
             )
             warnings = _target_warnings(source_id, [(relation, target_id)], found)
+            warnings += _secret_warnings({"reason": normal_reason or ""})
             if relation in {"part_of", "waits_on"}:
                 graph = self.task_graph()
                 table = graph.parents if relation == "part_of" else graph.waits
@@ -1002,7 +1003,7 @@ class EntryStore(Store):
             action="remove",
             changed=True,
             target_version=None,
-            warnings=[],
+            warnings=_secret_warnings({"reason": normal_reason}),
         )
 
     def link_events(self, entry_ids: Sequence[str]) -> list[LinkEvent]:
@@ -1119,7 +1120,14 @@ class EntryStore(Store):
                     f'reopen("{entry_id}", reason="...")'
                 )
             if base_version != entry.current.version:
-                raise ValidationError(_stale_message(entry_id, base_version, entry.current))
+                raise ValidationError(
+                    _stale_message(
+                        entry_id,
+                        base_version,
+                        entry.current,
+                        retry=f'claim("{entry_id}", base_version={entry.current.version})',
+                    )
+                )
             provenance = sessions.current_provenance()
             held = entry.claim
             take_over = (take_over_reason or "").strip()
@@ -1141,7 +1149,9 @@ class EntryStore(Store):
                 entry, "claim", outcome=None, reason=take_over or None, provenance=provenance
             )
             self._commit_events([_task_insert(event)], f"claim {entry_id}", event, provenance)
-        return self._task_outcome(entry, event)
+        return self._task_outcome(
+            entry, event, warnings=_secret_warnings({"take_over_reason": take_over})
+        )
 
     def release(self, entry_id: str, reason: str) -> TaskOutcome:
         """Drop the current claim (D11); the task stays not closed. Releasing an unclaimed
@@ -1159,7 +1169,9 @@ class EntryStore(Store):
                 entry, "release", outcome=None, reason=normal_reason, provenance=provenance
             )
             self._commit_events([_task_insert(event)], f"release {entry_id}", event, provenance)
-        return self._task_outcome(entry, event)
+        return self._task_outcome(
+            entry, event, warnings=_secret_warnings({"reason": normal_reason})
+        )
 
     def reopen(self, entry_id: str, reason: str) -> TaskOutcome:
         """Move a closed goal or task back to open (D11). Links a supersede moved stay moved.
@@ -1179,9 +1191,11 @@ class EntryStore(Store):
                 entry, "reopen", outcome=None, reason=normal_reason, provenance=provenance
             )
             self._commit_events([_task_insert(event)], f"reopen {entry_id}", event, provenance)
-        return self._task_outcome(entry, event)
+        return self._task_outcome(
+            entry, event, warnings=_secret_warnings({"reason": normal_reason})
+        )
 
-    def close(  # noqa: PLR0912 — one transaction holds the close and all it implies
+    def close(  # noqa: PLR0912, PLR0915 — one transaction holds the close and all it implies
         self,
         entry_id: str,
         outcome: Outcome,
@@ -1273,8 +1287,26 @@ class EntryStore(Store):
                     moment=event.created_at,
                     provenance=provenance,
                 )
+            warnings: list[str] = []
+            if moved:
+                for item in moved:
+                    targets = graph.waits.setdefault(item.source_id, [])
+                    if entry_id in targets:
+                        targets.remove(entry_id)
+                    if item.to_id not in targets:
+                        targets.append(item.to_id)
+                warnings += cycle_warnings(graph, sorted({item.source_id for item in moved}))
+            warnings += _secret_warnings(
+                {
+                    "summary": normal_summary,
+                    **{
+                        f"follow_ups[{n}].{part}": text
+                        for n, item in enumerate(follow_ups)
+                        for part, text in (("title", item.title), ("body", item.body))
+                    },
+                }
+            )
             self._commit_events(statements, f"close {entry_id} {outcome}", event, provenance)
-        warnings = []
         still_open = graph.open_children(entry_id)
         if still_open:
             warnings.append(
@@ -1316,7 +1348,12 @@ class EntryStore(Store):
                     f"CALL DOLT_COMMIT('-A','-m',{dolt.sql_literal(f'retire {entry_id}')})",
                 ]
             )
-        return RetireOutcome(entry_id=entry_id, reason=normal_reason, already_retired=False)
+        return RetireOutcome(
+            entry_id=entry_id,
+            reason=normal_reason,
+            already_retired=False,
+            warnings=_secret_warnings({"reason": normal_reason}),
+        )
 
     def _supersede_statements(
         self,
@@ -1765,7 +1802,9 @@ class EntryStore(Store):
                 )
                 if not (stored and _as_datetime(stored[0]["created_at"]) == moment):
                     raise
-        return CommentOutcome(comment=comment, pinned=pins, warnings=[])
+        return CommentOutcome(
+            comment=comment, pinned=pins, warnings=_secret_warnings({"comment": text})
+        )
 
     def get_comments(self, entry_id: str, limit: int = 5, offset: int = 0) -> CommentPage:
         """The newest `limit` comments on an entry after skipping `offset`, newest first, with
@@ -2064,19 +2103,25 @@ def _content(version: EntryVersion) -> tuple[Any, ...]:
     )
 
 
-def _stale_message(entry_id: str, given: int | None, current: EntryVersion) -> str:
+def _stale_message(
+    entry_id: str, given: int | None, current: EntryVersion, retry: str | None = None
+) -> str:
+    """The refusal of a stale or missing base_version, with the call to retry. `retry` is the
+    call when it is not a write, such as a claim."""
     session = f", session {current.session_id}" if current.session_id else ""
     who = (
         f"{entry_id} is at version {current.version}, written by {current.author} "
         f"({current.harness}{session}) at {current.created_at.isoformat()}"
     )
-    retry = (
-        f'read it with show("{entry_id}"), then retry with write(id="{entry_id}", '
-        f'base_version={current.version}, reason="...", <the fields you change>)'
+    call = retry or (
+        f'write(id="{entry_id}", base_version={current.version}, reason="...", '
+        "<the fields you change>)"
     )
+    needed = "a new version" if retry is None else "this call"
+    advice = f'read it with show("{entry_id}"), then retry with {call}'
     if given is None:
-        return f"a new version needs base_version: {who}; {retry}"
-    return f"base_version={given} is stale and would overwrite a newer version: {who}; {retry}"
+        return f"{needed} needs base_version: {who}; {advice}"
+    return f"base_version={given} is stale and would overwrite a newer version: {who}; {advice}"
 
 
 def _target_warnings(
@@ -2104,6 +2149,7 @@ def _scanned_fields(version: EntryVersion) -> dict[str, str]:
     return {
         "title": version.title,
         "body": version.body,
+        **({"reason": version.reason} if version.reason else {}),
         **({"value": value_text} if value_text is not None else {}),
         **{
             f"artifact[{n}].{part}": text
@@ -2492,3 +2538,13 @@ def unchanged_responses(comments: Sequence[Comment]) -> set[str]:
         for item in comments
         if any(versions.get(target) == item.entry_version for target in item.addresses)
     }
+
+
+def _secret_warnings(fields: dict[str, str]) -> list[str]:
+    """Possible secrets in free-text fields an event or comment carries, as warnings. A
+    finding never stops the write."""
+    return [
+        f"possible secret: {finding.detector} in {finding.field} line {finding.line}; tell the "
+        "person, because removing it needs a manual database-history rewrite"
+        for finding in scan_for_secrets({k: v for k, v in fields.items() if v})
+    ]

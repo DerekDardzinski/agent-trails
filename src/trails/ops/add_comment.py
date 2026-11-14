@@ -48,4 +48,5 @@ async def add_comment(
         verdict=outcome.comment.verdict,
         addresses=outcome.comment.addresses,
         pinned=len(outcome.pinned),
+        warnings=outcome.warnings,
     )

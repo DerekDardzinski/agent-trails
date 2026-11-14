@@ -80,7 +80,7 @@ async def lint(
         "missing-paths": _missing_paths(projects),
         "unembedded": _unembedded(store, ids),
         "unembedded-framing": _unembedded_framing(store, projects),
-        "possible-secrets": _possible_secrets(entries, projects),
+        "possible-secrets": _possible_secrets(entries, projects) + _comment_secrets(store, ids),
     }
     return LintResult(project=resolved, categories={name: categories[name] for name in CATEGORIES})
 
@@ -273,3 +273,22 @@ def _possible_secrets(entries: Sequence[Entry], projects: Sequence[Project]) -> 
             for finding in scan_for_secrets(fields)
         ]
     return items
+
+
+def _comment_secrets(store: EntryStore, ids: Sequence[str]) -> list[LintItem]:
+    """Possible secrets in the comments on the selected entries, never the text."""
+    if not ids:
+        return []
+    rows = store.query(
+        f"SELECT id, entry_id, body FROM comment WHERE entry_id IN ({', '.join('?' * len(ids))}) "
+        "ORDER BY entry_id, created_at, id",
+        list(ids),
+    )
+    return [
+        LintItem(
+            entry_id=str(row["entry_id"]),
+            detail=f"{finding.detector} in comment {row['id']} line {finding.line}",
+        )
+        for row in rows
+        for finding in scan_for_secrets({"comment": str(row.get("body", ""))})
+    ]

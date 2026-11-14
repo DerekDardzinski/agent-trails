@@ -166,9 +166,11 @@ class CommentResult(RenderedResult):
     verdict: str | None
     addresses: list[str]
     pinned: int
+    warnings: list[str]
 
     def render_text(self) -> str:
         lines = [f"comment {self.comment_id} on {self.entry_id} v{self.entry_version}"]
+        lines += _warnings(self.warnings)
         if self.verdict:
             lines.append(f"verdict: {self.verdict}")
         if self.addresses:
@@ -483,9 +485,11 @@ class PrimeResult(RenderedResult):
     preference_cap_hit: bool
     preference_conflicts: list[str]
     goals: list[PrimeGoal]
+    goal_total: int
     ready: int
     open_comments: int
     contradicted: list[str]
+    contradicted_total: int
     counts: dict[str, dict[str, int]]
     unavailable: str | None
 
@@ -516,8 +520,13 @@ class PrimeResult(RenderedResult):
             label = f" ({path.label})" if path.label else ""
             lines.append(f"path: {path.path}{label}")
         if self.goals:
-            lines.append("open goals:")
+            lines.append(f"open goals: {len(self.goals)} of {self.goal_total} shown")
             lines += [f"  {goal.id}  [{goal.state}]  {goal.title}" for goal in self.goals]
+            if self.goal_total > len(self.goals):
+                lines.append(
+                    "  more: "
+                    + call("search", kinds=["goal"], projects=[project.id], status="open")
+                )
         lines.append(f"ready tasks: {self.ready} · {call('ready', project=project.id)}")
         if self.open_comments:
             lines.append(
@@ -525,8 +534,12 @@ class PrimeResult(RenderedResult):
                 + call("search", projects=[project.id], open_comments=True)
             )
         if self.contradicted:
-            lines.append("contradicted claims:")
+            lines.append(
+                f"contradicted claims: {len(self.contradicted)} of {self.contradicted_total} shown"
+            )
             lines += [f"  {item}" for item in self.contradicted]
+            if self.contradicted_total > len(self.contradicted):
+                lines.append("  more: " + call("search", kinds=["claim"], projects=[project.id]))
         if self.counts:
             lines.append("counts:")
             for kind, states in self.counts.items():
@@ -546,6 +559,7 @@ class RetireResult(RenderedResult):
     entry_id: str
     reason: str
     already_retired: bool
+    warnings: list[str]
 
     def render_text(self) -> str:
         head = (
@@ -553,7 +567,9 @@ class RetireResult(RenderedResult):
             if self.already_retired
             else f"retired {self.entry_id}: {self.reason}"
         )
-        return "\n".join([head, next_line([call("show", self.entry_id)])])
+        return "\n".join(
+            [head, *_warnings(self.warnings), next_line([call("show", self.entry_id)])]
+        )
 
 
 def preference_section(result: PrimeResult) -> list[str]:

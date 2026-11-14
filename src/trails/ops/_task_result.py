@@ -16,12 +16,13 @@ def task_result(store: EntryStore, event: str, outcome: TaskOutcome) -> TaskResu
     warnings = list(outcome.warnings)
     try:
         graph = store.task_graph()
-        lines = graph_lines(graph, [entry_id, *outcome.follow_ups])
-        dependents = [
-            line
-            for line in graph_lines(graph, graph.dependents(entry_id))
-            if line.id in graph.dependents(entry_id)
-        ]
+        # After a supersede the old entry has no dependents left; the moved sources are its
+        # dependents, now waiting on the replacements.
+        moved = list(dict.fromkeys(item.source_id for item in outcome.moved))
+        dependent_ids = list(dict.fromkeys([*graph.dependents(entry_id), *moved]))
+        lines = graph_lines(graph, [entry_id, *outcome.follow_ups, *moved])
+        wanted = set(dependent_ids)
+        dependents = [line for line in graph_lines(graph, dependent_ids) if line.id in wanted]
         state = node_state(graph, entry_id)
     except Exception as exc:  # guidance only; the event is durable
         lines, dependents = [], []

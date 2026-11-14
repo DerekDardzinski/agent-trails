@@ -363,6 +363,7 @@ class RetireOutcome(BaseModel):
     entry_id: str
     reason: str
     already_retired: bool
+    warnings: list[str] = []
 
 
 class CommentOutcome(BaseModel):

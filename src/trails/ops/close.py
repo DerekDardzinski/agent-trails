@@ -9,6 +9,7 @@ from pydantic import Field
 
 from trails.models import FollowUp
 from trails.ops import context
+from trails.ops._common import embed_after_write
 from trails.ops._entry_types import TaskResult
 from trails.ops._marks import Operation
 from trails.ops._task_result import task_result
@@ -55,4 +56,7 @@ async def close(
     Returns: the new state, the follow-up ids, the links a supersede moved, the dependents with their new state, the task graph, and a warning when a parent is closed with children not closed. Closing again with the same outcome changes nothing.
     """
     store = context.store()
-    return task_result(store, "close", store.close(id, outcome, summary, by, follow_ups))
+    closed = store.close(id, outcome, summary, by, follow_ups)
+    _embedded, warnings = embed_after_write(store, [closed.entry.id, *closed.follow_ups])
+    closed = closed.model_copy(update={"warnings": [*closed.warnings, *warnings]})
+    return task_result(store, "close", closed)
