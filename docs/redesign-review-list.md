@@ -276,3 +276,21 @@ capture). Literature: `rpt-r7vyi` (lab-researcher, builds on `rpt-4anug`). Decis
    with your labeling time as the limit.
 8. **Skills and the dreamer.** Scope, the symlink configuration, and the dreamer's design are
    product design and stay with you; nothing in this version depends on them.
+
+### Follow-up review (Beads `labbook-a7p.8`)
+
+The review of 1b74c8c, 456f3d9 and 22a0ef1 found 1 blocking finding, which was demonstrated: an
+MCP client that sent an empty name was treated as the CLI and got the inherited
+`KIRO_SESSION_ID`. Commit 37f9ce3 fixed it, and the fix check approved it (gate: 339 passed).
+These advisory notes are still open:
+
+- The CLI accepts `KIRO_SESSION_ID` whenever its lease file exists. Stale leases do occur
+  (`fac-x8s2n`), so a variable inherited from a session that crashed could still be used. A
+  pid-liveness check on the lease would close this.
+- The `more:` calls for omitted preferences and conflicts carry no project, so they list more
+  than was omitted.
+- `show --since-comment` with an unknown comment id now exits 1 ("no comment has id") where
+  it used to print "not found".
+- An entry id is now minted outside the lock. Two concurrent creations could draw the same id
+  and get a spurious refusal; the chance is about 1 in 36^5 for each overlapping pair.
+- The preference-cap search loop is quadratic in the number of preferences.
