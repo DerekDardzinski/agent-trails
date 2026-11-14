@@ -22,7 +22,7 @@ from detect_secrets.core.scan import scan_line
 from detect_secrets.settings import default_settings, transient_settings
 
 from trails.models import SecretFinding
-from trails.vocab import ID_PATTERN
+from trails.vocab import ENTRY_ID_PATTERN
 
 DISABLED_PLUGINS = frozenset({"HexHighEntropyString", "Base64HighEntropyString"})
 
@@ -162,7 +162,7 @@ def _is_reference(value: str) -> bool:
     return (
         _URI_OR_ARN.match(value) is not None
         or value.startswith(("/", "~/"))
-        or ID_PATTERN.fullmatch(value) is not None
+        or ENTRY_ID_PATTERN.fullmatch(value) is not None
         or _HEX_IDENTITY.fullmatch(value) is not None
         or _MODEL_REFERENCE.fullmatch(value) is not None
     )

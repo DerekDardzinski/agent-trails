@@ -54,7 +54,7 @@ def test_unquoted_sensitive_assignments_are_reported_once(line: str, detector: s
     [
         "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
         "0123456789abcdef0123456789abcdef01234567",
-        "rec-7cb6f45ac185f6ea",
+        "tsk-7cb6f",
         "hyp-k3m9z",
         "note-8a0xrf",
         "res-7cb6f45ac185f6ea",
@@ -63,7 +63,7 @@ def test_unquoted_sensitive_assignments_are_reported_once(line: str, detector: s
         "s3://bucket/runs/2026/out.parquet",
         "PWD=/Users/ddardzin/projects/agent-trails",
         "pwd: /Users/ddardzin/projects/agent-trails",
-        "token: rec-7cb6f45ac185f6ea",
+        "token: tsk-7cb6f",
         "token: 0123456789abcdef0123456789abcdef01234567",
         "secret: s3://bucket/runs/2026/out.parquet",
         "secret = arn:aws:secretsmanager:us-east-1:123456789012:secret:db-1",

@@ -1625,7 +1625,7 @@ class EntryStore(Store):
                 for ref in group
             ]
             return SetProjectsOutcome(
-                record_id=entry_id,
+                entry_id=entry_id,
                 changed=changes,
                 unchanged_add=[ref for ref in add_refs if ref.id in current],
                 unchanged_remove=[ref for ref in remove_refs if ref.id not in current],

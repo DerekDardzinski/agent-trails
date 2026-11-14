@@ -3,6 +3,8 @@
 NOTE: no `from __future__ import annotations` in this package. See `ops/__init__.py`.
 """
 
+import json
+from pathlib import Path
 from typing import Annotated, Any
 
 from pydantic import Field
@@ -10,10 +12,12 @@ from pydantic import Field
 from trails import dolt
 from trails.entry_store import EntryStore
 from trails.errors import ValidationError
+from trails.locations import safe_resolve
 from trails.models import ArtifactRef, CodeCapture, EntryDraft
 from trails.ops import context
 from trails.ops._common import capture_code, discard_capture, embed_after_write, redraw
 from trails.ops._entry_types import WriteResult
+from trails.ops._guidance import CapturedRepo, uncaptured_location_warnings
 from trails.ops._marks import FromFile, Operation
 from trails.vocab import WORK_KINDS, Kind, StatedBy
 
@@ -187,6 +191,21 @@ async def write(  # noqa: PLR0917 — the public write contract
         for finding in outcome.secret_findings
     ]
     warnings += outcome.warnings
+    # Guidance only, so broad on purpose: path resolution raises RuntimeError on a symlink
+    # loop and git may be missing; none of it may cost the agent the confirmation of a write.
+    try:
+        warnings += uncaptured_location_warnings(
+            entry.id,
+            entry.current.version,
+            entry.current.artifacts if artifacts is not None or creating else [],
+            [body or "", json.dumps(value or {}, ensure_ascii=False)],
+            [
+                CapturedRepo(top=safe_resolve(Path(item.repo_path)), exclude=tuple(item.excluded))
+                for item in summaries
+            ],
+        )
+    except Exception as exc:
+        warnings.append(f"written, but checking its paths failed: {exc}")
     embedded, embed_warnings = embed_after_write(store, [entry.id])
     warnings += embed_warnings
     graph = []

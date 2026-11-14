@@ -134,7 +134,7 @@ def init_database(db_path: Path) -> None:
     try:
         db_path.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        # Translated rather than propagated: `open_store` contracts to raise
+        # Translated rather than propagated: `open_entry_store` contracts to raise
         # StoreUnavailableError when the database cannot be opened, and a raw
         # NotADirectoryError would escape the CLI's error handling as a traceback.
         raise StoreUnavailableError(f"cannot create a database at {db_path}: {exc}") from exc

@@ -5,8 +5,8 @@ NOTE: no `from __future__ import annotations` in this package. See `ops/__init__
 
 from trails import __version__
 from trails.ops import context
+from trails.ops._maint_types import VersionResult
 from trails.ops._marks import Operation
-from trails.ops._write_types import VersionResult
 
 OPERATION = Operation(toolset="full", read_only=True, destructive=False, idempotent=True)
 

@@ -4,15 +4,10 @@ from __future__ import annotations
 
 import pytest
 
+from trails.entry_store import EntryStore
 from trails.errors import ValidationError
-from trails.models import RecordDraft
-from trails.store import Store, _bind
-
-
-@pytest.fixture
-def store(record_store: Store) -> Store:
-    """This module tests the old record store, removed with it in the next commit."""
-    return record_store
+from trails.models import EntryDraft
+from trails.store import _bind
 
 
 def test_a_param_containing_a_question_mark_is_not_spliced_into_by_the_next_param() -> None:
@@ -34,7 +29,7 @@ def test_the_placeholder_count_mismatch_is_refused() -> None:
 
 
 def test_a_query_with_quote_backslash_and_question_mark_params_returns_them_unchanged(
-    store: Store,
+    store: EntryStore,
 ) -> None:
     """Catches Store.query corrupting agent-supplied text that contains SQL metacharacters."""
     rows = store.query("SELECT ? AS a, ? AS b", ["it's \\ a?", "next?"])
@@ -42,14 +37,12 @@ def test_a_query_with_quote_backslash_and_question_mark_params_returns_them_unch
 
 
 def test_collation_equal_tags_with_question_marks_are_refused_as_validation_errors(
-    store: Store,
+    store: EntryStore,
 ) -> None:
     """Catches the failed-write classifier raising a raw DoltError, because its two-param
     collation query was corrupted by a tag ending in `?`."""
     with pytest.raises(ValidationError, match="one tag to the store"):
-        store.write_record(
-            RecordDraft(entry_type="note", work_status="closed", title="t", tags=["cafe?", "café?"])
-        )
+        store.write_entry(EntryDraft(kind="note", title="t", tags=["cafe?", "café?"]))
 
 
 def test_a_backslash_escaped_quote_does_not_end_the_quoted_section() -> None:

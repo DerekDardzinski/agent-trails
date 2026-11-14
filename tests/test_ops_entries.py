@@ -215,3 +215,23 @@ def test_set_projects_moves_an_entry_between_projects(store: EntryStore) -> None
 @pytest.mark.parametrize("kind", ["note", "claim", "preference", "skill"])
 def test_a_non_work_write_draws_no_graph(store: EntryStore, kind: str) -> None:
     assert run(store, write, kind=kind, title="x").graph == []
+
+
+def test_a_script_artifact_in_a_temporary_directory_is_warned_about(
+    store: EntryStore, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Silent failure caught: an entry pointing at a script the operating system will delete,
+    which trails holds only by reference."""
+    from trails import locations
+
+    script = tmp_path / "analysis.py"
+    script.write_text("print(1)\n")
+    monkeypatch.setattr(locations, "temporary_roots", lambda: (tmp_path.resolve(),))
+    result = run(
+        store, write, kind="claim", title="x", artifacts=[ArtifactRef(location=str(script))]
+    )
+    [warning] = result.warnings
+    assert "is a script in the temporary directory" in warning
+    assert (
+        f'write(id="{result.id}", base_version=1, reason="...", repos=["<repository>"])' in warning
+    )

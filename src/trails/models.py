@@ -1,30 +1,25 @@
-"""The stored record, project, framing, and membership models.
-
-These are the store's own types and the shapes every other unit consumes. A Record is what a
-read produces; a RecordDraft is what a caller hands to `Store.write_record` after resolving any
-human project names to stable project ids.
+"""The store's own types: entries and their versions, links, task events, comments,
+sessions, projects and framing. An Entry is what a read assembles; an EntryDraft is what a
+caller hands to `EntryStore.write_entry`.
 """
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 from trails.vocab import (
-    EntryType,
     Kind,
     LinkAction,
     LinkRelation,
     Outcome,
     ProjectAction,
-    Relation,
     StatedBy,
     TaskEventKind,
     TaskState,
     Verdict,
-    WorkStatus,
 )
 
 
@@ -55,23 +50,6 @@ class CaptureSummary(BaseModel):
     changed_bytes: int
     largest: list[tuple[str, int]]
     excluded: list[str]
-
-
-class Link(BaseModel):
-    """One outgoing relation from a record."""
-
-    relation: Relation
-    target_id: str
-
-
-class WorkStatusEvent(BaseModel):
-    """One append-only statement of whether more work is expected on a record."""
-
-    sequence: int
-    work_status: WorkStatus
-    changed_at: datetime
-    author: str
-    reason: str | None
 
 
 class ProjectRef(BaseModel):
@@ -135,18 +113,6 @@ class Project(BaseModel):
     current_framing: ProjectFramingVersion | None
 
 
-class ProjectMembershipEvent(BaseModel):
-    """One append-only add or remove event for a record/project pair."""
-
-    record_id: str
-    project: ProjectRef
-    sequence: int
-    action: ProjectAction
-    reason: str | None
-    author: str
-    created_at: datetime
-
-
 class ProjectMembershipChange(BaseModel):
     """One effective membership change returned by set_projects."""
 
@@ -157,60 +123,12 @@ class ProjectMembershipChange(BaseModel):
     created_at: datetime
 
 
-class Record(BaseModel):
-    """A stored record with everything attached to it, as a read assembles it."""
-
-    id: str
-    entry_type: EntryType
-    work_status: WorkStatus
-    work_status_history: list[WorkStatusEvent]
-    title: str
-    body: str
-    tags: list[str]
-    projects: list[ProjectRef]
-    author: str
-    created_at: datetime
-    value: dict[str, Any] | None
-    reason: str | None
-    artifacts: list[ArtifactRef]
-    code: list[CodeCapture]
-    links: list[Link]
-    superseded_by: str | None
-    retired: bool
-    last_verified: tuple[date, str] | None
-
-
-class RecordDraft(BaseModel):
-    """What a caller asks the store to write; projects are resolved stable ids."""
-
-    entry_type: EntryType
-    work_status: WorkStatus
-    id: str | None = None
-    title: str
-    body: str = ""
-    tags: list[str] = []
-    projects: list[str] | None = None
-    value: dict[str, Any] | None = None
-    links: list[Link] = []
-    artifacts: list[ArtifactRef] = []
-    code: list[CodeCapture] = []
-    supersedes: str | None = None
-    reason: str | None = None
-
-
 class SecretFinding(BaseModel):
     """A possible secret, located without its text."""
 
     field: str
     line: int
     detector: str
-
-
-class WriteOutcome(BaseModel):
-    """A written record and possible secrets. A finding never stops a write."""
-
-    record: Record
-    secret_findings: list[SecretFinding]
 
 
 class ProjectWriteOutcome(BaseModel):
@@ -228,7 +146,7 @@ class ProjectWriteOutcome(BaseModel):
 class SetProjectsOutcome(BaseModel):
     """The effective and idempotent parts of one membership request."""
 
-    record_id: str
+    entry_id: str
     changed: list[ProjectMembershipChange]
     unchanged_add: list[ProjectRef]
     unchanged_remove: list[ProjectRef]

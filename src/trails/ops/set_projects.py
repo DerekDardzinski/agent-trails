@@ -32,7 +32,7 @@ async def set_projects(
     """
     outcome = context.store().set_entry_projects(id, add, remove, reason)
     return SetProjectsResult(
-        entry_id=outcome.record_id,
+        entry_id=outcome.entry_id,
         changed=outcome.changed,
         unchanged_add=outcome.unchanged_add,
         unchanged_remove=outcome.unchanged_remove,

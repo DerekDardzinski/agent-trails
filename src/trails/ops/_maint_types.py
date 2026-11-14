@@ -1,33 +1,14 @@
-"""What the export and maintenance operations return.
+"""What the maintenance operations return.
 
-A result that names a record ends with a Next: line.
+A result that names an entry ends with a Next: line.
 
 NOTE: no `from __future__ import annotations` in this package. See `ops/__init__.py`.
 """
-
-from datetime import date
 
 from pydantic import BaseModel
 
 from trails.models import ProjectRef
 from trails.ops.types import RenderedResult
-
-
-class ExportResult(RenderedResult):
-    """A record written to a file."""
-
-    record_id: str
-    path: str
-
-    def render_text(self) -> str:
-        """Confirmation, then the publish call that reads the file back."""
-        return "\n".join(
-            [
-                f"exported {self.record_id} to {self.path}; add a reason line to the header "
-                "before publishing it back",
-                f'Next: publish(from_file="{self.path}")',
-            ]
-        )
 
 
 class AliasResult(RenderedResult):
@@ -42,24 +23,6 @@ class AliasResult(RenderedResult):
             [
                 f"alias {self.tag} -> {self.canonical}: a search for either finds both",
                 f'Next: search(tags=["{self.canonical}"])',
-            ]
-        )
-
-
-class MarkVerifiedResult(RenderedResult):
-    """A verified stamp."""
-
-    record_id: str
-    verified_at: date
-    environment: str
-
-    def render_text(self) -> str:
-        """The date and environment stamped, then the show() call."""
-        return "\n".join(
-            [
-                f"verified {self.record_id} on {self.verified_at.isoformat()} in "
-                f"{self.environment}",
-                f'Next: show("{self.record_id}")',
             ]
         )
 
@@ -125,3 +88,14 @@ class LintResult(RenderedResult):
                     call = f' · show("{item.entry_id}")' if item.entry_id is not None else ""
                     lines.append(f"  {item.detail}{call}")
         return "\n".join(lines)
+
+
+class VersionResult(RenderedResult):
+    """The installed version and the database a call would use."""
+
+    version: str
+    db_path: str
+
+    def render_text(self) -> str:
+        """One line. No Next: line, because no entry is named."""
+        return f"trails {self.version} · database {self.db_path}"

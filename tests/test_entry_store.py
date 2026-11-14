@@ -7,12 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from trails import sessions
+from trails import dolt, sessions
 from trails.entry_store import EntryStore, open_entry_store
 from trails.errors import StoreUnavailableError, ValidationError
 from trails.models import ArtifactRef, EntryDraft
 from trails.sessions import ProcessRow
-from trails.store import open_store
 
 KIRO_NODE = "/Applications/kiro-cli/node /Applications/kiro-cli/kas/index.js"
 
@@ -186,7 +185,14 @@ def test_an_old_schema_database_is_refused(tmp_path: Path) -> None:
     """Silent failure caught: the new store creating its tables beside an old record database,
     which would then read as an empty store while the old records sit unseen."""
     old = tmp_path / "old"
-    open_store(old)
+    dolt.init_database(old)
+    dolt.run_script(
+        old,
+        [
+            "CREATE TABLE record (id VARCHAR(32) PRIMARY KEY, title TEXT)",
+            "CALL DOLT_COMMIT('-A','-m','old schema')",
+        ],
+    )
     with pytest.raises(StoreUnavailableError, match="old trails record schema"):
         open_entry_store(old)
     assert not (old / ".agent-trails-schema").exists()

@@ -8,17 +8,11 @@ from pathlib import Path
 import pytest
 
 from tests.fakes import FakeEngine, basis
-from trails import dolt, embeddings, vector
+from trails import embeddings, entry_search, vector
 from trails.embeddings import MODEL_ID, EmbeddingEngine, engine_status
+from trails.entry_store import EntryStore
 from trails.errors import ValidationError
-from trails.models import RecordDraft
-from trails.store import Store
-
-
-@pytest.fixture
-def store(record_store: Store) -> Store:
-    """This module tests the old record store, removed with it in the next commit."""
-    return record_store
+from trails.models import EntryDraft
 
 
 class _Engine(FakeEngine):
@@ -32,83 +26,90 @@ class _Engine(FakeEngine):
         return basis(0)
 
 
-def _chunk_rows(store: Store, record_id: str) -> list[int]:
+def _chunk_rows(store: EntryStore, entry_id: str) -> list[tuple[int, int]]:
     rows = store.query(
-        "SELECT chunk_index FROM record_chunk_embedding WHERE record_id = ? ORDER BY chunk_index",
-        [record_id],
+        "SELECT version, chunk_index FROM entry_chunk_embedding WHERE entry_id = ? "
+        "ORDER BY version, chunk_index",
+        [entry_id],
     )
-    return [int(row["chunk_index"]) for row in rows]
+    return [(int(row["version"]), int(row["chunk_index"])) for row in rows]
 
 
-def test_long_body_is_written_as_one_row_per_chunk(store: Store) -> None:
+def _note(store: EntryStore, title: str, body: str = "") -> str:
+    return store.write_entry(EntryDraft(kind="note", title=title, body=body)).entry.id
+
+
+def test_long_body_is_written_as_one_row_per_chunk(store: EntryStore) -> None:
     """Catches a long body embedded as one truncated chunk, which leaves its tail unsearchable.
 
     FakeEngine counts words as tokens: three 150-word paragraphs cannot share a 200-token
     chunk, so each is its own chunk.
     """
     body = "\n\n".join(" ".join([word] * 150) for word in ("alpha", "beta", "gamma"))
-    record_id = store.write_record(
-        RecordDraft(entry_type="note", work_status="closed", title="Long", body=body)
-    ).record.id
+    entry_id = _note(store, "Long", body)
     engine = _Engine()
 
-    written = vector.embed_records(store, engine, [record_id])
+    written = entry_search.embed_entries(store, engine, [entry_id])
 
     assert written == 3
-    assert _chunk_rows(store, record_id) == [0, 1, 2]
+    assert _chunk_rows(store, entry_id) == [(1, 0), (1, 1), (1, 2)]
     assert [text.split("\n\n")[0] for text in engine.calls] == ["Long", "Long", "Long"]
     assert [text.split("\n\n")[1][:5] for text in engine.calls] == ["alpha", "beta ", "gamma"]
 
 
-def test_short_paragraphs_are_packed_into_one_chunk(store: Store) -> None:
-    """Catches one row per paragraph, which splits a short record into fragments."""
-    record_id = store.write_record(
-        RecordDraft(
-            entry_type="note",
-            work_status="closed",
-            title="Short",
-            body="one two\n\nthree four\n\n\nfive",
-        )
-    ).record.id
+def test_short_paragraphs_are_packed_into_one_chunk(store: EntryStore) -> None:
+    """Catches one row per paragraph, which splits a short entry into fragments."""
+    entry_id = _note(store, "Short", "one two\n\nthree four\n\n\nfive")
     engine = _Engine()
 
-    vector.embed_records(store, engine, [record_id])
+    entry_search.embed_entries(store, engine, [entry_id])
 
     assert engine.calls == ["Short\n\none two\n\nthree four\n\nfive"]
 
 
-def test_second_embed_run_writes_nothing(store: Store) -> None:
-    """Catches a rerun opening an empty transaction (DOLT_COMMIT raises 'nothing to commit')
-    or writing duplicate rows."""
-    record_id = store.write_record(
-        RecordDraft(entry_type="note", work_status="closed", title="Once", body="text")
-    ).record.id
+def test_second_embed_run_writes_nothing_and_a_new_version_is_embedded(store: EntryStore) -> None:
+    """Catches a rerun opening an empty transaction (DOLT_COMMIT raises 'nothing to commit'),
+    and an edited entry staying findable only by what its old version said."""
+    entry_id = _note(store, "Once", "text")
     engine = _Engine()
-    vector.embed_records(store, engine, [record_id])
+    entry_search.embed_entries(store, engine, [entry_id])
 
-    assert vector.embed_records(store, engine, [record_id]) == 0
-    assert _chunk_rows(store, record_id) == [0]
+    assert entry_search.embed_entries(store, engine, [entry_id]) == 0
+    store.write_entry(EntryDraft(id=entry_id, base_version=1, reason="edit", body="new text"))
+    assert entry_search.unembedded_ids(store, MODEL_ID) == [entry_id]
+    assert entry_search.embed_entries(store, engine, [entry_id]) == 1
+    assert _chunk_rows(store, entry_id) == [(1, 0), (2, 0)]
 
 
-def test_upsert_refuses_a_wrong_width_vector_and_round_trips_a_vector(store: Store) -> None:
+def test_a_wrong_width_vector_is_refused_and_a_vector_round_trips(store: EntryStore) -> None:
     """Catches a mis-serialized vector being stored: the vector read back through the
     ranker's own statement must sit at cosine 1 from itself, with its chunk count."""
-    record_id = store.write_record(
-        RecordDraft(entry_type="note", work_status="closed", title="Vec")
-    ).record.id
-    with pytest.raises(ValidationError):
-        store.upsert_chunk_embeddings([(record_id, 0, MODEL_ID, [0.0] * 383)])
 
-    store.upsert_chunk_embeddings(
-        [(record_id, 0, MODEL_ID, basis(5)), (record_id, 1, MODEL_ID, basis(6))]
+    class Narrow(_Engine):
+        def embed(self, text: str) -> Sequence[float]:
+            return [0.0] * 383
+
+    entry_id = _note(store, "Vec", "first paragraph")
+    with pytest.raises(ValidationError, match="383 components"):
+        entry_search.embed_entries(store, Narrow(), [entry_id])
+
+    class Fixed(_Engine):
+        def embed(self, text: str) -> Sequence[float]:
+            return basis(6)
+
+    entry_search.embed_entries(store, Fixed(), [entry_id])
+    ranked = entry_search.run_entry_search(
+        store,
+        entry_search.EntryFilters(),
+        query="",
+        query_vector=basis(6),
+        model_id=MODEL_ID,
+        equivalence={},
     )
-    rows = dolt.read_result_sets(
-        store.db_path, [vector.nearest_statement(basis(6), MODEL_ID, "1 = 1")]
-    )[0]
 
-    assert vector.parse_nearest(rows, depth=10) == [
-        vector.VectorMatch(record_id=record_id, cosine=1.0, chunk_index=1, chunk_count=2)
-    ]
+    assert ranked.vector == {
+        entry_id: vector.VectorMatch(record_id=entry_id, cosine=1.0, chunk_index=0, chunk_count=1)
+    }
 
 
 def test_engine_status_reports_missing_model_without_downloading(
@@ -184,34 +185,3 @@ def test_a_whitespace_free_run_over_the_limit_is_split_by_characters(
     chunks = vector.chunk_texts(_CharEngine(), "T", "abcdefghij")
 
     assert chunks == ["T\n\nab", "T\n\ncde", "T\n\nfg", "T\n\nhij"]
-
-
-def test_parse_nearest_with_no_depth_returns_nothing() -> None:
-    """labbook-79y.6 item 12. Catches the depth check after the append, which returns one
-    match at depth 0 and every match at a negative depth."""
-    rows = [{"record_id": "rec-a", "distance": 0.1, "chunk_index": 0, "chunks": 1}]
-
-    assert vector.parse_nearest(rows, 0) == []
-    assert vector.parse_nearest(rows, -1) == []
-
-
-def test_the_unembedded_count_is_nonzero_and_scoped_to_a_project(store: Store) -> None:
-    """labbook-79y.6 items 12 and 18. Catches a count that is always 0, and a project's
-    state line reporting another project's unembedded records."""
-    p = store.write_project("p", "host", [], []).project.id
-    q = store.write_project("q", "host", [], []).project.id
-    store.write_record(
-        RecordDraft(entry_type="note", work_status="closed", title="In p", projects=[p])
-    )
-    store.write_record(
-        RecordDraft(entry_type="note", work_status="closed", title="In q", projects=[q])
-    )
-    store.write_record(
-        RecordDraft(entry_type="note", work_status="closed", title="Also q", projects=[q])
-    )
-
-    def count(projects: list[str]) -> int:
-        statement = vector.unembedded_statement(MODEL_ID, projects)
-        return int(dolt.read_rows(store.db_path, statement)[0]["n"])
-
-    assert (count([]), count([p]), count([q])) == (3, 1, 2)

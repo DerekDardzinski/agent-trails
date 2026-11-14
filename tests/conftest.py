@@ -9,8 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from trails.entry_store import EntryStore
-from trails.store import Store, open_store
+from trails.entry_store import EntryStore, open_entry_store
 
 
 def _git(path: Path, *args: str) -> str:
@@ -24,7 +23,7 @@ def _git(path: Path, *args: str) -> str:
 
 
 @pytest.fixture(scope="session")
-def initialised_db(tmp_path_factory: pytest.TempPathFactory) -> Path:
+def initialised_entry_db(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """One initialised database, created once for the whole session.
 
     `dolt init` plus the CREATE TABLEs is several subprocess round trips; paying it per test
@@ -32,45 +31,22 @@ def initialised_db(tmp_path_factory: pytest.TempPathFactory) -> Path:
     because several assertions count rows and would otherwise see each other's writes.
     """
     template = tmp_path_factory.mktemp("template") / "db"
-    open_store(template)
-    return template
-
-
-@pytest.fixture
-def record_store(initialised_db: Path, tmp_path: Path) -> Iterator[Store]:
-    """The old record store, for its own tests until it is deleted."""
-    destination = tmp_path / "db"
-    shutil.copytree(initialised_db, destination)
-    yield open_store(destination)
-
-
-@pytest.fixture
-def store(initialised_entry_db: Path, tmp_path: Path) -> Iterator[EntryStore]:
-    """The store every operation opens."""
-    from trails.entry_store import open_entry_store
-
-    destination = tmp_path / "db"
-    shutil.copytree(initialised_entry_db, destination)
-    yield open_entry_store(destination)
-
-
-@pytest.fixture(scope="session")
-def initialised_entry_db(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """One database with the entry schema, created once; tests get a copy (see `entries`)."""
-    from trails.entry_store import open_entry_store
-
-    template = tmp_path_factory.mktemp("entry-template") / "db"
     open_entry_store(template)
     return template
 
 
 @pytest.fixture
-def entries(initialised_entry_db: Path, tmp_path: Path) -> Iterator[EntryStore]:
-    from trails.entry_store import open_entry_store
-
-    destination = tmp_path / "entry-db"
+def store(initialised_entry_db: Path, tmp_path: Path) -> Iterator[EntryStore]:
+    """The store every operation opens."""
+    destination = tmp_path / "db"
     shutil.copytree(initialised_entry_db, destination)
     yield open_entry_store(destination)
+
+
+@pytest.fixture
+def entries(store: EntryStore) -> EntryStore:
+    """The same store as `store`, under the name the store-level tests use."""
+    return store
 
 
 @pytest.fixture(autouse=True)
