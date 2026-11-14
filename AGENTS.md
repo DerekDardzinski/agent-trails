@@ -67,7 +67,7 @@ and a reason; nothing updates or deletes a version, an event or a comment. `reti
 note, preference or skill no longer true; the dreamer's `merge` retires one as a duplicate of
 another of the same kind. There is no deletion operation: removing data from history requires
 a manual database-history rewrite by the user. Current project paths are metadata edited in
-place.
+place; a removed path leaves a `project_path_removal` row naming who removed it.
 
 A project has a generated `prj-` id, unique human name, provenance, current paths and optional
 append-only framing. `register_project` creates, or returns an identical existing project
@@ -198,8 +198,9 @@ digest is flagged) and returns field, line and detector, never the matched text.
 - **A JSON column arrives already decoded.** Do not parse it again.
 - **There is no client-side parameter binding.** `dolt.sql_literal` builds literals and
   `store._bind` substitutes `?` positionally. Search terms are always bound.
-- **Every text column is `COLLATE utf8mb4_0900_ai_ci`, except `project_path.path`**, which is
-  binary so that two paths differing only in case are two paths. The default utf8mb4_0900_bin makes
+- **Every text column is `COLLATE utf8mb4_0900_ai_ci`, except `project_path.path` and
+  `project_path_removal.path`**, which are binary so that two paths differing only in case are
+  two paths. The default utf8mb4_0900_bin makes
   FULLTEXT MATCH and LIKE case-sensitive. `SHOW FULL COLUMNS` reports a column collation only
   inside its `Type` field; `information_schema.columns.COLLATION_NAME` reports it directly.
 - **Dolt FULLTEXT never matches tokens under 3 characters.**

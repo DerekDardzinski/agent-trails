@@ -252,6 +252,17 @@ SCHEMA: tuple[str, ...] = (
         set_at              DATETIME(6) NOT NULL,
         PRIMARY KEY (project_id, path)
     )""",
+    # A removed path leaves the current-path table, so its removal is an event row of its own:
+    # without it, no table would say which harness and session removed a path.
+    f"""CREATE TABLE project_path_removal (
+        project_id VARCHAR(32) {_TEXT} NOT NULL,
+        path       VARCHAR({PATH_CHARS}) COLLATE utf8mb4_0900_bin NOT NULL,
+        author     VARCHAR(120) {_TEXT} NOT NULL,
+        harness    VARCHAR({NAME_CHARS}) {_TEXT} NOT NULL,
+        session_id VARCHAR({SESSION_CHARS}) {_TEXT},
+        removed_at DATETIME(6) NOT NULL,
+        PRIMARY KEY (project_id, path, removed_at)
+    )""",
     f"""CREATE TABLE project_framing_version (
         project_id VARCHAR(32) {_TEXT} NOT NULL,
         version    INT NOT NULL,

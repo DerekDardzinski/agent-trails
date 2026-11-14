@@ -100,8 +100,8 @@ def test_prime_preference_section_stays_under_the_cap_when_titles_alone_pass_it(
     assert all(not item.full for item in result.preferences)
     assert result.preferences_omitted == 6 - len(shown) > 0
     assert (
-        f'{result.preferences_omitted} more preferences not listed: search(kinds=["preference"])'
-        in section
+        f"{result.preferences_omitted} more preferences not listed: "
+        'search(kinds=["preference"], unscoped=true)' in section
     )
     assert result.preference_cap_hit is True
     assert f"conflict: {ids[0]} contradicts {ids[1]}" in section
@@ -114,18 +114,58 @@ def test_prime_preference_conflicts_are_cut_at_the_cap_with_the_call_that_lists_
     preference has been cut, with no way to list the conflicts left out."""
     from trails.ops import prime as prime_module
 
-    monkeypatch.setattr(prime_module, "PREFERENCE_CAP", 330)
+    monkeypatch.setattr(prime_module, "PREFERENCE_CAP", 345)
     ids = [new(store, "preference", f"r{n}") for n in range(8)]
     for n in range(0, 8, 2):
         store.add_entry_link(ids[n], "contradicts", ids[n + 1])
     result = run(store, prime)
     section = "\n".join(preference_section(result))
-    assert len(section) <= 330
+    assert len(section) <= 345
     assert (len(result.preference_conflicts), result.preference_conflicts_omitted) == (1, 3)
     assert section.endswith(
         f"{result.preference_conflicts_omitted} more conflicts not listed: "
-        'search(kinds=["preference"], contradicted=true)'
+        'search(kinds=["preference"], contradicted=true, unscoped=true)'
     )
+
+
+def test_prime_overflow_call_lists_the_section_and_nothing_outside_it(
+    store: EntryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Silent failure caught (R6 review): the call printed for preferences prime left out
+    returned the project's preference without the omitted global ones, or returned another
+    project's preference that prime never considered. Case from the review: one alpha, one
+    beta and six global preferences, with the cap lowered to 300."""
+    from trails.ops import prime as prime_module
+
+    monkeypatch.setattr(prime_module, "PREFERENCE_CAP", 300)
+    store.write_project("alpha", host="h", paths=[], remove_paths=[])
+    store.write_project("beta", host="h", paths=[], remove_paths=[])
+    alpha = new(store, "preference", "alpha rule " + "a" * 40, projects=["alpha"])
+    beta = new(store, "preference", "beta rule " + "b" * 40, projects=["beta"])
+    globals_ = [new(store, "preference", f"global {n} " + "g" * 40) for n in range(6)]
+    alpha_id = store.resolve_projects(["alpha"])[0].id
+
+    result = run(store, prime, project="alpha")
+    section = "\n".join(preference_section(result))
+    assert result.preferences_omitted > 0
+    assert section.count("search(") == 1
+    assert (
+        f'more preferences not listed: search(kinds=["preference"], projects=["{alpha_id}"], '
+        "unscoped=true)" in section
+    )
+    listed = run(store, search, kinds=["preference"], projects=[alpha_id], unscoped=True, limit=50)
+    assert sorted(hit.id for hit in listed.hits) == sorted([alpha, *globals_])
+    assert beta not in {hit.id for hit in listed.hits}
+
+
+def test_search_unscoped_keeps_entries_in_no_project(store: EntryStore) -> None:
+    """Silent failure caught: the unscoped filter returning project entries, or prime's
+    unscoped count printed with no call that lists those entries."""
+    store.write_project("alpha", host="h", paths=[], remove_paths=[])
+    new(store, "note", "scoped", projects=["alpha"])
+    loose = new(store, "note", "loose")
+    assert [hit.id for hit in run(store, search, unscoped=True).hits] == [loose]
+    assert "unscoped entries: 1: search(unscoped=true)" in run(store, prime).render_text()
 
 
 def test_prime_index_lists_projects_and_counts_unscoped(store: EntryStore) -> None:

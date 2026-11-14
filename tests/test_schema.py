@@ -21,6 +21,7 @@ TABLES = {
     "project_framing_embedding",
     "project_framing_version",
     "project_path",
+    "project_path_removal",
     "retirement",
     "session",
     "tag_alias",
@@ -47,6 +48,7 @@ def test_every_event_row_records_its_harness(store: EntryStore) -> None:
         "comment",
         "retirement",
         "entry_project_event",
+        "project_path_removal",
     ):
         columns = {str(row["Field"]) for row in store.query(f"SHOW COLUMNS FROM {table}")}
         assert {"author", "harness", "session_id"} <= columns, table
@@ -62,7 +64,7 @@ def test_every_non_path_text_column_is_case_and_accent_insensitive(store: EntryS
     binary = sorted(
         (str(row["t"]), str(row["c"])) for row in rows if row["k"] != "utf8mb4_0900_ai_ci"
     )
-    assert binary == [("project_path", "path")]
+    assert binary == [("project_path", "path"), ("project_path_removal", "path")]
     assert {str(row["t"]) for row in rows} == TABLES
 
 

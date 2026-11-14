@@ -27,6 +27,15 @@ async def search(  # noqa: PLR0917 — public query contract
     projects: Annotated[
         list[str], Field(description="Keep entries in any of these project ids or names.")
     ] = [],  # noqa: B006
+    unscoped: Annotated[
+        bool,
+        Field(
+            description=(
+                "Keep entries in no project, such as global preferences, alongside any "
+                "projects named."
+            )
+        ),
+    ] = False,
     tags: Annotated[
         list[str], Field(description="Keep entries carrying every tag, or an alias of it.")
     ] = [],  # noqa: B006
@@ -72,6 +81,7 @@ async def search(  # noqa: PLR0917 — public query contract
     filters = entry_search.EntryFilters(
         kinds=kinds,
         projects=[ref.id for ref in refs],
+        unscoped=unscoped,
         tags=tags,
         status=status,
         open_comments=open_comments,
@@ -126,7 +136,9 @@ async def search(  # noqa: PLR0917 — public query contract
         )
     project_hits: list[ProjectHit] = []
     project_total = 0
-    if query.strip() and not (kinds or projects or tags or status or open_comments or contradicted):
+    if query.strip() and not (
+        kinds or projects or unscoped or tags or status or open_comments or contradicted
+    ):
         project_ranked = retrieval.run_project_search(
             store, query=query, query_vector=query_vector, model_id=model_id
         )

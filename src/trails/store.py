@@ -513,6 +513,20 @@ class Store:
                 )
                 for item in changed
             ]
+            statements += [
+                _insert(
+                    "project_path_removal",
+                    {
+                        "project_id": project_id,
+                        "path": path,
+                        "author": current_author(),
+                        "harness": provenance.harness,
+                        "session_id": provenance.session_id,
+                        "removed_at": moment,
+                    },
+                )
+                for path in removed
+            ]
             if written_framing is not None:
                 statements.append(
                     _insert(

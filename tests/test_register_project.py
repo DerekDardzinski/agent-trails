@@ -294,9 +294,9 @@ def test_a_registration_refusal_names_no_other_operation(store: Store) -> None:
 
 
 def test_project_writes_record_the_harness_and_session(store: Store) -> None:
-    """Silent failure caught: a project, path, framing or alias write with no trace of the
-    harness and session that made it, although every entry write records them (the
-    philosophy's opening: every write records its agent tool and session)."""
+    """Silent failure caught: a project, path, path removal, framing or alias write with no
+    trace of the harness and session that made it, although every entry write records them
+    (the philosophy's opening: every write records its agent tool and session)."""
     from trails import sessions
 
     token = sessions.CLIENT_NAME.set("claude-code")
@@ -308,13 +308,28 @@ def test_project_writes_record_the_harness_and_session(store: Store) -> None:
             framing=ProjectFramingDraft(title="Purpose"),
         )
         store.write_tag_alias("ml", "machine-learning")
+        _call(
+            store,
+            set_paths,
+            project=first.project.id,
+            paths=[ProjectPath(path="s3://bucket/b")],
+            remove_paths=["s3://bucket/a"],
+        )
     finally:
         sessions.CLIENT_NAME.reset(token)
     rows = [
         store.query(f"SELECT harness FROM {table}")[0]["harness"]
-        for table in ("project", "project_path", "project_framing_version", "tag_alias")
+        for table in (
+            "project",
+            "project_path",
+            "project_framing_version",
+            "tag_alias",
+            "project_path_removal",
+        )
     ]
-    assert rows == ["claude"] * 4
+    assert rows == ["claude"] * 5
+    removal = store.query("SELECT project_id, path FROM project_path_removal")
+    assert removal == [{"project_id": first.project.id, "path": "s3://bucket/a"}]
     assert first.project.name == "Attributed"
 
 

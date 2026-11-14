@@ -43,6 +43,7 @@ class EntryFilters(BaseModel):
 
     kinds: list[Kind] = []
     projects: list[str] = []
+    unscoped: bool = False
     tags: list[str] = []
     status: str | None = None
     open_comments: bool = False
@@ -277,6 +278,13 @@ CONTRADICTED_CONDITION = (
 )
 
 
+NO_MEMBERSHIP_CONDITION = (
+    "NOT EXISTS (SELECT 1 FROM entry_project_event m WHERE m.entry_id = e.id AND m.action = "
+    "'add' AND NOT EXISTS (SELECT 1 FROM entry_project_event later WHERE later.entry_id = "
+    "m.entry_id AND later.project_id = m.project_id AND later.sequence > m.sequence))"
+)
+
+
 def membership_condition(project_ids: Sequence[str]) -> str:
     ids = ", ".join(_lit(item) for item in project_ids)
     return (
@@ -301,8 +309,13 @@ def _where(filters: EntryFilters, equivalence: dict[str, tuple[str, ...]]) -> st
             "EXISTS (SELECT 1 FROM version_tag g WHERE g.entry_id = e.id AND g.version = "
             f"x.version AND g.tag IN ({forms}))"
         )
-    if filters.projects:
+    # The membership filter is one set: the named projects, plus "no project" when unscoped.
+    if filters.projects and filters.unscoped:
+        clauses.append(f"({membership_condition(filters.projects)} OR {NO_MEMBERSHIP_CONDITION})")
+    elif filters.projects:
         clauses.append(membership_condition(filters.projects))
+    elif filters.unscoped:
+        clauses.append(NO_MEMBERSHIP_CONDITION)
     if filters.status is not None:
         clauses.append(status_condition(filters.status))
     if filters.open_comments:

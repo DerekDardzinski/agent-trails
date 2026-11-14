@@ -7,7 +7,7 @@ from typing import Annotated, NamedTuple
 
 from pydantic import Field
 
-from trails.entry_search import membership_condition
+from trails.entry_search import NO_MEMBERSHIP_CONDITION, membership_condition
 from trails.entry_store import EntryStore
 from trails.errors import StoreUnavailableError
 from trails.models import Entry
@@ -32,11 +32,7 @@ LIST_LIMIT = 20
 
 OPERATION = Operation(toolset="agent", read_only=True, destructive=False, idempotent=True)
 
-_NO_MEMBERSHIP = (
-    "NOT EXISTS (SELECT 1 FROM entry_project_event m WHERE m.entry_id = e.id AND m.action = "
-    "'add' AND NOT EXISTS (SELECT 1 FROM entry_project_event later WHERE later.entry_id = "
-    "m.entry_id AND later.project_id = m.project_id AND later.sequence > m.sequence))"
-)
+_NO_MEMBERSHIP = NO_MEMBERSHIP_CONDITION
 _NOT_RETIRED = "NOT EXISTS (SELECT 1 FROM retirement r WHERE r.entry_id = e.id)"
 
 

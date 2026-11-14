@@ -549,7 +549,10 @@ class PrimeResult(RenderedResult):
                 + (f"  {row.framing_title}" if row.framing_title else "")
                 for row in self.projects
             ]
-            lines.append(f"unscoped entries: {self.unscoped}")
+            lines.append(
+                f"unscoped entries: {self.unscoped}"
+                + (f": {call('search', unscoped=True)}" if self.unscoped else "")
+            )
             hints = [call("prime", project=self.projects[0].id)] if self.projects else []
             hints.append(call("ready"))
             lines.append(next_line(hints))
@@ -641,9 +644,10 @@ def preference_lines(
 ) -> list[str]:
     """The one builder of the preference section, used both to size it and to print it.
 
-    With a project, the section holds that project's preferences and the global ones, so the
-    calls for what it left out are the project's search and the whole-store search."""
-    scope = {"projects": [project]} if project else {}
+    The section holds the project's preferences, if a project is named, and the global ones,
+    so the call for what it left out searches exactly those: the project, plus no project."""
+    scope: dict[str, object] = {"projects": [project]} if project else {}
+    scope["unscoped"] = True
     if not (preferences or conflicts or omitted or conflicts_omitted):
         return []
     lines = ["preferences:"]
@@ -654,18 +658,11 @@ def preference_lines(
             lines.append(preference_title_line(item.id, item.scope, item.title))
     if omitted:
         listed = call("search", kinds=["preference"], **scope)
-        if project:
-            listed += f" (this project's) · {call('search', kinds=['preference'])} (all)"
         lines.append(f"{omitted} more preferences not listed: {listed}")
     if cap_hit:
         lines.append(PREFERENCE_CAP_WARNING)
     lines += [f"conflict: {item}" for item in conflicts]
     if conflicts_omitted:
         listed = call("search", kinds=["preference"], contradicted=True, **scope)
-        if project:
-            listed += (
-                f" (this project's) · {call('search', kinds=['preference'], contradicted=True)} "
-                "(all)"
-            )
         lines.append(f"{conflicts_omitted} more conflicts not listed: {listed}")
     return lines
