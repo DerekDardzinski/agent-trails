@@ -1667,6 +1667,7 @@ class EntryStore(Store):
                 unchanged_add=[ref for ref in add_refs if ref.id in current],
                 unchanged_remove=[ref for ref in remove_refs if ref.id not in current],
                 projects=resulting,
+                warnings=_secret_warnings({"reason": normal_reason}) if statements else [],
             )
 
     # ------------------------------------------------------------------ comments

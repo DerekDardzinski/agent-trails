@@ -3,10 +3,11 @@
 NOTE: no `from __future__ import annotations` in this package. See `ops/__init__.py`.
 """
 
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from trails.models import CaptureSummary, MovedLink, ProjectPath, ProjectRef
 from trails.ops.types import RenderedResult
@@ -269,6 +270,7 @@ class ShowResult(RenderedResult):
     projects: list[ShownProject]
     order: list[str]
     missing: list[str]
+    warnings: list[str] = Field(default_factory=list)
 
     def render_text(self) -> str:
         blocks: list[str] = []
@@ -284,6 +286,8 @@ class ShowResult(RenderedResult):
                 blocks.append(_project_text(item))
         if self.missing:
             blocks.append("not found: " + ", ".join(self.missing))
+        if self.warnings:
+            blocks.append("\n".join(_warnings(self.warnings)))
         hints = _show_hints([by_id[item] for item in self.order if item in by_id])
         if hints:
             blocks.append(next_line(hints))
@@ -484,6 +488,9 @@ class PrimeResult(RenderedResult):
     preferences: list[PrimePreference]
     preference_cap_hit: bool
     preference_conflicts: list[str]
+    # Preferences and conflicts left out entirely, when even their title lines pass the cap.
+    preferences_omitted: int = 0
+    preference_conflicts_omitted: int = 0
     goals: list[PrimeGoal]
     goal_total: int
     ready: int
@@ -539,7 +546,10 @@ class PrimeResult(RenderedResult):
             )
             lines += [f"  {item}" for item in self.contradicted]
             if self.contradicted_total > len(self.contradicted):
-                lines.append("  more: " + call("search", kinds=["claim"], projects=[project.id]))
+                lines.append(
+                    "  more: "
+                    + call("search", kinds=["claim"], projects=[project.id], contradicted=True)
+                )
         if self.counts:
             lines.append("counts:")
             for kind, states in self.counts.items():
@@ -574,15 +584,42 @@ class RetireResult(RenderedResult):
 
 def preference_section(result: PrimeResult) -> list[str]:
     """The preference section's lines, exactly as counted against the cap (D24)."""
-    if not (result.preferences or result.preference_conflicts):
+    return preference_lines(
+        result.preferences,
+        cap_hit=result.preference_cap_hit,
+        conflicts=result.preference_conflicts,
+        omitted=result.preferences_omitted,
+        conflicts_omitted=result.preference_conflicts_omitted,
+    )
+
+
+def preference_lines(
+    preferences: Sequence[PrimePreference],
+    *,
+    cap_hit: bool,
+    conflicts: Sequence[str],
+    omitted: int = 0,
+    conflicts_omitted: int = 0,
+) -> list[str]:
+    """The one builder of the preference section, used both to size it and to print it."""
+    if not (preferences or conflicts or omitted or conflicts_omitted):
         return []
     lines = ["preferences:"]
-    for item in result.preferences:
+    for item in preferences:
         if item.full:
             lines += preference_full_lines(item.id, item.scope, item.title, item.body)
         else:
             lines.append(preference_title_line(item.id, item.scope, item.title))
-    if result.preference_cap_hit:
+    if omitted:
+        lines.append(
+            f"{omitted} more preferences not listed: {call('search', kinds=['preference'])}"
+        )
+    if cap_hit:
         lines.append(PREFERENCE_CAP_WARNING)
-    lines += [f"conflict: {item}" for item in result.preference_conflicts]
+    lines += [f"conflict: {item}" for item in conflicts]
+    if conflicts_omitted:
+        lines.append(
+            f"{conflicts_omitted} more conflicts not listed: "
+            + call("search", kinds=["preference"], contradicted=True)
+        )
     return lines

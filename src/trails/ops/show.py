@@ -12,6 +12,7 @@ from trails.ops import context
 from trails.ops._common import shown_entries
 from trails.ops._entry_types import ShownProject, ShowResult
 from trails.ops._marks import Operation
+from trails.render import call
 from trails.vocab import PROJECT_ID_PATTERN
 
 OPERATION = Operation(toolset="agent", read_only=True, destructive=False, idempotent=True)
@@ -74,7 +75,17 @@ async def show(
             )
         )
     present = {item.id for item in entries} | {item.id for item in projects}
+    warnings: list[str] = []
+    if since_comment is not None:
+        on = store.get_comment(since_comment).entry_id
+        if on not in {item.id for item in entries}:
+            warnings.append(
+                f"since_comment {since_comment} is on {on}, which this call does not show, so "
+                f"no changes are listed; read them with "
+                f"{call('show', on, since_comment=since_comment)}"
+            )
     return ShowResult(
+        warnings=warnings,
         entries=entries,
         projects=projects,
         order=[item for item in ids if item in present],

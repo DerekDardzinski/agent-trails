@@ -28,7 +28,7 @@ async def ready(
 
     Use instead: show, for one task's full state; search(status=...), to list tasks by state.
 
-    Returns: ready tasks by priority then age, each with its claim if one is held; entries ready to close; parents with a failed child that need a decision; and entries whose dependency was dropped or failed and need replanning.
+    Returns: ready tasks by priority then age, each with its claim if one is held; entries ready to close; parents with a failed child that need a decision; and entries whose dependency was dropped, failed or superseded and need replanning.
     """
     if limit < 1:
         raise UsageError(f"limit must be at least 1, not {limit}")

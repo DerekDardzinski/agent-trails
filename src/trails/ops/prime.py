@@ -3,7 +3,7 @@
 NOTE: no `from __future__ import annotations` in this package. See `ops/__init__.py`.
 """
 
-from typing import Annotated
+from typing import Annotated, NamedTuple
 
 from pydantic import Field
 
@@ -18,15 +18,10 @@ from trails.ops._entry_types import (
     PrimeProjectRow,
     PrimeResult,
     ShownProject,
+    preference_lines,
 )
 from trails.ops._marks import Operation
-from trails.present import (
-    PREFERENCE_CAP,
-    PREFERENCE_CAP_WARNING,
-    node_state,
-    preference_full_lines,
-    preference_title_line,
-)
+from trails.present import PREFERENCE_CAP, node_state
 from trails.vocab import KINDS, WORK_KINDS
 
 PROJECT_PAGE = 100
@@ -63,7 +58,7 @@ async def prime(
         ref = store.resolve_project(project) if project is not None else None
     except StoreUnavailableError as exc:
         return _unavailable(str(exc))
-    preferences, cap_hit, conflicts = _preferences(store, ref.id if ref else None)
+    found_preferences = _preferences(store, ref.id if ref else None)
     graph = store.task_graph()
     if ref is None:
         listed = store.list_projects()
@@ -91,9 +86,11 @@ async def prime(
             projects=rows,
             project_total=len(listed),
             unscoped=int(unscoped[0]["n"]),
-            preferences=preferences,
-            preference_cap_hit=cap_hit,
-            preference_conflicts=conflicts,
+            preferences=found_preferences.preferences,
+            preference_cap_hit=found_preferences.cap_hit,
+            preference_conflicts=found_preferences.conflicts,
+            preferences_omitted=found_preferences.omitted,
+            preference_conflicts_omitted=found_preferences.conflicts_omitted,
             goals=[],
             goal_total=0,
             ready=0,
@@ -164,9 +161,11 @@ async def prime(
         projects=[],
         project_total=0,
         unscoped=0,
-        preferences=preferences,
-        preference_cap_hit=cap_hit,
-        preference_conflicts=conflicts,
+        preferences=found_preferences.preferences,
+        preference_cap_hit=found_preferences.cap_hit,
+        preference_conflicts=found_preferences.conflicts,
+        preferences_omitted=found_preferences.omitted,
+        preference_conflicts_omitted=found_preferences.conflicts_omitted,
         goals=goals[:LIST_LIMIT],
         goal_total=len(goals),
         ready=len(graph.ready(ref.id)),
@@ -178,9 +177,15 @@ async def prime(
     )
 
 
-def _preferences(
-    store: EntryStore, project_id: str | None
-) -> tuple[list[PrimePreference], bool, list[str]]:
+class PreferenceSection(NamedTuple):
+    preferences: list[PrimePreference]
+    cap_hit: bool
+    conflicts: list[str]
+    omitted: int
+    conflicts_omitted: int
+
+
+def _preferences(store: EntryStore, project_id: str | None) -> PreferenceSection:
     """Project preferences first, then global ones, each newest version first, in full until
     the next would push the section past the cap; the rest as title lines (D17, D24)."""
     rows = store.query(
@@ -216,34 +221,52 @@ def _preferences(
         if link.source_id in current
     ]
 
-    def size(lines: list[str]) -> int:
-        return len("\n".join(lines))
-
-    titles = [preference_title_line(e.id, scope, e.current.title) for e, scope in ordered]
-    conflict_lines = [f"conflict: {item}" for item in conflicts]
-    full_count = 0
-    for count in range(len(ordered), -1, -1):
-        lines = ["preferences:"]
-        for entry, scope in ordered[:count]:
-            lines += preference_full_lines(entry.id, scope, entry.current.title, entry.current.body)
-        lines += titles[count:]
-        if count < len(ordered):
-            lines.append(PREFERENCE_CAP_WARNING)
-        lines += conflict_lines
-        if size(lines) <= PREFERENCE_CAP:
-            full_count = count
-            break
-    preferences = [
-        PrimePreference(
-            id=entry.id,
-            title=entry.current.title,
-            body=entry.current.body if position < full_count else "",
-            scope=scope,
-            full=position < full_count,
+    def section(full: int, titles: int, kept_conflicts: int) -> PreferenceSection:
+        shown = [
+            PrimePreference(
+                id=entry.id,
+                title=entry.current.title,
+                body=entry.current.body if position < full else "",
+                scope=scope,
+                full=position < full,
+            )
+            for position, (entry, scope) in enumerate(ordered[: full + titles])
+        ]
+        return PreferenceSection(
+            preferences=shown,
+            cap_hit=full < len(ordered) or kept_conflicts < len(conflicts),
+            conflicts=conflicts[:kept_conflicts],
+            omitted=len(ordered) - full - titles,
+            conflicts_omitted=len(conflicts) - kept_conflicts,
         )
-        for position, (entry, scope) in enumerate(ordered)
-    ]
-    return preferences, full_count < len(ordered), conflicts
+
+    def fits(candidate: PreferenceSection) -> bool:
+        lines = preference_lines(
+            candidate.preferences,
+            cap_hit=candidate.cap_hit,
+            conflicts=candidate.conflicts,
+            omitted=candidate.omitted,
+            conflicts_omitted=candidate.conflicts_omitted,
+        )
+        return len("\n".join(lines)) <= PREFERENCE_CAP
+
+    # Most full texts first, the rest as title lines. When even every title line passes the
+    # cap, keep as many title lines as fit, then as many conflicts as fit; the rest are counted
+    # with the search call that lists them, so the section never passes the cap (D24).
+    total = len(ordered)
+    for full in range(total, -1, -1):
+        candidate = section(full, total - full, len(conflicts))
+        if fits(candidate):
+            return candidate
+    for titles in range(total, -1, -1):
+        candidate = section(0, titles, len(conflicts))
+        if fits(candidate):
+            return candidate
+    for kept in range(len(conflicts), -1, -1):
+        candidate = section(0, 0, kept)
+        if fits(candidate):
+            return candidate
+    return section(0, 0, 0)  # pragma: no cover - the two count lines alone fit the cap
 
 
 def _unavailable(detail: str) -> PrimeResult:

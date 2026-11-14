@@ -42,6 +42,15 @@ async def search(  # noqa: PLR0917 — public query contract
     open_comments: Annotated[
         bool, Field(description="Keep only entries with a comment still waiting for a response.")
     ] = False,
+    contradicted: Annotated[
+        bool,
+        Field(
+            description=(
+                "Keep only entries that a current entry contradicts, such as the claims prime "
+                "counts as contradicted."
+            )
+        ),
+    ] = False,
     include_retired: Annotated[bool, Field(description="Also return retired entries.")] = False,
     limit: Annotated[int, Field(description="Most entry hits to return.")] = 10,
     offset: Annotated[int, Field(description="Entry hits to skip.")] = 0,
@@ -66,6 +75,7 @@ async def search(  # noqa: PLR0917 — public query contract
         tags=tags,
         status=status,
         open_comments=open_comments,
+        contradicted=contradicted,
         include_retired=include_retired,
     )
     engine = engine_seam.build_engine()
@@ -117,7 +127,7 @@ async def search(  # noqa: PLR0917 — public query contract
         )
     project_hits: list[ProjectHit] = []
     project_total = 0
-    if query.strip() and not (kinds or projects or tags or status or open_comments):
+    if query.strip() and not (kinds or projects or tags or status or open_comments or contradicted):
         project_ranked = retrieval.run_project_search(
             store, query=query, query_vector=query_vector, model_id=model_id
         )

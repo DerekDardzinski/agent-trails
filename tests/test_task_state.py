@@ -32,6 +32,22 @@ def test_dependent_of_a_dropped_task_keeps_waiting_and_needs_replanning(
     assert graph.needs_replanning() == [second]
 
 
+def test_a_waits_on_added_after_its_target_was_superseded_needs_replanning(
+    entries: EntryStore,
+) -> None:
+    """Silent failure caught: a task that waits on an entry already closed `superseded` waits
+    forever with nothing flagging it. The supersede moved only the links that existed then."""
+    old = make(entries, "task", "old parser")
+    new = make(entries, "task", "new parser")
+    entries.close(old, "superseded", "rewritten", by=[new])
+    late = make(entries, "task", "use parser")
+    entries.add_entry_link(late, "waits_on", old)
+    graph = entries.task_graph()
+    assert graph.is_ready(late) is False
+    assert graph.needs_replanning() == [late]
+    assert graph.replanning_causes(late) == [old]
+
+
 def test_parent_with_open_child_is_not_ready_and_a_block_on_parent_holds_the_child(
     entries: EntryStore,
 ) -> None:

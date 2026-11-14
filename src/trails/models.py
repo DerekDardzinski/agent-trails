@@ -151,6 +151,7 @@ class SetProjectsOutcome(BaseModel):
     unchanged_add: list[ProjectRef]
     unchanged_remove: list[ProjectRef]
     projects: list[ProjectRef]
+    warnings: list[str] = Field(default_factory=list)
 
 
 # ------------------------------------------------------------------ the entry model (redesign)

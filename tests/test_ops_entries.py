@@ -62,6 +62,54 @@ def test_prime_prints_project_preferences_first_and_warns_at_the_cap(store: Entr
     assert result.render_text().startswith("preferences:\n[" + project_pref)
 
 
+def test_prime_preference_section_stays_under_the_cap_when_titles_alone_pass_it(
+    store: EntryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review advisory note. Silent failure caught: once the title lines alone pass the cap
+    (over 100 preferences at 10,000 characters), every one was still printed, so the
+    session-start page grew without bound against D24. The cap is lowered to 300 so a handful
+    of preferences reach that state."""
+    from trails.ops import prime as prime_module
+
+    monkeypatch.setattr(prime_module, "PREFERENCE_CAP", 300)
+    ids = [new(store, "preference", f"rule {n} " + "x" * 40) for n in range(6)]
+    store.add_entry_link(ids[0], "contradicts", ids[1])
+    result = run(store, prime)
+    section = "\n".join(preference_section(result))
+    assert len(section) <= 300
+    shown = [item.id for item in result.preferences]
+    assert shown == list(reversed(ids))[: len(shown)]
+    assert all(not item.full for item in result.preferences)
+    assert result.preferences_omitted == 6 - len(shown) > 0
+    assert (
+        f'{result.preferences_omitted} more preferences not listed: search(kinds=["preference"])'
+        in section
+    )
+    assert result.preference_cap_hit is True
+    assert f"conflict: {ids[0]} contradicts {ids[1]}" in section
+
+
+def test_prime_preference_conflicts_are_cut_at_the_cap_with_the_call_that_lists_them(
+    store: EntryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Silent failure caught: conflict lines pushing the section past the cap after every
+    preference has been cut, with no way to list the conflicts left out."""
+    from trails.ops import prime as prime_module
+
+    monkeypatch.setattr(prime_module, "PREFERENCE_CAP", 330)
+    ids = [new(store, "preference", f"r{n}") for n in range(8)]
+    for n in range(0, 8, 2):
+        store.add_entry_link(ids[n], "contradicts", ids[n + 1])
+    result = run(store, prime)
+    section = "\n".join(preference_section(result))
+    assert len(section) <= 330
+    assert (len(result.preference_conflicts), result.preference_conflicts_omitted) == (1, 3)
+    assert section.endswith(
+        f"{result.preference_conflicts_omitted} more conflicts not listed: "
+        'search(kinds=["preference"], contradicted=true)'
+    )
+
+
 def test_prime_index_lists_projects_and_counts_unscoped(store: EntryStore) -> None:
     store.write_project("alpha", host="h", paths=[], remove_paths=[])
     new(store, "goal", "g", projects=["alpha"])
@@ -193,6 +241,24 @@ def test_show_since_comment_lists_what_changed_after_a_review(store: EntryStore)
     assert shown.since == [f"{task} t: v1 -> v2"]
 
 
+def test_show_since_comment_on_another_entry_warns_instead_of_printing_nothing(
+    store: EntryStore,
+) -> None:
+    """Silent failure caught: an agent reading `show(id, since_comment=C)` with C on another
+    entry sees no change list and no sign that it asked the wrong entry."""
+    goal = new(store, "goal", "g")
+    task = new(store, "task", "t", parent=goal)
+    review = run(store, add_comment, id=goal, comment="looks right", verdict="approve")
+    result = run(store, show, id=task, since_comment=review.comment_id)
+    assert result.entries[0].since == []
+    assert result.warnings == [
+        f"since_comment {review.comment_id} is on {goal}, which this call does not show, so no "
+        f'changes are listed; read them with show("{goal}", '
+        f'since_comment="{review.comment_id}")'
+    ]
+    assert f"warning: since_comment {review.comment_id} is on {goal}" in result.render_text()
+
+
 def test_retired_dependency_keeps_its_dependent_waiting(store: EntryStore) -> None:
     """Silent failure caught: retiring a task silently unblocking work that needed it done."""
     first = new(store, "task", "a")
@@ -210,6 +276,21 @@ def test_set_projects_moves_an_entry_between_projects(store: EntryStore) -> None
     result = run(store, set_projects, id=note, add=["beta"], remove=["alpha"], reason="moved")
     assert [ref.name for ref in result.projects] == ["beta"]
     assert [ref.name for ref in store.get_entry(note).projects] == ["beta"]
+
+
+def test_a_secret_in_a_set_projects_reason_is_warned_about(store: EntryStore) -> None:
+    """Silent failure caught: a secret written into a membership reason, which is stored for
+    good, with no warning, although every other reason is scanned."""
+    store.write_project("alpha", host="h", paths=[], remove_paths=[])
+    note = new(store, "note", "n")
+    result = run(
+        store, set_projects, id=note, add=["alpha"], reason="key AKIAIOSFODNN7EXAMPLE moved"
+    )
+    assert result.warnings == [
+        "possible secret: AWSKeyDetector in reason line 1; tell the person, because removing "
+        "it needs a manual database-history rewrite"
+    ]
+    assert "warning: possible secret: AWSKeyDetector in reason line 1" in result.render_text()
 
 
 @pytest.mark.parametrize("kind", ["note", "claim", "preference", "skill"])
@@ -328,3 +409,25 @@ def test_scoped_prime_bounds_its_lists(store: EntryStore, monkeypatch: pytest.Mo
     result = run(store, prime, project="alpha")
     assert (len(result.contradicted), result.contradicted_total) == (limit, limit + 2)
     assert (len(result.goals), result.goal_total) == (limit, limit + 2)
+
+
+def test_search_contradicted_lists_only_currently_contradicted_entries(
+    store: EntryStore,
+) -> None:
+    """Silent failure caught: prime's `more:` call for hidden contradicted claims listing every
+    claim, or listing a claim whose contradiction was unlinked or whose contradicting entry was
+    retired, so the agent cannot find the corrections prime counted."""
+    store.write_project("alpha", host="h", paths=[], remove_paths=[])
+    rival = new(store, "claim", "rival", projects=["alpha"])
+    retired_rival = new(store, "claim", "retired rival", projects=["alpha"])
+    contradicted = new(store, "claim", "contradicted", projects=["alpha"])
+    unlinked = new(store, "claim", "was contradicted", projects=["alpha"])
+    by_retired = new(store, "claim", "contradicted by a retired claim", projects=["alpha"])
+    new(store, "claim", "never contradicted", projects=["alpha"])
+    store.add_entry_link(rival, "contradicts", contradicted)
+    store.add_entry_link(rival, "contradicts", unlinked)
+    store.remove_entry_link(rival, "contradicts", unlinked, "rival was about something else")
+    store.add_entry_link(retired_rival, "contradicts", by_retired)
+    run(store, retire, id=retired_rival, reason="wrong")
+    result = run(store, search, kinds=["claim"], projects=["alpha"], contradicted=True)
+    assert [hit.id for hit in result.hits] == [contradicted]

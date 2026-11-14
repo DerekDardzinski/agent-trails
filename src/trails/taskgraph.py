@@ -14,8 +14,9 @@ Definitions (docs/redesign-plan.md, "Derived state"):
   ignored (D10).
 - An entry is ready to close when it is not closed, has at least one child, every child is
   closed, and no child closed `failed` (D16). A parent with a `failed` child needs a decision.
-- An entry needs replanning when it is not closed and waits on a target closed `dropped` or
-  `failed`.
+- An entry needs replanning when it is not closed and waits on a target closed `dropped`,
+  `failed` or `superseded`. A supersede moves the links that exist when it closes, so a
+  `waits_on` to a superseded target is one added afterwards, and it can never be satisfied.
 - A cycle is a cycle in the "must finish first" graph: a `waits_on` source needs its target, a
   parent needs its children, and a child needs every `waits_on` target of its ancestors (D8).
 """
@@ -170,7 +171,8 @@ class TaskGraph:
         )
 
     def replanning_causes(self, entry_id: str) -> list[str]:
-        """Direct waits_on targets closed `dropped` or `failed`, for an entry not closed."""
+        """Direct waits_on targets closed `dropped`, `failed` or `superseded`, for an entry not
+        closed."""
         node = self.nodes.get(entry_id)
         if node is None or node.state == "closed" or node.retired:
             return []
@@ -179,7 +181,7 @@ class TaskGraph:
             for target in self.waits.get(entry_id, [])
             if self.is_work(target)
             and self.nodes[target].state == "closed"
-            and self.nodes[target].outcome in {"dropped", "failed"}
+            and self.nodes[target].outcome in {"dropped", "failed", "superseded"}
         ]
 
     def needs_replanning(self, project: str | None = None) -> list[str]:

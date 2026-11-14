@@ -49,6 +49,7 @@ class EntryFilters(BaseModel):
     tags: list[str] = []
     status: str | None = None
     open_comments: bool = False
+    contradicted: bool = False
     include_retired: bool = False
 
 
@@ -270,6 +271,16 @@ OPEN_COMMENT_CONDITION = (
     "comment_addresses r WHERE r.comment_id = c.id))"
 )
 
+# A current `contradicts` link into the entry, from an entry that is not retired: the latest
+# event of that (source, relation, target) is an add, as `entry_store.current_links` decides.
+CONTRADICTED_CONDITION = (
+    "EXISTS (SELECT 1 FROM link_event l WHERE l.target_id = e.id AND l.relation = 'contradicts' "
+    "AND l.action = 'add' AND NOT EXISTS (SELECT 1 FROM link_event later WHERE later.source_id "
+    "= l.source_id AND later.relation = l.relation AND later.target_id = l.target_id AND "
+    "later.sequence > l.sequence) AND NOT EXISTS (SELECT 1 FROM retirement rs WHERE "
+    "rs.entry_id = l.source_id))"
+)
+
 
 def membership_condition(project_ids: Sequence[str]) -> str:
     ids = ", ".join(_lit(item) for item in project_ids)
@@ -301,6 +312,8 @@ def _where(filters: EntryFilters, equivalence: dict[str, tuple[str, ...]]) -> st
         clauses.append(status_condition(filters.status))
     if filters.open_comments:
         clauses.append(OPEN_COMMENT_CONDITION)
+    if filters.contradicted:
+        clauses.append(CONTRADICTED_CONDITION)
     return " AND ".join(clauses)
 
 

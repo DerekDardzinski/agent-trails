@@ -3,6 +3,8 @@
 NOTE: no `from __future__ import annotations` in this package. See `ops/__init__.py`.
 """
 
+from pydantic import Field
+
 from trails.models import (
     ProjectFramingVersion,
     ProjectMembershipChange,
@@ -104,9 +106,10 @@ class SetProjectsResult(RenderedResult):
     unchanged_add: list[ProjectRef]
     unchanged_remove: list[ProjectRef]
     projects: list[ProjectRef]
+    warnings: list[str] = Field(default_factory=list)
 
     def render_text(self) -> str:
-        """Render changes, no-ops, complete current membership, and exact show call."""
+        """Render changes, no-ops, complete current membership, warnings, and the show call."""
         lines = [f"project memberships for {self.entry_id}"]
         lines += [
             f"  {change.action}: {change.project.id} · {change.project.name}"
@@ -120,5 +123,6 @@ class SetProjectsResult(RenderedResult):
         ]
         current = ", ".join(f"{item.id} ({item.name})" for item in self.projects) or "unscoped"
         lines.append(f"current: {current}")
+        lines += [f"warning: {item}" for item in self.warnings]
         lines.append(f'Next: show("{self.entry_id}")')
         return "\n".join(lines)

@@ -37,4 +37,5 @@ async def set_projects(
         unchanged_add=outcome.unchanged_add,
         unchanged_remove=outcome.unchanged_remove,
         projects=outcome.projects,
+        warnings=outcome.warnings,
     )
