@@ -396,3 +396,52 @@ class SessionRow(BaseModel):
     transcript: str | None
     agent: str | None
     first_seen: datetime
+
+
+class FollowUp(BaseModel):
+    """A task to create when closing an entry; it is linked `discovered_from` the closed one."""
+
+    title: str
+    body: str = ""
+    priority: int | None = None
+    tags: list[str] = []
+
+
+class LinkOutcome(BaseModel):
+    """A link added or removed. `changed` is False when the link was already in that state."""
+
+    source_id: str
+    relation: LinkRelation
+    target_id: str
+    action: LinkAction
+    changed: bool
+    target_version: int | None
+    warnings: list[str]
+
+
+class MovedLink(BaseModel):
+    """A waits_on link moved from a superseded entry onto its replacement."""
+
+    source_id: str
+    from_id: str
+    to_id: str
+
+
+class TaskOutcome(BaseModel):
+    """A claim, release, close or reopen. `changed` is False when nothing was written."""
+
+    entry: Entry
+    event: TaskEvent | None
+    changed: bool
+    follow_ups: list[str]
+    moved: list[MovedLink]
+    warnings: list[str]
+
+
+class RetireOutcome(BaseModel):
+    """A retirement. `already_retired` is True when the entry was retired before; `reason`
+    is then the reason that stands."""
+
+    entry_id: str
+    reason: str
+    already_retired: bool

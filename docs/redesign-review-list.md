@@ -73,3 +73,19 @@ each one is in brackets.
     version already exists with exactly this content from this same harness and session
     returns that version instead of a stale-base refusal [step 1]. Same idea as the old store's
     landed-write check.
+24. **`close(outcome="superseded", by=[...])` also writes a `supersedes` link from each
+    replacement to the closed entry** [step 2]. The task event has no column for `by`, and the
+    link is where the replacement is recorded and shown.
+25. **Only goals and tasks count as children** [step 2]. A note `part_of` a task would
+    otherwise keep its parent from ever being ready to close, since a note never closes. A
+    `part_of` link to a non-work entry is stored with a warning, as D10 does for `waits_on`.
+26. **Two writes with no session id from the same harness count as one claimant** [step 2],
+    because nothing tells them apart. This matters only for a harness that gives no session.
+27. **Closing an already-closed entry**: the same outcome changes nothing (so a retry is
+    safe); a different outcome is refused with the `reopen` call [step 2].
+28. **`release` of an unclaimed task and `reopen` of an entry that is not closed change
+    nothing** and say so, rather than refusing [step 2].
+29. **`ready(project=...)` filters by the task's own project membership**, not its parent's
+    or goal's [step 2].
+30. **Cycle detection covers creation too**: `write(parent=..., waits_on=...)` can close a
+    cycle, so it warns the same way `link` does [step 2].

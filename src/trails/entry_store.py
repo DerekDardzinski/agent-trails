@@ -40,11 +40,16 @@ from trails.models import (
     EntryLink,
     EntryVersion,
     EntryWriteOutcome,
+    FollowUp,
     LinkEvent,
+    LinkOutcome,
+    MovedLink,
     ProjectRef,
     Provenance,
+    RetireOutcome,
     SessionRow,
     TaskEvent,
+    TaskOutcome,
 )
 from trails.secret_scan import scan_for_secrets
 from trails.store import (
@@ -71,6 +76,7 @@ from trails.store import (
     _value_text,
     resolve_db_path,
 )
+from trails.taskgraph import Node, TaskGraph
 from trails.vocab import (
     ID_ALPHABET,
     ID_ATTEMPTS_PER_LENGTH,
@@ -622,6 +628,25 @@ class EntryStore(Store):
             *_session_insert(provenance, created_at),
         ]
         findings = scan_for_secrets(_scanned_fields(version))
+        warnings = _target_warnings(entry_id, relations, found)
+        if relations and kind in WORK_KINDS:
+            graph = self.task_graph()
+            graph.nodes[entry_id] = Node(
+                id=entry_id,
+                kind=kind,
+                title=title,
+                version=1,
+                priority=priority,
+                created_at=created_at,
+                state="open",
+                outcome=None,
+                claim=None,
+                retired=False,
+            )
+            for relation, target in relations:
+                table = graph.parents if relation == "part_of" else graph.waits
+                table.setdefault(entry_id, []).append(target)
+            warnings += cycle_warnings(graph, [entry_id])
         self._commit(
             statements,
             message=f"create {entry_id}",
@@ -630,7 +655,6 @@ class EntryStore(Store):
             created_at=created_at,
             tags=tags,
         )
-        warnings = _target_warnings(entry_id, relations, found)
         entry = Entry(
             id=entry_id,
             kind=kind,
@@ -827,6 +851,682 @@ class EntryStore(Store):
             )
         )
         return {str(row["project_id"]): (int(row["sequence"]), str(row["action"])) for row in rows}
+
+    # ------------------------------------------------------------------ links
+
+    def add_entry_link(
+        self, source_id: str, relation: LinkRelation, target_id: str, reason: str | None = None
+    ) -> LinkOutcome:
+        """Append an `add` event, recording the target's current version. A link that is
+        already current is left as it is.
+
+        Raises:
+            ValidationError: a self-link, an unknown relation, or an id naming no entry.
+        """
+        if relation not in LINK_RELATIONS:
+            raise ValidationError(f"relation must be one of {', '.join(LINK_RELATIONS)}")
+        if source_id == target_id:
+            raise ValidationError("an entry cannot link to itself")
+        normal_reason = (reason or "").strip() or None
+        _require_text_bytes("reason", normal_reason)
+        with dolt.exclusive(self.db_path):
+            found = self._require_entries([source_id, target_id])
+            latest = self._latest_link(source_id, relation, target_id)
+            target_version = found[target_id].current.version
+            if latest is not None and latest.action == "add":
+                return LinkOutcome(
+                    source_id=source_id,
+                    relation=relation,
+                    target_id=target_id,
+                    action="add",
+                    changed=False,
+                    target_version=latest.target_version,
+                    warnings=[],
+                )
+            provenance = sessions.current_provenance()
+            event = self._link_event(
+                source_id,
+                relation,
+                target_id,
+                action="add",
+                sequence=latest.sequence + 1 if latest is not None else 0,
+                target_version=target_version,
+                reason=normal_reason,
+                provenance=provenance,
+            )
+            warnings = _target_warnings(source_id, [(relation, target_id)], found)
+            if relation in {"part_of", "waits_on"}:
+                graph = self.task_graph()
+                table = graph.parents if relation == "part_of" else graph.waits
+                table.setdefault(source_id, []).append(target_id)
+                warnings += cycle_warnings(graph, [source_id, target_id])
+            self._commit_events(
+                [_link_insert(event)], f"link {source_id} {relation} {target_id}", event, provenance
+            )
+        return LinkOutcome(
+            source_id=source_id,
+            relation=relation,
+            target_id=target_id,
+            action="add",
+            changed=True,
+            target_version=target_version,
+            warnings=warnings,
+        )
+
+    def remove_entry_link(
+        self, source_id: str, relation: LinkRelation, target_id: str, reason: str
+    ) -> LinkOutcome:
+        """Append a `remove` event for a current link (D23: a reason is required). Removing a
+        link that is not current changes nothing.
+
+        Raises:
+            ValidationError: an empty reason or an unknown relation.
+        """
+        if relation not in LINK_RELATIONS:
+            raise ValidationError(f"relation must be one of {', '.join(LINK_RELATIONS)}")
+        normal_reason = reason.strip()
+        if not normal_reason:
+            raise ValidationError(
+                "unlink needs a reason: removing a link changes what is ready, and a later "
+                "reader needs to know why"
+            )
+        _require_text_bytes("reason", normal_reason)
+        with dolt.exclusive(self.db_path):
+            latest = self._latest_link(source_id, relation, target_id)
+            if latest is None or latest.action == "remove":
+                return LinkOutcome(
+                    source_id=source_id,
+                    relation=relation,
+                    target_id=target_id,
+                    action="remove",
+                    changed=False,
+                    target_version=None,
+                    warnings=[f"{source_id} has no current {relation} link to {target_id}"],
+                )
+            provenance = sessions.current_provenance()
+            event = self._link_event(
+                source_id,
+                relation,
+                target_id,
+                action="remove",
+                sequence=latest.sequence + 1,
+                target_version=None,
+                reason=normal_reason,
+                provenance=provenance,
+            )
+            self._commit_events(
+                [_link_insert(event)],
+                f"unlink {source_id} {relation} {target_id}",
+                event,
+                provenance,
+            )
+        return LinkOutcome(
+            source_id=source_id,
+            relation=relation,
+            target_id=target_id,
+            action="remove",
+            changed=True,
+            target_version=None,
+            warnings=[],
+        )
+
+    def link_events(self, entry_ids: Sequence[str]) -> list[LinkEvent]:
+        """Every link event from or to any of `entry_ids`, in time order."""
+        ids = list(dict.fromkeys(entry_ids))
+        if not ids:
+            return []
+        within = _placeholders(len(ids))
+        rows = self._read(
+            _bind(
+                f"SELECT * FROM link_event WHERE source_id IN ({within}) OR target_id IN "
+                f"({within}) ORDER BY created_at, source_id, relation, target_id, sequence",
+                [*ids, *ids],
+            )
+        )
+        return [_link_event(row) for row in rows]
+
+    def incoming_links(
+        self, entry_ids: Sequence[str], relations: Sequence[LinkRelation] = LINK_RELATIONS
+    ) -> dict[str, list[EntryLink]]:
+        """Current links INTO each of `entry_ids`, from entries that are not retired."""
+        ids = list(dict.fromkeys(entry_ids))
+        if not ids or not relations:
+            return {}
+        rows = self._read(
+            _bind(
+                f"SELECT l.* FROM link_event l WHERE l.target_id IN ({_placeholders(len(ids))}) "
+                f"AND l.relation IN ({_placeholders(len(relations))}) AND NOT EXISTS (SELECT 1 "
+                "FROM retirement r WHERE r.entry_id = l.source_id)",
+                [*ids, *relations],
+            )
+        )
+        grouped: dict[str, list[EntryLink]] = {}
+        for event in current_links([_link_event(row) for row in rows]):
+            grouped.setdefault(event.target_id, []).append(_entry_link(event))
+        return grouped
+
+    # ------------------------------------------------------------------ task state
+
+    def task_graph(self) -> TaskGraph:
+        """Every goal and task, every entry a part_of or waits_on link names, and the current
+        links between them, from ONE dolt invocation (D15)."""
+        linked = "SELECT target_id FROM link_event WHERE relation IN ('part_of', 'waits_on')"
+        versions, links, events, retired, memberships = dolt.read_result_sets(
+            self.db_path,
+            [
+                "SELECT e.id, e.kind, e.created_at AS entry_created_at, x.title, x.version, "
+                "x.priority FROM entry e JOIN entry_version x ON x.entry_id = e.id WHERE "
+                f"(e.kind IN ('goal', 'task') OR e.id IN ({linked})) AND NOT EXISTS (SELECT 1 "
+                "FROM entry_version n WHERE n.entry_id = x.entry_id AND n.version > x.version)",
+                "SELECT * FROM link_event WHERE relation IN ('part_of', 'waits_on')",
+                "SELECT t.* FROM task_event t ORDER BY t.entry_id, t.sequence",
+                "SELECT entry_id FROM retirement",
+                "SELECT e.entry_id, e.project_id FROM entry_project_event e WHERE e.action = "
+                "'add' AND NOT EXISTS (SELECT 1 FROM entry_project_event newer WHERE "
+                "newer.entry_id = e.entry_id AND newer.project_id = e.project_id AND "
+                "newer.sequence > e.sequence)",
+            ],
+        )
+        events_by: dict[str, list[TaskEvent]] = {}
+        for row in events:
+            events_by.setdefault(str(row["entry_id"]), []).append(_task_event(row))
+        retired_ids = {str(row["entry_id"]) for row in retired}
+        projects_by: dict[str, set[str]] = {}
+        for row in memberships:
+            projects_by.setdefault(str(row["entry_id"]), set()).add(str(row["project_id"]))
+        nodes: dict[str, Node] = {}
+        for row in versions:
+            entry_id = str(row["id"])
+            kind = _as_kind(row["kind"])
+            state, outcome, claim = task_state(kind, events_by.get(entry_id, []))
+            priority = row.get("priority")
+            nodes[entry_id] = Node(
+                id=entry_id,
+                kind=kind,
+                title=str(row["title"]),
+                version=int(row["version"]),
+                priority=int(priority) if priority is not None else None,
+                created_at=_as_datetime(row["entry_created_at"]),
+                state=state,
+                outcome=outcome,
+                claim=claim,
+                retired=entry_id in retired_ids,
+                projects=frozenset(projects_by.get(entry_id, set())),
+            )
+        graph = TaskGraph(nodes=nodes)
+        for event in current_links([_link_event(row) for row in links]):
+            if event.source_id in retired_ids:
+                continue
+            table = graph.parents if event.relation == "part_of" else graph.waits
+            table.setdefault(event.source_id, []).append(event.target_id)
+        return graph
+
+    def claim(
+        self, entry_id: str, base_version: int | None, take_over_reason: str | None = None
+    ) -> TaskOutcome:
+        """Claim a task for this session, atomically under the write lock.
+
+        Refused: a goal or any other kind (malformed), a closed task, a stale or missing
+        `base_version` (an attempted overwrite), and a task another session holds unless
+        `take_over_reason` says why (D3). Claiming a task this session already holds changes
+        nothing.
+        """
+        with dolt.exclusive(self.db_path):
+            entry = self.get_entry(entry_id)
+            if entry.kind != "task":
+                raise ValidationError(
+                    f"{entry_id} is a {entry.kind}; only a task is claimed. A goal is closed "
+                    "when its tasks are done, never claimed"
+                )
+            if entry.state == "closed":
+                raise ValidationError(
+                    f"{entry_id} is closed {entry.outcome}; reopen it first with "
+                    f'reopen("{entry_id}", reason="...")'
+                )
+            if base_version != entry.current.version:
+                raise ValidationError(_stale_message(entry_id, base_version, entry.current))
+            provenance = sessions.current_provenance()
+            held = entry.claim
+            take_over = (take_over_reason or "").strip()
+            if held is not None:
+                if _same_session(held, provenance):
+                    return TaskOutcome(
+                        entry=entry, event=held, changed=False, follow_ups=[], moved=[],
+                        warnings=[],
+                    )  # fmt: skip
+                if not take_over:
+                    raise ValidationError(
+                        f"{entry_id} is claimed by {_claimant(held)} since "
+                        f"{held.created_at.isoformat()}; to take it over, say why: "
+                        f'claim("{entry_id}", base_version={entry.current.version}, '
+                        'take_over_reason="...")'
+                    )
+            _require_text_bytes("take_over_reason", take_over or None)
+            event = self._task_event(
+                entry, "claim", outcome=None, reason=take_over or None, provenance=provenance
+            )
+            self._commit_events([_task_insert(event)], f"claim {entry_id}", event, provenance)
+        return self._task_outcome(entry, event)
+
+    def release(self, entry_id: str, reason: str) -> TaskOutcome:
+        """Drop the current claim (D11); the task stays not closed. Releasing an unclaimed
+        task changes nothing."""
+        normal_reason = _required_reason("release", reason)
+        with dolt.exclusive(self.db_path):
+            entry = self.get_entry(entry_id)
+            if entry.claim is None:
+                return TaskOutcome(
+                    entry=entry, event=None, changed=False, follow_ups=[], moved=[],
+                    warnings=[f"{entry_id} is not claimed; nothing to release"],
+                )  # fmt: skip
+            provenance = sessions.current_provenance()
+            event = self._task_event(
+                entry, "release", outcome=None, reason=normal_reason, provenance=provenance
+            )
+            self._commit_events([_task_insert(event)], f"release {entry_id}", event, provenance)
+        return self._task_outcome(entry, event)
+
+    def reopen(self, entry_id: str, reason: str) -> TaskOutcome:
+        """Move a closed goal or task back to open (D11). Links a supersede moved stay moved.
+        Reopening an entry that is not closed changes nothing."""
+        normal_reason = _required_reason("reopen", reason)
+        with dolt.exclusive(self.db_path):
+            entry = self.get_entry(entry_id)
+            if entry.kind not in WORK_KINDS:
+                raise ValidationError(f"{entry_id} is a {entry.kind}; only goals and tasks close")
+            if entry.state != "closed":
+                return TaskOutcome(
+                    entry=entry, event=None, changed=False, follow_ups=[], moved=[],
+                    warnings=[f"{entry_id} is not closed; nothing to reopen"],
+                )  # fmt: skip
+            provenance = sessions.current_provenance()
+            event = self._task_event(
+                entry, "reopen", outcome=None, reason=normal_reason, provenance=provenance
+            )
+            self._commit_events([_task_insert(event)], f"reopen {entry_id}", event, provenance)
+        return self._task_outcome(entry, event)
+
+    def close(  # noqa: PLR0912 — one transaction holds the close and all it implies
+        self,
+        entry_id: str,
+        outcome: Outcome,
+        summary: str,
+        by: Sequence[str] = (),
+        follow_ups: Sequence[FollowUp] = (),
+    ) -> TaskOutcome:
+        """Close a goal or task with an outcome, in one transaction with everything it implies.
+
+        `superseded` needs a nonempty `by`, every id an existing goal or task; every current
+        incoming waits_on link is moved onto every replacement, and each replacement gets a
+        `supersedes` link to the closed entry, which is where `by` is recorded. Each follow-up
+        becomes a new task linked `discovered_from` the closed entry and `part_of` its parent,
+        if it has one (D18). Closing a parent with children not closed is stored with a warning
+        (D22). Closing again with the same outcome changes nothing.
+        """
+        if outcome not in OUTCOMES:
+            raise ValidationError(f"outcome must be one of {', '.join(OUTCOMES)}")
+        normal_summary = summary.strip()
+        if not normal_summary:
+            raise ValidationError("close needs a summary: what was done, or why not")
+        _require_text_bytes("summary", normal_summary)
+        replacements = list(dict.fromkeys(by))
+        if outcome == "superseded" and not replacements:
+            raise ValidationError(
+                'outcome="superseded" needs by=[ids]: the goals or tasks that replace this one'
+            )
+        if outcome != "superseded" and replacements:
+            raise ValidationError('by names replacements and goes with outcome="superseded" only')
+        if entry_id in replacements:
+            raise ValidationError(f"{entry_id} cannot supersede itself")
+        for item in follow_ups:
+            _validated_title(item.title)
+            _validated_priority("task", item.priority)
+        with dolt.exclusive(self.db_path):
+            found = self._require_entries([entry_id, *replacements])
+            entry = found[entry_id]
+            if entry.kind not in WORK_KINDS:
+                raise ValidationError(f"{entry_id} is a {entry.kind}; only goals and tasks close")
+            not_work = [item for item in replacements if found[item].kind not in WORK_KINDS]
+            if not_work:
+                raise ValidationError(
+                    f"{', '.join(not_work)} is not a goal or task; only a goal or task can "
+                    "replace one"
+                )
+            if entry.state == "closed":
+                if entry.outcome == outcome:
+                    return TaskOutcome(
+                        entry=entry, event=None, changed=False, follow_ups=[], moved=[],
+                        warnings=[f"{entry_id} was already closed {outcome}; nothing changed"],
+                    )  # fmt: skip
+                raise ValidationError(
+                    f"{entry_id} is already closed {entry.outcome}; to change the outcome, "
+                    f'reopen("{entry_id}", reason="...") and close it again'
+                )
+            provenance = sessions.current_provenance()
+            graph = self.task_graph()
+            event = self._task_event(
+                entry, "close", outcome=outcome, reason=normal_summary, provenance=provenance
+            )
+            statements = [_task_insert(event)]
+            moved: list[MovedLink] = []
+            if outcome == "superseded":
+                statements += self._supersede_statements(
+                    entry_id,
+                    replacements=replacements,
+                    found=found,
+                    summary=normal_summary,
+                    moment=event.created_at,
+                    provenance=provenance,
+                )
+                for source in graph.dependents(entry_id):
+                    moved += [
+                        MovedLink(source_id=source, from_id=entry_id, to_id=item)
+                        for item in replacements
+                        if item != source
+                    ]
+            created: list[str] = []
+            parents = graph.parents.get(entry_id, [])
+            for item in follow_ups:
+                follow_id = self.new_entry_id("task")
+                created.append(follow_id)
+                statements += self._follow_up_statements(
+                    follow_id,
+                    item,
+                    closed=entry,
+                    parents=parents,
+                    graph=graph,
+                    moment=event.created_at,
+                    provenance=provenance,
+                )
+            self._commit_events(statements, f"close {entry_id} {outcome}", event, provenance)
+        warnings = []
+        still_open = graph.open_children(entry_id)
+        if still_open:
+            warnings.append(
+                f"{entry_id} was closed with children not closed: {', '.join(still_open)}; their "
+                "state is unchanged"
+            )
+        return self._task_outcome(entry, event, follow_ups=created, moved=moved, warnings=warnings)
+
+    def retire_entry(self, entry_id: str, reason: str) -> RetireOutcome:
+        """Mark an entry no longer true without replacing it. Retiring twice keeps the first
+        reason and changes nothing."""
+        normal_reason = (reason or "").strip()
+        if not normal_reason:
+            raise ValidationError("retire needs a reason: why the entry is no longer true")
+        _require_text_bytes("reason", normal_reason)
+        with dolt.exclusive(self.db_path):
+            entry = self.get_entry(entry_id)
+            if entry.retired:
+                return RetireOutcome(
+                    entry_id=entry_id, reason=str(entry.retired_reason), already_retired=True
+                )
+            provenance = sessions.current_provenance()
+            moment = _now()
+            self._execute_script(
+                [
+                    "START TRANSACTION",
+                    _insert(
+                        "retirement",
+                        {
+                            "entry_id": entry_id,
+                            "retired_at": moment,
+                            "reason": normal_reason,
+                            "author": current_author(),
+                            "harness": provenance.harness,
+                            "session_id": provenance.session_id,
+                        },
+                    ),
+                    *_session_insert(provenance, moment),
+                    f"CALL DOLT_COMMIT('-A','-m',{dolt.sql_literal(f'retire {entry_id}')})",
+                ]
+            )
+        return RetireOutcome(entry_id=entry_id, reason=normal_reason, already_retired=False)
+
+    def _supersede_statements(
+        self,
+        entry_id: str,
+        *,
+        replacements: Sequence[str],
+        found: dict[str, Entry],
+        summary: str,
+        moment: datetime,
+        provenance: Provenance,
+    ) -> list[str]:
+        """Move every current incoming waits_on onto every replacement; record `by` as
+        supersedes links from each replacement."""
+        statements: list[str] = []
+        incoming = self.incoming_links([entry_id], ["waits_on"]).get(entry_id, [])
+        reason = f"{entry_id} was closed superseded by {', '.join(replacements)}"
+        for link in incoming:
+            latest = self._latest_link(link.source_id, "waits_on", entry_id)
+            statements.append(
+                _link_insert(
+                    self._link_event(
+                        link.source_id, "waits_on", entry_id, action="remove",
+                        sequence=(latest.sequence + 1) if latest else 0, target_version=None,
+                        reason=reason, provenance=provenance, moment=moment,
+                    )
+                )
+            )  # fmt: skip
+            for item in replacements:
+                if item == link.source_id:
+                    continue
+                previous = self._latest_link(link.source_id, "waits_on", item)
+                if previous is not None and previous.action == "add":
+                    continue
+                statements.append(
+                    _link_insert(
+                        self._link_event(
+                            link.source_id, "waits_on", item, action="add",
+                            sequence=(previous.sequence + 1) if previous else 0,
+                            target_version=found[item].current.version, reason=reason,
+                            provenance=provenance, moment=moment,
+                        )
+                    )
+                )  # fmt: skip
+        for item in replacements:
+            previous = self._latest_link(item, "supersedes", entry_id)
+            if previous is not None and previous.action == "add":
+                continue
+            statements.append(
+                _link_insert(
+                    self._link_event(
+                        item, "supersedes", entry_id, action="add",
+                        sequence=(previous.sequence + 1) if previous else 0,
+                        target_version=found[entry_id].current.version, reason=summary,
+                        provenance=provenance, moment=moment,
+                    )
+                )
+            )  # fmt: skip
+        return statements
+
+    def _follow_up_statements(
+        self,
+        follow_id: str,
+        item: FollowUp,
+        *,
+        closed: Entry,
+        parents: Sequence[str],
+        graph: TaskGraph,
+        moment: datetime,
+        provenance: Provenance,
+    ) -> list[str]:
+        author = current_author()
+        version = EntryVersion(
+            entry_id=follow_id,
+            version=1,
+            title=_validated_title(item.title),
+            body=item.body,
+            tags=_normalise_tags(item.tags),
+            value=None,
+            priority=item.priority,
+            stated_by=None,
+            artifacts=[],
+            code=[],
+            reason=None,
+            author=author,
+            harness=provenance.harness,
+            session_id=provenance.session_id,
+            created_at=moment,
+        )
+        links: list[tuple[LinkRelation, str, int | None]] = [
+            ("discovered_from", closed.id, closed.current.version),
+            *(
+                ("part_of", parent, graph.nodes[parent].version if parent in graph.nodes else None)
+                for parent in parents
+            ),
+        ]
+        project_ids = sorted(ref.id for ref in closed.projects)
+        return [
+            _insert("entry", {"id": follow_id, "kind": "task", "created_at": moment}),
+            *_version_inserts(version),
+            *(
+                _link_insert(
+                    self._link_event(
+                        follow_id, relation, target, action="add", sequence=0,
+                        target_version=target_version, reason=None, provenance=provenance,
+                        moment=moment,
+                    )
+                )
+                for relation, target, target_version in links
+            ),
+            *(
+                _membership_insert(
+                    follow_id, project_id, sequence=0, action="add", reason=None,
+                    author=author, provenance=provenance, created_at=moment,
+                )
+                for project_id in project_ids
+            ),
+        ]  # fmt: skip
+
+    def _task_outcome(
+        self,
+        before: Entry,
+        event: TaskEvent,
+        follow_ups: Sequence[str] = (),
+        moved: Sequence[MovedLink] = (),
+        warnings: Sequence[str] = (),
+    ) -> TaskOutcome:
+        """The entry as it stands after `event`, computed without a read after the commit."""
+        events = [*before.task_events, event]
+        state, outcome, claim = task_state(before.kind, events)
+        after = before.model_copy(
+            update={"task_events": events, "state": state, "outcome": outcome, "claim": claim}
+        )
+        return TaskOutcome(
+            entry=after,
+            event=event,
+            changed=True,
+            follow_ups=list(follow_ups),
+            moved=list(moved),
+            warnings=list(warnings),
+        )
+
+    def _task_event(
+        self,
+        entry: Entry,
+        kind: TaskEventKind,
+        *,
+        outcome: Outcome | None,
+        reason: str | None,
+        provenance: Provenance | None = None,
+    ) -> TaskEvent:
+        provenance = provenance or sessions.current_provenance()
+        sequence = max((event.sequence for event in entry.task_events), default=-1) + 1
+        return TaskEvent(
+            entry_id=entry.id,
+            sequence=sequence,
+            event=kind,
+            outcome=outcome,
+            reason=reason,
+            author=current_author(),
+            harness=provenance.harness,
+            session_id=provenance.session_id,
+            created_at=_now(),
+        )
+
+    def _link_event(
+        self,
+        source_id: str,
+        relation: LinkRelation,
+        target_id: str,
+        *,
+        action: LinkAction,
+        sequence: int,
+        target_version: int | None,
+        reason: str | None,
+        provenance: Provenance | None = None,
+        moment: datetime | None = None,
+    ) -> LinkEvent:
+        provenance = provenance or sessions.current_provenance()
+        return LinkEvent(
+            source_id=source_id,
+            relation=relation,
+            target_id=target_id,
+            sequence=sequence,
+            action=action,
+            target_version=target_version,
+            reason=reason,
+            author=current_author(),
+            harness=provenance.harness,
+            session_id=provenance.session_id,
+            created_at=moment or _now(),
+        )
+
+    def _latest_link(
+        self, source_id: str, relation: LinkRelation, target_id: str
+    ) -> LinkEvent | None:
+        rows = self._read(
+            _bind(
+                "SELECT * FROM link_event WHERE source_id = ? AND relation = ? AND target_id = ? "
+                "ORDER BY sequence DESC LIMIT 1",
+                [source_id, relation, target_id],
+            )
+        )
+        return _link_event(rows[0]) if rows else None
+
+    def _require_entries(self, entry_ids: Sequence[str]) -> dict[str, Entry]:
+        found = self.get_entries(entry_ids)
+        missing = [item for item in dict.fromkeys(entry_ids) if item not in found]
+        if missing:
+            raise ValidationError(f"no entry has id {', '.join(missing)}")
+        return found
+
+    def _commit_events(
+        self,
+        statements: Sequence[str],
+        message: str,
+        event: LinkEvent | TaskEvent,
+        provenance: Provenance,
+    ) -> None:
+        """Commit an event write with its session row; on failure, re-read whether the event
+        row landed."""
+        try:
+            self._execute_script(
+                [
+                    "START TRANSACTION",
+                    *statements,
+                    *_session_insert(provenance, event.created_at),
+                    f"CALL DOLT_COMMIT('-A','-m',{dolt.sql_literal(message)})",
+                ]
+            )
+        except DoltError:
+            if isinstance(event, TaskEvent):
+                check = _bind(
+                    "SELECT created_at FROM task_event WHERE entry_id = ? AND sequence = ?",
+                    [event.entry_id, event.sequence],
+                )
+            else:
+                check = _bind(
+                    "SELECT created_at FROM link_event WHERE source_id = ? AND relation = ? AND "
+                    "target_id = ? AND sequence = ?",
+                    [event.source_id, event.relation, event.target_id, event.sequence],
+                )
+            stored = self._read(check)
+            if stored and _as_datetime(stored[0]["created_at"]) == event.created_at:
+                return
+            raise
 
     # ---------------------------------------------------------------- internals
 
@@ -1342,3 +2042,49 @@ def _as_stated_by(value: Any) -> StatedBy | None:
         if stated == str(value):
             return stated
     raise DoltError(f"version has unknown stated_by {value!r}")
+
+
+def _task_insert(event: TaskEvent) -> str:
+    return _insert(
+        "task_event",
+        {
+            "entry_id": event.entry_id,
+            "sequence": event.sequence,
+            "event": event.event,
+            "outcome": event.outcome,
+            "reason": event.reason,
+            "author": event.author,
+            "harness": event.harness,
+            "session_id": event.session_id,
+            "created_at": event.created_at,
+        },
+    )
+
+
+def _required_reason(operation: str, reason: str) -> str:
+    normal = (reason or "").strip()
+    if not normal:
+        raise ValidationError(f"{operation} needs a reason")
+    _require_text_bytes("reason", normal)
+    return normal
+
+
+def _same_session(event: TaskEvent, provenance: Provenance) -> bool:
+    """Whether a claim was made by the session now writing. Two writes with no session id
+    from the same harness count as one claimant, because nothing tells them apart."""
+    return (event.harness, event.session_id) == (provenance.harness, provenance.session_id)
+
+
+def _claimant(event: TaskEvent) -> str:
+    session = f"session {event.session_id}" if event.session_id else "no session id"
+    return f"{event.author} ({event.harness}, {session})"
+
+
+def cycle_warnings(graph: TaskGraph, entry_ids: Sequence[str]) -> list[str]:
+    """One warning per must-finish-first cycle through any of `entry_ids` (D8)."""
+    return [
+        "dependency cycle: "
+        + " -> ".join(cycle)
+        + "; none of these can become ready until one link in the cycle is removed with unlink"
+        for cycle in graph.cycles_among(entry_ids)
+    ]
