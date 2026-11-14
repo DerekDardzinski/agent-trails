@@ -18,14 +18,23 @@ The order:
    executable named `kiro`) or Claude Code (an executable named `claude`). Kiro runs as a `node`
    process whose path contains `kiro-cli` (trails `fac-7azma`), so the executable's name alone
    would miss it.
-3. Otherwise `unknown`, with no session.
+3. On the CLI only, Kiro when `KIRO_SESSION_ID` names a session that has a lease (see below).
+4. Otherwise `unknown`, with no session.
 
 Kiro gives an MCP server no session variable. Its session lease
 `~/.kiro/session-leases/<session>.lease` holds the `pid` of the Kiro process, which is an MCP
 server's parent and a shell command's ancestor, so the session is the lease whose pid is an
 ancestor. It is looked up on every write rather than at server start, because a lease can change
-while a server runs. `KIRO_SESSION_ID` is the fallback. Claude Code gives MCP servers
-`CLAUDE_CODE_SESSION_ID`.
+while a server runs. A lease matches only when its `parentPid`, if it records one, is also that
+process's parent, and the newest matching lease wins: a session that ends without removing its
+lease leaves a stale file whose pid a later process may reuse (trails `fac-x8s2n`).
+
+`KIRO_SESSION_ID` IS READ ON THE CLI ONLY. Kiro sets it for the shell commands and hooks of a
+session, but not for MCP servers: an MCP server that sees it inherited it from the shell that
+launched Kiro, which is another session (`fac-x8s2n`). On the CLI it is the fallback when no lease
+matches. Under Synth an agent's shell commands are run by Synth, so their process tree names no
+harness at all; the CLI then takes `KIRO_SESSION_ID` as Kiro's when that session has a lease, which
+a session that has ended does not. Claude Code gives MCP servers `CLAUDE_CODE_SESSION_ID`.
 
 Nothing here raises: a write is worth more than its attribution, so any failure to read the
 process table or a harness file leaves the corresponding field empty.
@@ -136,12 +145,15 @@ def resolve(
                 ancestry = []
         return ancestry
 
+    on_cli = client_name is None
     harness = harness_from_client(client_name) or harness_from_processes(processes())
     if harness is None:
+        if on_cli and _kiro_lease_exists(home, env.get("KIRO_SESSION_ID") or ""):
+            return _kiro_session(home, env["KIRO_SESSION_ID"])
         stated = (client_name or "").strip()[:HARNESS_CHARS]
         return Provenance(harness=stated or UNKNOWN_HARNESS)
     if harness == KIRO:
-        return _kiro(env, home, processes())
+        return _kiro(env if on_cli else {}, home, processes())
     return _claude(env, home)
 
 
@@ -170,9 +182,23 @@ def harness_from_processes(chain: Sequence[ProcessRow]) -> str | None:
 
 
 def _kiro(env: Mapping[str, str], home: Path, chain: Sequence[ProcessRow]) -> Provenance:
+    """`env` is empty under MCP, where `KIRO_SESSION_ID` belongs to another session."""
     session = _kiro_session_from_leases(home, chain) or (env.get("KIRO_SESSION_ID") or None)
     if session is None:
         return Provenance(harness=KIRO)
+    return _kiro_session(home, session)
+
+
+def _kiro_lease_exists(home: Path, session: str) -> bool:
+    if not session or "/" in session or session.startswith("."):
+        return False
+    try:
+        return (home / ".kiro" / "session-leases" / f"{session}.lease").is_file()
+    except OSError:
+        return False
+
+
+def _kiro_session(home: Path, session: str) -> Provenance:
     folder = _first(home / ".kiro" / "sessions", f"*/{session}")
     transcript = folder / "messages.jsonl" if folder is not None else None
     return Provenance(
@@ -184,23 +210,38 @@ def _kiro(env: Mapping[str, str], home: Path, chain: Sequence[ProcessRow]) -> Pr
 
 
 def _kiro_session_from_leases(home: Path, chain: Sequence[ProcessRow]) -> str | None:
-    """The session whose lease names the nearest ancestor's pid."""
+    """The session whose lease names the nearest ancestor's pid and, when the lease records
+    one, that ancestor's parent pid. Among several such leases the newest `acquiredAt` wins,
+    since only the live session can have acquired its lease after the pid was reused."""
     leases = home / ".kiro" / "session-leases"
-    by_pid: dict[int, str] = {}
+    by_pid: dict[int, list[tuple[str, int | None, str]]] = {}
     try:
         files = sorted(leases.glob("*.lease"))
     except OSError:
         return None
     for path in files:
         try:
-            pid = json.loads(path.read_text()).get("pid")
+            data = json.loads(path.read_text())
+            pid, parent = data.get("pid"), data.get("parentPid")
+            acquired = data.get("acquiredAt")
         except (OSError, ValueError, AttributeError):
             continue
         if isinstance(pid, int):
-            by_pid[pid] = path.stem
+            by_pid.setdefault(pid, []).append(
+                (
+                    acquired if isinstance(acquired, str) else "",
+                    parent if isinstance(parent, int) else None,
+                    path.stem,
+                )
+            )
     for row in chain:
-        if row.pid in by_pid:
-            return by_pid[row.pid]
+        matches = [
+            (acquired, session)
+            for acquired, parent, session in by_pid.get(row.pid, [])
+            if parent is None or parent == row.ppid
+        ]
+        if matches:
+            return max(matches)[1]
     return None
 
 

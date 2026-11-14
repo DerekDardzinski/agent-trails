@@ -64,6 +64,56 @@ def test_kiro_without_a_matching_lease_falls_back_to_the_environment(tmp_path: P
     assert found == Provenance(harness="kiro", session_id="sess_env")
 
 
+def test_kiro_mcp_server_never_takes_the_inherited_session_variable(tmp_path: Path) -> None:
+    """Silent failure caught: an MCP write under Kiro attributed to the session of the shell
+    that launched Kiro. Kiro sets no `KIRO_SESSION_ID` for MCP servers, so one they see is
+    inherited (trails fac-x8s2n)."""
+    kiro_home(tmp_path, "sess_launching_shell", pid=900)
+    found = sessions.resolve(
+        "kiro",
+        env={"KIRO_SESSION_ID": "sess_launching_shell"},
+        home=tmp_path,
+        chain=chain(ProcessRow(200, 1, KIRO_NODE)),
+    )
+    assert found == Provenance(harness="kiro")
+
+
+def test_cli_under_synth_takes_a_kiro_session_that_has_a_lease(tmp_path: Path) -> None:
+    """Silent failure caught: a Kiro agent's CLI write under Synth recorded as `unknown`.
+    Synth runs the agent's shell commands, so no Kiro process is an ancestor (fac-x8s2n)."""
+    transcript = kiro_home(tmp_path, "sess_live", pid=200)
+    found = sessions.resolve(
+        None,
+        env={"KIRO_SESSION_ID": "sess_live"},
+        home=tmp_path,
+        chain=chain(ProcessRow(100, 50, "/bin/zsh -c trails write"), ProcessRow(50, 1, "synth")),
+    )
+    assert found == Provenance(
+        harness="kiro", session_id="sess_live", transcript=str(transcript), agent="lab-lead"
+    )
+
+
+def test_stale_lease_with_a_reused_pid_loses_to_the_live_one(tmp_path: Path) -> None:
+    """Silent failure caught: writes attributed to an ended session whose lease was left behind
+    and whose pid a new Kiro process reused (stale leases observed in fac-x8s2n). The stale
+    lease sorts last by name, so name order alone would pick it."""
+    leases = tmp_path / ".kiro" / "session-leases"
+    leases.mkdir(parents=True)
+    (leases / "sess_zz_stale.lease").write_text(
+        json.dumps({"pid": 200, "parentPid": 77, "acquiredAt": "2026-11-14T04:40:06.717Z"})
+    )
+    (leases / "sess_aa_live.lease").write_text(
+        json.dumps({"pid": 200, "parentPid": 150, "acquiredAt": "2026-11-14T05:10:00.000Z"})
+    )
+    (leases / "sess_mm_stale_same_parent.lease").write_text(
+        json.dumps({"pid": 200, "parentPid": 150, "acquiredAt": "2026-11-13T01:00:00.000Z"})
+    )
+    found = sessions.resolve(
+        "kiro", env={}, home=tmp_path, chain=chain(ProcessRow(200, 150, KIRO_NODE))
+    )
+    assert found == Provenance(harness="kiro", session_id="sess_aa_live")
+
+
 def test_claude_reads_its_variable_and_ignores_an_inherited_kiro_one(tmp_path: Path) -> None:
     """Silent failure caught: a Claude Code session started from a Kiro shell attributed to the
     Kiro session whose variable it inherited (trails fac-ahxap)."""
