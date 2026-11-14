@@ -1,5 +1,13 @@
 # Decisions for Derek to check
 
+> **Partly superseded.** This list records round 1 of the redesign. Its triage section
+> ("Triage of the open questions (lab-lead, 2026-11-14)") is partly superseded by section 2.5,
+> "Reconciling the lab-lead triage", of Derek's round-2 handoff (`trails-redesign-handoff-2.md`),
+> and round 2 (`docs/redesign-plan-2.md`) then changed the model it describes: four kinds
+> instead of six, no derived labels such as "ready to close", and per-kind operations in place
+> of `write`. Read an item here as history, and check the current code and README before
+> relying on it.
+
 Choices I made while working on my own. Each says what I chose and why. Nothing is pushed;
 everything is on branch `redesign`. The D-numbers match "Decisions this plan makes" in
 `docs/redesign-plan.md`, which has the full text.

@@ -26,46 +26,60 @@ uv run ruff check . && uv run ruff format --check . && uv run ty check . && uv r
 
 `ty check` exits 0 even when it prints a diagnostic, so read its output. The suite is parallel
 by default via `pytest-xdist` in `addopts`; do not remove that. `uv run pytest -m slow` covers
-tests that download the ONNX embedding model, and those stay off the default gate. About a
-minute of the default gate is `tests/test_concurrency.py`, whose 400 writes are serialized by
-the write lock.
+tests that download the ONNX embedding model, and those stay off the default gate.
+`tests/test_concurrency.py` checks the write lock across a process boundary: a writer waits
+while another process holds the lock, then writes exactly once.
 
 ## What this package is
 
 A memory and task store for agents across harnesses. It stores, presents, links and tracks
 entries, and **it decides nothing about their meaning**: no verdicts, no statistics, no gate.
-Derived state (readiness, ready to close, claim standing) comes only from stored links, events
-and version fields. If you find yourself writing a rule that reads what an entry says, stop;
-that is a misreading of the scope.
+The one state it works out is whether a task is ready, from stored links and events; everything
+else it reports is a stored fact, such as "children: 2 completed, 1 failed" or "waits on tsk-x
+(closed dropped)". If you find yourself writing a rule that reads what an entry says, or a label
+that summarizes facts into a judgment, stop; that is a misreading of the scope.
+`docs/philosophy.md` holds the principles every change is checked against.
 
-An entry has one fixed kind (`vocab.KINDS`: goal, task, note, claim, preference, skill), an id
-whose prefix matches the kind (`gol`, `tsk`, `note`, `clm`, `prf`, `skl`) plus five lowercase
-base36 characters normally and six after repeated collisions, and append-only versions. A
-version carries the full content: title, Markdown body, tags, an optional JSON `value`,
-artifact references, code captures, `priority` (goals and tasks) and `stated_by` (claims and
-preferences). Every version, link event, task event, comment, retirement and membership event
-records `author` (the OS user), `harness` and `session_id`; `sessions.py` resolves the harness
-and session, and the agent never passes them. One `session` row per session id holds its
-transcript path and agent name.
+An entry has one fixed kind (`vocab.KINDS`: task, note, preference, skill), an id whose prefix
+matches the kind (`tsk`, `note`, `prf`, `skl`) plus five lowercase base36 characters normally
+and six after repeated collisions, and append-only versions. A goal is a tag on a parent task.
+A version carries the full content: title, Markdown body, tags, an optional JSON `value`,
+artifact references, code captures and `priority` (tasks only). Ids are minted under the write
+lock. Every version, link event, task event, comment, retirement, membership event, project,
+path, framing version and tag alias records `author` (the OS user), `harness` and `session_id`;
+`sessions.py` resolves the harness and session, and the agent never passes them. One `session`
+row per session id holds its transcript path and agent name.
 
-Seven link relations (`vocab.LINK_RELATIONS`): `waits_on`, `part_of`, `discovered_from`,
-`supersedes`, `contradicts`, `supports`, `references`. A link is current when the latest event
-for its (source, relation, target) is `add`, and each add records the target version it was
-written against. Task events are claim, release, close (with an outcome from
-`vocab.OUTCOMES`) and reopen. Comments sit beside an entry and write no version; a comment
-with `addresses` closes the open comments it names.
+Five link relations (`vocab.LINK_RELATIONS`). Work relations `waits_on` and `part_of` join
+tasks (`link_work`, `unlink_work`); evidence relations `supports` and `contradicts` join notes,
+preferences and skills (`link_evidence`, `unlink_evidence`); `supersedes` is written only by
+`replace`. A link between the wrong kinds is malformed, and so is a work link that would close a
+cycle through either end or any descendant. A link is current when the latest event for its
+(source, relation, target) is `add`, and each add records the target version it was written
+against; linking evidence again records it at the target's current version. Task events are
+claim, release, close and reopen; `close` takes `completed`, `dropped` or `failed`, and
+`replace` closes a task `superseded`. Comments sit beside an entry and write no version:
+`comment` leaves feedback that stays open, `reply` addresses open comments on the same entry,
+and `review` records a verdict on a task.
 
 History is append-only. A new version requires `base_version` equal to the current version
-and a reason; nothing updates or deletes a version, an event or a comment. There is no
-deletion operation: removing data from history requires a manual database-history rewrite by
-the user. Current project paths are metadata edited in place.
+and a reason; nothing updates or deletes a version, an event or a comment. `retire` marks a
+note, preference or skill no longer true; the dreamer's `merge` retires one as a duplicate of
+another of the same kind. There is no deletion operation: removing data from history requires
+a manual database-history rewrite by the user. Current project paths are metadata edited in
+place.
 
 A project has a generated `prj-` id, unique human name, provenance, current paths and optional
-append-only framing. `register_project` creates or returns without mutating existing state;
-`update_project` applies effective path and framing changes. Changed post-registration framing
-requires the current base version and a reason; base 0 adds the first framing. Entries have
-zero-to-many project memberships through `entry_project_event`; a preference with none is
-global.
+append-only framing. `register_project` creates, or returns an identical existing project
+without mutating it; a taken name with other paths or framing is malformed. `set_paths`
+changes paths, and `revise_framing` writes a new framing version from the current base version
+with a reason; base 0 adds the first framing. Entries have zero-to-many project memberships
+through `entry_project_event`; a preference with none is global.
+
+Toolsets (`ops/_marks.py`): `agent` is the MCP default; `dreamer` adds the consolidation
+pass's `create_skill`, `revise_skill`, `merge` and `changes`; `full` adds those plus `lint`,
+`alias`, `embed` and `version`. The CLI serves every operation under its own name
+(`trails create_task`).
 
 trails writes only to its own data: the database, its locks, the model cache and the capture
 store `<db>/captures.git`. Read `docs/philosophy.md` before adding anything that writes. Code
@@ -75,8 +89,12 @@ test compares its whole `.git` before and after.
 
 THE STORE REFUSES EXACTLY TWO THINGS, both as `ValidationError`: malformed input, and an
 attempt to overwrite, which is a version written from a stale or missing `base_version`, or a
-claim on a task another session holds without `take_over_reason`. Everything else is recorded
-as given, with a warning where it is worth noticing. Malformed includes a value wider than its
+claim on a task another session holds whose `holder` does not name that session. Everything
+else is recorded as given. Warnings cover only what happens outside the store (data in a
+temporary folder, code outside git, a missing path, a possible secret, an embedding failure)
+and a claim or close on an already closed task, which changes nothing and names the task's
+state. A no-op such as an unchanged revision or a release of an unclaimed task is reported as
+"nothing changed", not as a warning. Malformed includes a value wider than its
 column and two tags the case- and accent-insensitive collation treats as one; the database
 itself decides the second, on the failure path of a write.
 
@@ -112,10 +130,14 @@ digest is flagged) and returns field, line and detector, never the matched text.
      beside the model as structured content. A bare union or optional model would get a
      synthetic `{"result": ...}` envelope on MCP only, so `ops.operations()` refuses it.
   6. **Each operation module declares `OPERATION = Operation(...)`** (`ops/_marks.py`):
-     toolset `agent`, `full` or `cli`, and the read_only, destructive and idempotent hints.
+     toolset `agent`, `dreamer`, `full` or `cli`, and the read_only, destructive and idempotent
+     hints.
   7. **The docstring has a summary and the sections `Use this when:`, `Use instead:` and
      `Returns:`, and every parameter has a `Field(description=...)`.**
-     `tests/test_descriptions.py` asserts this for every discovered operation.
+     `tests/test_descriptions.py` asserts this for every discovered operation, and refuses
+     the words "only", "required when", "never" and "with id" in a parameter description,
+     because they mark a parameter that applies some of the time (principle 5 in
+     `docs/philosophy.md`). A use that is not conditional goes in its `ALLOWED` with a reason.
   8. **NO module under `ops/` carries `from __future__ import annotations`.** With it,
      pydantic's `FieldInfo` has no value equality and `get_type_hints(fn) != get_type_hints(fn)`,
      which breaks the signature equality `context.bind` must preserve. The binders omit it too.
@@ -126,16 +148,17 @@ digest is flagged) and returns field, line and detector, never the matched text.
   its state. The store cannot know which links the agent meant to add; this is the only guard
   against a forgotten or reversed one.
 - **SEARCH HITS ARE COMPACT PREVIEWS, NOT ENTRIES.** A hit carries id, kind, version, title,
-  state, tags, projects, claim standing, open comment count, a note's evidence users, the
-  rankers that matched, and an excerpt. `show` returns the full entry. Search reads current
-  versions only, and a note's fused score is halved.
+  state, tags, projects, evidence links, open comment count, the rankers that matched, and an
+  excerpt. `show` returns the full entry. Search reads current versions only; its keyword
+  rankers also cover close summaries and comment bodies, and no kind's score is weighted.
 - **PRIME'S SIZE DOES NOT GROW WITH HISTORY**, except the preference section, which prints
   preferences in full under a 10,000-character cap (Claude Code's SessionStart limit) and then
   title lines. Listing every record once made one 10,612,327-byte MCP reply on a 317-record
   project, which Kiro dropped.
-- Vocabularies (`KINDS`, `KIND_PREFIXES`, `LINK_RELATIONS`, `OUTCOMES`, `VERDICTS`,
-  `STATED_BY_VALUES`, `TASK_STATES`, `TASK_EVENTS`, `SEARCH_STATUSES`, `PROJECT_ACTIONS` and
-  the id patterns) are defined once in `src/trails/vocab.py`, which also generates the schema's
+- Vocabularies (`KINDS`, `KIND_PREFIXES`, `WORK_KINDS`, `KNOWLEDGE_KINDS`, `WORK_RELATIONS`,
+  `EVIDENCE_RELATIONS`, `LINK_RELATIONS`, `OUTCOMES`, `VERDICTS`, `TASK_STATES`, `TASK_EVENTS`,
+  `SEARCH_STATUSES`, `PROJECT_ACTIONS`, `PRIORITY_RANGE` and the id patterns, which the
+  parameter schemas carry so both surfaces enforce them) are defined once in `src/trails/vocab.py`, which also generates the schema's
   ENUM columns.
 - `author` is the OS user, from `author.current_author()`. There is no `--author` flag.
 - The vector arm is the `search` extra. Everything must keep working when it is absent.
@@ -162,7 +185,7 @@ digest is flagged) and returns field, line and detector, never the matched text.
   runs; with reads locked shared as well, 400 of 400 in every run, about 52 s. No retries.
 - **Every read is a subprocess, and invocations are the cost** (about 70ms each). Reads are
   batch-first: `EntryStore.get_entries` assembles any number of entries in ONE invocation, and
-  `EntryStore.task_graph` loads every goal, task and their links in one, through
+  `EntryStore.task_graph` loads every task and its links in one, through
   `dolt.read_result_sets` (dolt prints one JSON document per statement, `{}` for an empty set).
   A write holds the exclusive lock across its reads and its one write invocation, so the
   `base_version` check and the insert are one serialized decision.

@@ -24,7 +24,8 @@ The store refuses exactly two things, both as `ValidationError`:
 
 Everything else is recorded as given. Warnings cover only what happens outside the store: data
 in a temporary folder, code outside git, a path that does not exist, a possible secret, or an
-operational failure such as an embedding error.
+operational failure such as an embedding error. The one exception is a claim or close on a task
+that is already closed, which changes nothing and names the task's state.
 
 ## Entries
 
