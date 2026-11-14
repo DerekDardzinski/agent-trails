@@ -445,3 +445,40 @@ class RetireOutcome(BaseModel):
     entry_id: str
     reason: str
     already_retired: bool
+
+
+class CommentOutcome(BaseModel):
+    """A written comment, the entry versions it pinned, and anything it closed."""
+
+    comment: Comment
+    pinned: dict[str, int]
+    warnings: list[str]
+
+
+class CommentPage(BaseModel):
+    """The newest comments on one entry, newest first, with the total and open counts."""
+
+    entry_id: str
+    comments: list[Comment]
+    total: int
+    open: int
+    offset: int
+
+
+class VersionChange(BaseModel):
+    """An entry whose version moved after a comment pinned it. `pinned` is None for an entry
+    that was not under the commented entry when the comment was written."""
+
+    entry_id: str
+    title: str
+    pinned: int | None
+    current: int
+
+
+class SinceComment(BaseModel):
+    """What changed under a commented entry after the comment."""
+
+    comment: Comment
+    changed: list[VersionChange]
+    unchanged: list[str]
+    links: list[LinkEvent]

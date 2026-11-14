@@ -89,3 +89,6 @@ each one is in brackets.
     or goal's [step 2].
 30. **Cycle detection covers creation too**: `write(parent=..., waits_on=...)` can close a
     cycle, so it warns the same way `link` does [step 2].
+31. **`since_comment` also lists descendants added after the comment** (shown with no pinned
+    version), and its link list covers link events from or to the commented entry and its
+    descendants, old and new [step 3].

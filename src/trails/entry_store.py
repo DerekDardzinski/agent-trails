@@ -35,6 +35,9 @@ from trails.errors import DoltError, RecordNotFoundError, StoreUnavailableError,
 from trails.models import (
     ArtifactRef,
     CodeCapture,
+    Comment,
+    CommentOutcome,
+    CommentPage,
     Entry,
     EntryDraft,
     EntryLink,
@@ -48,8 +51,10 @@ from trails.models import (
     Provenance,
     RetireOutcome,
     SessionRow,
+    SinceComment,
     TaskEvent,
     TaskOutcome,
+    VersionChange,
 )
 from trails.secret_scan import scan_for_secrets
 from trails.store import (
@@ -78,6 +83,7 @@ from trails.store import (
 )
 from trails.taskgraph import Node, TaskGraph
 from trails.vocab import (
+    COMMENT_ID_PREFIX,
     ID_ALPHABET,
     ID_ATTEMPTS_PER_LENGTH,
     ID_LENGTHS,
@@ -100,6 +106,7 @@ from trails.vocab import (
     StatedBy,
     TaskEventKind,
     TaskState,
+    Verdict,
     enum_column,
 )
 
@@ -1528,6 +1535,250 @@ class EntryStore(Store):
                 return
             raise
 
+    # ------------------------------------------------------------------ comments
+
+    def add_comment(
+        self,
+        entry_id: str,
+        body: str,
+        addresses: Sequence[str] = (),
+        verdict: Verdict | None = None,
+    ) -> CommentOutcome:
+        """Append a comment beside an entry. It writes no version, so it never makes an
+        editor's base_version stale.
+
+        A comment with `addresses` is a response: it closes those comments. Each must be an
+        open comment on the same entry. On a goal or task the comment pins the current version
+        of every descendant, so a later `changes_since_comment` can list exactly what moved.
+
+        Raises:
+            ValidationError: empty text, an unknown verdict, or an `addresses` id that is not
+                an open comment on this entry.
+            RecordNotFoundError: no entry has this id.
+        """
+        text = body.strip()
+        if not text:
+            raise ValidationError("a comment needs text")
+        if verdict is not None and verdict not in VERDICTS:
+            raise ValidationError(f"verdict must be one of {', '.join(VERDICTS)}")
+        _require_text_bytes("comment", text)
+        targets = list(dict.fromkeys(addresses))
+        with dolt.exclusive(self.db_path):
+            entry = self.get_entry(entry_id)
+            if targets:
+                comment_rows, addressed_rows = dolt.read_result_sets(
+                    self.db_path,
+                    [
+                        _bind(
+                            "SELECT id, entry_id FROM comment WHERE id IN "
+                            f"({_placeholders(len(targets))})",
+                            targets,
+                        ),
+                        _bind(
+                            "SELECT comment_id, addressed_id FROM comment_addresses WHERE "
+                            f"addressed_id IN ({_placeholders(len(targets))}) OR comment_id IN "
+                            f"({_placeholders(len(targets))})",
+                            [*targets, *targets],
+                        ),
+                    ],
+                )
+                on_entry = {
+                    str(row["id"]) for row in comment_rows if str(row["entry_id"]) == entry_id
+                }
+                closed = {
+                    str(row["addressed_id"]): str(row["comment_id"])
+                    for row in addressed_rows
+                    if str(row["addressed_id"]) in targets
+                }
+                responses = {
+                    str(row["comment_id"])
+                    for row in addressed_rows
+                    if str(row["comment_id"]) in targets
+                }
+                for target in targets:
+                    if target not in on_entry:
+                        raise ValidationError(
+                            f"{target} is not a comment on {entry_id}; addresses names open "
+                            "comments on the same entry"
+                        )
+                    if target in responses:
+                        raise ValidationError(
+                            f"{target} is a response and is never open; address the comment it "
+                            "responds to only if that is still open"
+                        )
+                    if target in closed:
+                        raise ValidationError(
+                            f"{target} was already addressed by {closed[target]}; addresses "
+                            "names open comments only"
+                        )
+            pins: dict[str, int] = {}
+            if entry.kind in WORK_KINDS:
+                graph = self.task_graph()
+                pins = {item: graph.nodes[item].version for item in graph.descendants(entry_id)}
+            provenance = sessions.current_provenance()
+            moment = _now()
+            comment_id = self._unused_comment_id()
+            comment = Comment(
+                id=comment_id,
+                entry_id=entry_id,
+                entry_version=entry.current.version,
+                body=text,
+                verdict=verdict,
+                addresses=targets,
+                addressed_by=[],
+                author=current_author(),
+                harness=provenance.harness,
+                session_id=provenance.session_id,
+                created_at=moment,
+            )
+            statements = [
+                _insert(
+                    "comment",
+                    {
+                        "id": comment_id,
+                        "entry_id": entry_id,
+                        "entry_version": comment.entry_version,
+                        "body": text,
+                        "verdict": verdict,
+                        "author": comment.author,
+                        "harness": comment.harness,
+                        "session_id": comment.session_id,
+                        "created_at": moment,
+                    },
+                ),
+                *(
+                    _insert("comment_addresses", {"comment_id": comment_id, "addressed_id": item})
+                    for item in targets
+                ),
+                *(
+                    _insert(
+                        "comment_pin",
+                        {"comment_id": comment_id, "entry_id": item, "version": version},
+                    )
+                    for item, version in pins.items()
+                ),
+                *_session_insert(provenance, moment),
+                f"CALL DOLT_COMMIT('-A','-m',{dolt.sql_literal(f'comment {comment_id}')})",
+            ]
+            try:
+                self._execute_script(["START TRANSACTION", *statements])
+            except DoltError:
+                stored = self._read(
+                    _bind("SELECT created_at FROM comment WHERE id = ?", [comment_id])
+                )
+                if not (stored and _as_datetime(stored[0]["created_at"]) == moment):
+                    raise
+        return CommentOutcome(comment=comment, pinned=pins, warnings=[])
+
+    def get_comments(self, entry_id: str, limit: int = 5, offset: int = 0) -> CommentPage:
+        """The newest `limit` comments on an entry after skipping `offset`, newest first, with
+        the entry's total and open comment counts, in one read."""
+        rows, addresses = dolt.read_result_sets(
+            self.db_path,
+            [
+                _bind(
+                    "SELECT * FROM comment WHERE entry_id = ? ORDER BY created_at DESC, id DESC",
+                    [entry_id],
+                ),
+                _bind(
+                    "SELECT a.comment_id, a.addressed_id FROM comment_addresses a JOIN comment c "
+                    "ON c.id = a.comment_id WHERE c.entry_id = ? ORDER BY a.comment_id",
+                    [entry_id],
+                ),
+            ],
+        )
+        comments = _comments(rows, addresses)
+        return CommentPage(
+            entry_id=entry_id,
+            comments=comments[offset : offset + max(limit, 0)],
+            total=len(comments),
+            open=sum(1 for item in comments if _is_open(item)),
+            offset=offset,
+        )
+
+    def get_comment(self, comment_id: str) -> Comment:
+        """One comment.
+
+        Raises:
+            RecordNotFoundError: no comment has this id.
+        """
+        rows, addresses = dolt.read_result_sets(
+            self.db_path,
+            [
+                _bind("SELECT * FROM comment WHERE id = ?", [comment_id]),
+                _bind(
+                    "SELECT comment_id, addressed_id FROM comment_addresses WHERE comment_id = ? "
+                    "OR addressed_id = ?",
+                    [comment_id, comment_id],
+                ),
+            ],
+        )
+        found = _comments(rows, addresses)
+        if not found:
+            raise RecordNotFoundError(f"no comment has id {comment_id!r}")
+        return found[0]
+
+    def open_comment_counts(self, entry_ids: Sequence[str]) -> dict[str, int]:
+        """How many open comments each entry has, in one read. Absent means none."""
+        ids = list(dict.fromkeys(entry_ids))
+        if not ids:
+            return {}
+        rows = self._read(
+            _bind(
+                "SELECT c.entry_id, COUNT(*) AS open_count FROM comment c WHERE c.entry_id IN "
+                f"({_placeholders(len(ids))}) AND NOT EXISTS (SELECT 1 FROM comment_addresses a "
+                "WHERE a.addressed_id = c.id) AND NOT EXISTS (SELECT 1 FROM comment_addresses r "
+                "WHERE r.comment_id = c.id) GROUP BY c.entry_id",
+                ids,
+            )
+        )
+        return {str(row["entry_id"]): int(row["open_count"]) for row in rows}
+
+    def changes_since_comment(self, comment_id: str) -> SinceComment:
+        """The entries whose version moved, and the link events, under a commented entry
+        after the comment: the entry itself, every descendant it pinned, and every current
+        descendant it did not pin (new since)."""
+        comment = self.get_comment(comment_id)
+        pin_rows = self._read(
+            _bind("SELECT entry_id, version FROM comment_pin WHERE comment_id = ?", [comment_id])
+        )
+        pins = {str(row["entry_id"]): int(row["version"]) for row in pin_rows}
+        pins[comment.entry_id] = comment.entry_version
+        entry = self.get_entry(comment.entry_id)
+        current_descendants: list[str] = []
+        if entry.kind in WORK_KINDS:
+            current_descendants = self.task_graph().descendants(comment.entry_id)
+        scope = list(dict.fromkeys([comment.entry_id, *pins, *current_descendants]))
+        found = self.get_entries(scope)
+        changed: list[VersionChange] = []
+        unchanged: list[str] = []
+        for item in scope:
+            now = found.get(item)
+            if now is None:
+                continue
+            pinned = pins.get(item)
+            if pinned is None or pinned != now.current.version:
+                changed.append(
+                    VersionChange(
+                        entry_id=item,
+                        title=now.current.title,
+                        pinned=pinned,
+                        current=now.current.version,
+                    )
+                )
+            else:
+                unchanged.append(item)
+        links = [
+            event for event in self.link_events(scope) if event.created_at > comment.created_at
+        ]
+        return SinceComment(comment=comment, changed=changed, unchanged=unchanged, links=links)
+
+    def _unused_comment_id(self) -> str:
+        for candidate in _id_candidates(COMMENT_ID_PREFIX):
+            if not self._read(_bind("SELECT id FROM comment WHERE id = ?", [candidate])):
+                return candidate
+        raise DoltError("failed to generate an unused comment id")
+
     # ---------------------------------------------------------------- internals
 
     def _commit(
@@ -2088,3 +2339,59 @@ def cycle_warnings(graph: TaskGraph, entry_ids: Sequence[str]) -> list[str]:
         + "; none of these can become ready until one link in the cycle is removed with unlink"
         for cycle in graph.cycles_among(entry_ids)
     ]
+
+
+def _comments(rows: Sequence[dict[str, Any]], addresses: Sequence[dict[str, Any]]) -> list[Comment]:
+    """Comments in row order with what each addresses and what addressed it."""
+    addresses_by: dict[str, list[str]] = {}
+    addressed_by: dict[str, list[str]] = {}
+    for row in addresses:
+        source, target = str(row["comment_id"]), str(row["addressed_id"])
+        addresses_by.setdefault(source, []).append(target)
+        addressed_by.setdefault(target, []).append(source)
+    return [
+        Comment(
+            id=str(row["id"]),
+            entry_id=str(row["entry_id"]),
+            entry_version=int(row["entry_version"]),
+            body=str(row.get("body", "")),
+            verdict=_as_verdict(row.get("verdict")),
+            addresses=sorted(addresses_by.get(str(row["id"]), [])),
+            addressed_by=sorted(addressed_by.get(str(row["id"]), [])),
+            author=str(row["author"]),
+            harness=str(row["harness"]),
+            session_id=_optional_str(row.get("session_id")),
+            created_at=_as_datetime(row["created_at"]),
+        )
+        for row in rows
+    ]
+
+
+def _is_open(comment: Comment) -> bool:
+    """Open: not a response, and no comment has addressed it."""
+    return not comment.addresses and not comment.addressed_by
+
+
+def is_open_comment(comment: Comment) -> bool:
+    """Whether a comment still needs a response."""
+    return _is_open(comment)
+
+
+def _as_verdict(value: Any) -> Verdict | None:
+    if value is None:
+        return None
+    for verdict in VERDICTS:
+        if verdict == str(value):
+            return verdict
+    raise DoltError(f"comment has unknown verdict {value!r}")
+
+
+def unchanged_responses(comments: Sequence[Comment]) -> set[str]:
+    """Responses written against the same entry version as a comment they address: the
+    feedback was answered without a new version (shown as "addressed with no new version")."""
+    versions = {item.id: item.entry_version for item in comments}
+    return {
+        item.id
+        for item in comments
+        if any(versions.get(target) == item.entry_version for target in item.addresses)
+    }
