@@ -254,6 +254,7 @@ def _preferences(store: EntryStore, project_id: str | None) -> PreferenceSection
             conflicts=candidate.conflicts,
             omitted=candidate.omitted,
             conflicts_omitted=candidate.conflicts_omitted,
+            project=project_id,
         )
         return len("\n".join(lines)) <= PREFERENCE_CAP
 

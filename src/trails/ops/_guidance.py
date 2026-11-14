@@ -113,12 +113,18 @@ def uncaptured_location_warnings(  # noqa: PLR0917 — one warning check over a 
         if len(mentioned) > TEXT_PATHS_SHOWN:
             shown += f" and {len(mentioned) - TEXT_PATHS_SHOWN} more"
         scripts = [item for item in mentioned if is_code(Path(item))]
-        advice = (
-            "Commit the scripts to a git repository and pass it in repos; move data somewhere "
-            "permanent and name it in artifacts"
-            if scripts
-            else "Move them somewhere permanent and name them in artifacts"
-        )
+        if kind != "note":
+            # Only a note carries artifacts and captured code; any other kind records where
+            # its files went in its body.
+            scripts = []
+            advice = "Move them somewhere permanent and write the new locations in the body"
+        elif scripts:
+            advice = (
+                "Commit the scripts to a git repository and pass it in repos; move data "
+                "somewhere permanent and name it in artifacts"
+            )
+        else:
+            advice = "Move them somewhere permanent and name them in artifacts"
         warnings.append(
             f"the entry names {_count(len(mentioned), 'path')} in temporary directories, which the "
             f"operating system may delete, and trails keeps no copy: {shown}. {advice}: "

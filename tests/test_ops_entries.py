@@ -336,7 +336,7 @@ AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
 
 
 def test_a_replace_that_would_close_a_cycle_is_refused(store: EntryStore) -> None:
-    """Review finding 1, updated for principle 6. Silent failure caught: a replace moving a
+    """Silent failure caught: a replace moving a
     child onto its own parent, so the child can never become ready; the move is malformed,
     so the replace is refused and the task stays open."""
     from trails.errors import ValidationError
@@ -464,3 +464,21 @@ def test_set_priority_writes_a_version_and_clears_with_null(store: EntryStore) -
         (3, None, "parked"),
     ]
     assert (raised.version, cleared.version) == (2, 3)
+
+
+def test_a_temporary_path_in_a_task_body_asks_only_for_a_body_change(
+    store: EntryStore, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Silent failure caught: a warning on a task telling the agent to pass repos and
+    artifacts, which revise_task does not take, so the fix it names cannot be made."""
+    from trails import locations
+
+    monkeypatch.setattr(locations, "temporary_roots", lambda: (tmp_path.resolve(),))
+    result = run(store, create_task, title="w", body=f"script at {tmp_path}/foo/run.py")
+    [warning] = result.warnings
+    assert "repos" not in warning
+    assert "artifacts" not in warning
+    assert warning.endswith(
+        f'write the new locations in the body: revise_task("{result.id}", base_version=1, '
+        'reason="...", body=...)'
+    )

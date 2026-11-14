@@ -116,7 +116,7 @@ def test_operation_name_maps_one_canonical_name_to_both_spellings() -> None:
     one canonical name and are asserted against hardcoded literals.
     """
     assert ops.operation_name(write_goal) == "write_goal"
-    assert ops.cli_path(write_goal) == ("write", "goal")
+    assert ops.cli_path(write_goal) == ("write_goal",)
     assert ops.tool_name(write_goal) == "write_goal"
 
     assert ops.operation_name(show) == "show"

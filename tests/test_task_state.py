@@ -275,3 +275,32 @@ def test_blocked_lists_waiting_tasks_but_not_a_parent_with_open_children(
     assert graph.blocked() == [parent, child]
     assert graph.waiting_on(child) == [(blocker, parent)]
     assert graph.is_ready(other_parent) is False
+
+
+def test_a_link_closing_a_cycle_through_a_descendant_is_refused(entries: EntryStore) -> None:
+    """Silent failure caught: a cycle that runs through the source's child rather than the
+    source, stored without a word because only cycles through the source were checked (a
+    task inherits its ancestors' waits_on targets). Both cases from the R4 review."""
+    source = make(entries, "task", "S")
+    child = make(entries, "task", "D", parent=source)
+    make(entries, "task", "T", waits_on=[child])
+    waiting = entries.task_graph().dependents(child)[0]
+    with pytest.raises(ValidationError, match="dependency cycle"):
+        entries.add_entry_link(source, "waits_on", waiting)
+
+    other = make(entries, "task", "S2")
+    other_child = make(entries, "task", "D2", parent=other)
+    middle = make(entries, "task", "X", waits_on=[other_child])
+    top = make(entries, "task", "T2", waits_on=[middle])
+    with pytest.raises(ValidationError, match="dependency cycle"):
+        entries.add_entry_link(other, "part_of", top)
+    assert entries.task_graph().waits.get(source) is None
+    assert entries.task_graph().parents.get(other) is None
+
+
+def test_unlinking_an_id_that_names_no_entry_is_refused(entries: EntryStore) -> None:
+    """Silent failure caught: a mistyped id in an unlink reported as "nothing changed", so
+    the agent believes the link is gone when it unlinked nothing."""
+    task = make(entries, "task", "t")
+    with pytest.raises(ValidationError, match="no entry has id tsk-aaaaa"):
+        entries.remove_entry_link(task, "waits_on", "tsk-aaaaa", "typo")

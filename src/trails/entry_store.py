@@ -188,7 +188,8 @@ SCHEMA: tuple[str, ...] = (
         harness    VARCHAR({NAME_CHARS}) {_TEXT} NOT NULL,
         session_id VARCHAR({SESSION_CHARS}) {_TEXT},
         created_at DATETIME(6) NOT NULL,
-        PRIMARY KEY (entry_id, sequence)
+        PRIMARY KEY (entry_id, sequence),
+        FULLTEXT KEY ft_task_event_reason (reason)
     )""",
     f"""CREATE TABLE comment (
         id            VARCHAR(32) {_TEXT} PRIMARY KEY,
@@ -742,7 +743,7 @@ class EntryStore(Store):
             if capture_ref is not None and new_id is not None and entry_id != new_id:
                 # The refs were moved to the id minted here and nothing landed under it; the
                 # caller discards refs under the id it minted, which no longer has any.
-                capture.discard_unwritten_refs(capture.store_path(self.db_path), entry_id)
+                capture.discard_unwritten_refs(capture.store_path(self.db_path), capture_ref)
             raise
         entry = Entry(
             id=entry_id,
@@ -977,7 +978,7 @@ class EntryStore(Store):
                 graph = self.task_graph()
                 table = graph.parents if relation == "part_of" else graph.waits
                 table.setdefault(source_id, []).append(target_id)
-                _refuse_cycle_through(graph, source_id)
+                _refuse_cycles_from(graph, [source_id, target_id])
             self._commit_events(
                 [_link_insert(event)], f"link {source_id} {relation} {target_id}", event, provenance
             )
@@ -1011,6 +1012,7 @@ class EntryStore(Store):
             )
         _require_text_bytes("reason", normal_reason)
         with dolt.exclusive(self.db_path):
+            self._require_entries([source_id, target_id])
             latest = self._latest_link(source_id, relation, target_id)
             if latest is None or latest.action == "remove":
                 return LinkOutcome(
@@ -1304,8 +1306,7 @@ class EntryStore(Store):
                         targets.remove(entry_id)
                     if item.to_id not in targets:
                         targets.append(item.to_id)
-                for source in sorted({item.source_id for item in moved}):
-                    _refuse_cycle_through(graph, source)
+                _refuse_cycles_from(graph, sorted({item.source_id for item in moved}))
             warnings = _secret_warnings({"summary": normal_summary})
             self._commit_events(statements, f"close {entry_id} {outcome}", event, provenance)
         return self._task_outcome(entry, event, moved=moved, warnings=warnings)
@@ -2075,6 +2076,17 @@ def _refuse_cycles(graph: TaskGraph, relations: Sequence[tuple[LinkRelation, str
         table = graph.parents if relation == "part_of" else graph.waits
         table.setdefault(NEW_TASK, []).append(target)
     _refuse_cycle_through(graph, NEW_TASK)
+
+
+def _refuse_cycles_from(graph: TaskGraph, changed: Sequence[str]) -> None:
+    """Refuse when a changed link closed a cycle anywhere it reaches. A task inherits its
+    ancestors' waits_on targets, so a link on a task also changes what each of its
+    descendants needs, and a new cycle can pass through any of them rather than the task."""
+    reached = list(
+        dict.fromkeys(item for root in changed for item in [root, *graph.descendants(root)])
+    )
+    for item in reached:
+        _refuse_cycle_through(graph, item)
 
 
 def _refuse_cycle_through(graph: TaskGraph, entry_id: str) -> None:

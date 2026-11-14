@@ -226,12 +226,12 @@ def test_cli_exit_codes_distinguish_a_usage_error_from_a_refusal(
     _registered(monkeypatch, refuses_usage, refuses_store)
 
     usage_code, _, usage_err = _run_cli(
-        monkeypatch, capsys, ["refuses", "usage", "--flag", "strict", "--db", str(store.db_path)]
+        monkeypatch, capsys, ["refuses_usage", "--flag", "strict", "--db", str(store.db_path)]
     )
     refusal_code, _, refusal_err = _run_cli(
         monkeypatch,
         capsys,
-        ["refuses", "store", "--record-id", "01ABC", "--db", str(store.db_path)],
+        ["refuses_store", "--record-id", "01ABC", "--db", str(store.db_path)],
     )
 
     assert usage_code == 2
@@ -410,12 +410,12 @@ def test_cli_delivers_an_optional_json_object_inline_and_from_a_file(
     entry_file.write_text('{"attempt": 2}')
 
     inline_code, inline_out, inline_err = _run_cli(
-        monkeypatch, capsys, ["optional", "entry", "--entry", '{"attempt": 1}']
+        monkeypatch, capsys, ["optional_entry", "--entry", '{"attempt": 1}']
     )
     file_code, file_out, _ = _run_cli(
-        monkeypatch, capsys, ["optional", "entry", "--entry-from-file", str(entry_file)]
+        monkeypatch, capsys, ["optional_entry", "--entry-from-file", str(entry_file)]
     )
-    omitted_code, omitted_out, _ = _run_cli(monkeypatch, capsys, ["optional", "entry"])
+    omitted_code, omitted_out, _ = _run_cli(monkeypatch, capsys, ["optional_entry"])
 
     assert (inline_code, inline_err) == (0, "")
     assert json.loads(inline_out) == {"entry": {"attempt": 1}}
@@ -440,7 +440,7 @@ def test_neither_binder_translates_a_runtime_error(
     _registered(monkeypatch, binder_bug)
 
     # `binder_bug` carries an underscore, so its command path is `binder bug`.
-    escaped = _cli_raises(capsys, ["binder", "bug", "--label", "x", "--db", str(store.db_path)])
+    escaped = _cli_raises(capsys, ["binder_bug", "--label", "x", "--db", str(store.db_path)])
 
     assert isinstance(escaped, RuntimeError)
     assert not isinstance(escaped, SystemExit)
@@ -502,7 +502,7 @@ def test_create_note_help_shows_field_descriptions_and_the_object_format(
     """labbook-79y.6 items 6 and 17, over the real registry. Silent failure: the CLI help
     showing parameter names only, so an agent cannot tell what a list-of-object flag takes;
     measured in the labbook-79y.5 probe as two refused writes."""
-    code, raw, _ = _run_cli(monkeypatch, capsys, ["create", "note", "--help"])
+    code, raw, _ = _run_cli(monkeypatch, capsys, ["create_note", "--help"])
     # The help is boxed and wrapped to the terminal width, so compare it as one line of words.
     out = " ".join(raw.replace("│", " ").split())
 
@@ -523,13 +523,13 @@ def test_cli_takes_each_artifact_as_one_json_object(
     code, out, _ = _run_cli(
         monkeypatch,
         capsys,
-        ["create", "note", "--title", "a", "--artifacts", artifact, "--json", *db],
+        ["create_note", "--title", "a", "--artifacts", artifact, "--json", *db],
     )
     task = json.loads(out)["id"]
     bad, _, err = _run_cli(
         monkeypatch,
         capsys,
-        ["create", "note", "--title", "c", "--artifacts", '{"digest": "x"}', *db],
+        ["create_note", "--title", "c", "--artifacts", '{"digest": "x"}', *db],
     )
 
     entry = store.get_entry(task)

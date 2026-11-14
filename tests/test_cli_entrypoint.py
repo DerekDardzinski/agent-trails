@@ -42,8 +42,8 @@ def test_version_command_reports_package_version(capsys: pytest.CaptureFixture[s
 
 @pytest.mark.parametrize(
     "argv",
-    [[], ["--help"], ["search", "--help"], ["create", "task", "--help"], ["--version"]],
-    ids=["no arguments", "root help", "command help", "nested command help", "version flag"],
+    [[], ["--help"], ["search", "--help"], ["create_task", "--help"], ["--version"]],
+    ids=["no arguments", "root help", "command help", "underscore command help", "version flag"],
 )
 def test_every_help_and_version_path_succeeds(
     argv: list[str], capsys: pytest.CaptureFixture[str]

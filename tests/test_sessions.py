@@ -87,10 +87,27 @@ def test_cli_under_synth_takes_a_kiro_session_that_has_a_lease(tmp_path: Path) -
         env={"KIRO_SESSION_ID": "sess_live"},
         home=tmp_path,
         chain=chain(ProcessRow(100, 50, "/bin/zsh -c trails write"), ProcessRow(50, 1, "synth")),
+        alive=lambda pid: pid == 200,
     )
     assert found == Provenance(
         harness="kiro", session_id="sess_live", transcript=str(transcript), agent="lab-lead"
     )
+
+
+def test_cli_does_not_take_a_kiro_session_whose_lease_names_a_dead_process(
+    tmp_path: Path,
+) -> None:
+    """Silent failure caught: a CLI write attributed to a crashed Kiro session whose lease
+    was left behind (fac-x8s2n), so provenance names a session that did not write it."""
+    kiro_home(tmp_path, "sess_crashed", pid=200)
+    found = sessions.resolve(
+        None,
+        env={"KIRO_SESSION_ID": "sess_crashed"},
+        home=tmp_path,
+        chain=chain(ProcessRow(100, 50, "/bin/zsh -c trails write"), ProcessRow(50, 1, "synth")),
+        alive=lambda _pid: False,
+    )
+    assert found == Provenance(harness="unknown")
 
 
 def test_stale_lease_with_a_reused_pid_loses_to_the_live_one(tmp_path: Path) -> None:

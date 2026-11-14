@@ -28,7 +28,7 @@ async def blocked(
 
     Use instead: ready, for the tasks you can start; show, for one task's full state.
 
-    Returns: blocked tasks in the ready queue's order (priority, then age), each with every task it or an ancestor waits on that is not closed completed, and that task's state as stored (open, claimed, closed dropped, closed failed, closed superseded, retired).
+    Returns: blocked tasks in the ready queue's order (priority, then age), each with every task it or an ancestor waits on that is not closed completed, and that task's state as stored (open, claimed, closed dropped, closed failed, closed superseded).
     """
     if limit < 1:
         raise UsageError(f"limit must be at least 1, not {limit}")

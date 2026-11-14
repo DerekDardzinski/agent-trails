@@ -626,6 +626,7 @@ def preference_section(result: PrimeResult) -> list[str]:
         conflicts=result.preference_conflicts,
         omitted=result.preferences_omitted,
         conflicts_omitted=result.preference_conflicts_omitted,
+        project=result.project.id if result.project else None,
     )
 
 
@@ -636,8 +637,13 @@ def preference_lines(
     conflicts: Sequence[str],
     omitted: int = 0,
     conflicts_omitted: int = 0,
+    project: str | None = None,
 ) -> list[str]:
-    """The one builder of the preference section, used both to size it and to print it."""
+    """The one builder of the preference section, used both to size it and to print it.
+
+    With a project, the section holds that project's preferences and the global ones, so the
+    calls for what it left out are the project's search and the whole-store search."""
+    scope = {"projects": [project]} if project else {}
     if not (preferences or conflicts or omitted or conflicts_omitted):
         return []
     lines = ["preferences:"]
@@ -647,15 +653,19 @@ def preference_lines(
         else:
             lines.append(preference_title_line(item.id, item.scope, item.title))
     if omitted:
-        lines.append(
-            f"{omitted} more preferences not listed: {call('search', kinds=['preference'])}"
-        )
+        listed = call("search", kinds=["preference"], **scope)
+        if project:
+            listed += f" (this project's) · {call('search', kinds=['preference'])} (all)"
+        lines.append(f"{omitted} more preferences not listed: {listed}")
     if cap_hit:
         lines.append(PREFERENCE_CAP_WARNING)
     lines += [f"conflict: {item}" for item in conflicts]
     if conflicts_omitted:
-        lines.append(
-            f"{conflicts_omitted} more conflicts not listed: "
-            + call("search", kinds=["preference"], contradicted=True)
-        )
+        listed = call("search", kinds=["preference"], contradicted=True, **scope)
+        if project:
+            listed += (
+                f" (this project's) · {call('search', kinds=['preference'], contradicted=True)} "
+                "(all)"
+            )
+        lines.append(f"{conflicts_omitted} more conflicts not listed: {listed}")
     return lines

@@ -79,6 +79,10 @@ def run_entry_search(
     if keyword_query:
         names.append("keyword")
         statements.append(_keyword_statement(keyword_query, where))
+        names.append("close_summary")
+        statements.append(_close_summary_statement(keyword_query, where))
+        names.append("comment")
+        statements.append(_comment_statement(keyword_query, where))
     if exact_terms:
         names.append("exact")
         statements.append(_exact_statement(exact_terms, where))
@@ -96,7 +100,7 @@ def run_entry_search(
     results = dict(zip(names, dolt.read_result_sets(store.db_path, statements), strict=True))
     created: dict[str, str] = {}
     rankings: dict[str, list[str]] = {}
-    for name in ("keyword", "exact"):
+    for name in ("keyword", "close_summary", "comment", "exact"):
         if name in results:
             rankings[name] = list(dict.fromkeys(str(row["id"]) for row in results[name]))
             for row in results[name]:
@@ -316,6 +320,28 @@ def _keyword_statement(query: str, where: str) -> str:
         f"SELECT e.id AS id, e.kind AS kind, x.created_at AS created_at, {title} + {body} AS "
         f"score {_FROM} WHERE ({title} OR {body}) AND {where} "
         "ORDER BY score DESC, x.created_at DESC, e.id ASC"
+    )
+
+
+def _close_summary_statement(query: str, where: str) -> str:
+    """Entries whose close summary matches: what a task's closer wrote about how it ended."""
+    match = f"MATCH(t.reason) AGAINST ({_lit(query)} IN NATURAL LANGUAGE MODE)"
+    return (
+        f"SELECT e.id AS id, e.kind AS kind, x.created_at AS created_at, MAX({match}) AS score "
+        f"FROM task_event t JOIN entry e ON e.id = t.entry_id JOIN entry_version x ON "
+        f"x.entry_id = e.id AND {_CURRENT} WHERE t.event = 'close' AND {match} AND {where} "
+        "GROUP BY e.id, e.kind, x.created_at ORDER BY score DESC, x.created_at DESC, e.id ASC"
+    )
+
+
+def _comment_statement(query: str, where: str) -> str:
+    """Entries with a comment whose body matches."""
+    match = f"MATCH(c.body) AGAINST ({_lit(query)} IN NATURAL LANGUAGE MODE)"
+    return (
+        f"SELECT e.id AS id, e.kind AS kind, x.created_at AS created_at, MAX({match}) AS score "
+        f"FROM comment c JOIN entry e ON e.id = c.entry_id JOIN entry_version x ON "
+        f"x.entry_id = e.id AND {_CURRENT} WHERE {match} AND {where} "
+        "GROUP BY e.id, e.kind, x.created_at ORDER BY score DESC, x.created_at DESC, e.id ASC"
     )
 
 

@@ -132,7 +132,7 @@ register_project / set_paths / revise_framing / set_projects
 
 `trails-mcp --toolset dreamer` adds `create_skill` and `revise_skill` for the consolidation
 pass; `--toolset full` adds those and `lint`, `alias`, `embed` and `version`. The CLI has every
-operation, with multi-word names split (`trails add comment`, `trails register project`);
+operation under the same name (`trails create_task`, `trails register_project`);
 `trails <name> --help` describes each.
 
 ## Concurrency

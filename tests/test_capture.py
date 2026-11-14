@@ -217,7 +217,10 @@ def test_a_capture_is_readable_after_the_repository_is_deleted(
         check=False,
         timeout=60,
     )
-    assert (fsck.returncode, fsck.stderr) == (0, "")
+    # git 2.43 prints "notice: HEAD points to an unborn branch" for the bare store; a notice
+    # is not a problem fsck found.
+    problems = [line for line in fsck.stderr.splitlines() if not line.startswith("notice:")]
+    assert (fsck.returncode, problems) == (0, [])
 
 
 def test_a_clean_tree_is_not_dirty_and_an_edit_is(

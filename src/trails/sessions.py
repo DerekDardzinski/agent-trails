@@ -18,7 +18,8 @@ The order:
    executable named `kiro`) or Claude Code (an executable named `claude`). Kiro runs as a `node`
    process whose path contains `kiro-cli` (trails `fac-7azma`), so the executable's name alone
    would miss it.
-3. On the CLI only, Kiro when `KIRO_SESSION_ID` names a session that has a lease (see below).
+3. On the CLI only, Kiro when `KIRO_SESSION_ID` names a session whose lease names a running
+   process (see below).
 4. Otherwise `unknown`, with no session.
 
 Kiro gives an MCP server no session variable. Its session lease
@@ -129,6 +130,7 @@ def resolve(
     env: Mapping[str, str],
     home: Path,
     chain: Callable[[], Sequence[ProcessRow]],
+    alive: Callable[[int], bool] | None = None,
 ) -> Provenance:
     """Decide the harness, then read that harness's session, transcript and agent.
 
@@ -149,7 +151,7 @@ def resolve(
     on_cli = client_name is None
     harness = harness_from_client(client_name) or harness_from_processes(processes())
     if harness is None:
-        if on_cli and _kiro_lease_exists(home, env.get("KIRO_SESSION_ID") or ""):
+        if on_cli and _kiro_lease_live(home, env.get("KIRO_SESSION_ID") or "", alive or pid_alive):
             return _kiro_session(home, env["KIRO_SESSION_ID"])
         stated = (client_name or "").strip()[:HARNESS_CHARS]
         return Provenance(harness=stated or UNKNOWN_HARNESS)
@@ -190,13 +192,31 @@ def _kiro(env: Mapping[str, str], home: Path, chain: Sequence[ProcessRow]) -> Pr
     return _kiro_session(home, session)
 
 
-def _kiro_lease_exists(home: Path, session: str) -> bool:
+def _kiro_lease_live(home: Path, session: str, alive: Callable[[int], bool]) -> bool:
+    """Whether `session` has a lease whose Kiro process is still running. A crashed session
+    leaves its lease behind (trails `fac-x8s2n`), and taking its id then would record a dead
+    session as the writer, so the lease's pid must be alive."""
     if not session or "/" in session or session.startswith("."):
         return False
     try:
-        return (home / ".kiro" / "session-leases" / f"{session}.lease").is_file()
+        data = json.loads((home / ".kiro" / "session-leases" / f"{session}.lease").read_text())
+    except (OSError, ValueError):
+        return False
+    pid = data.get("pid") if isinstance(data, dict) else None
+    return isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 and alive(pid)
+
+
+def pid_alive(pid: int) -> bool:
+    """Whether a process with this pid exists: signal 0 checks without sending anything."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
     except OSError:
         return False
+    return True
 
 
 def _kiro_session(home: Path, session: str) -> Provenance:

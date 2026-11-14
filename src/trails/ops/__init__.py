@@ -92,9 +92,8 @@ def operations() -> tuple[OpFn[..., Any], ...]:
 def operation_name(fn: OpFn[..., Any]) -> str:
     """The canonical name, from which each binder derives its own spelling.
 
-    A module named `add_comment` yields CLI path `add comment` and tool name
-    `add_comment`; a module named `show` yields `show` and `show`. One mapping, so a name
-    cannot be spelled two ways.
+    A module named `create_task` yields CLI command `create_task` and tool name
+    `create_task`. One mapping, so a name cannot be spelled two ways.
     """
     # `OpFn` is a Callable alias, which a type checker models structurally and therefore
     # without `__name__`. Every operation is a module-level async function, so the attribute
@@ -103,12 +102,12 @@ def operation_name(fn: OpFn[..., Any]) -> str:
 
 
 def cli_path(fn: OpFn[..., Any]) -> tuple[str, ...]:
-    """The CLI command path: the canonical name split into its segments.
+    """The CLI command path: the canonical name as one segment.
 
-    `add_comment` becomes ("add", "comment"), so `trails add comment` is the command,
-    and `show` becomes ("show",).
+    `create_task` is `trails create_task`, the same name every `Next:` line prints and the MCP
+    tool carries, so a name read in one place can be typed in the other.
     """
-    return tuple(operation_name(fn).split("_"))
+    return (operation_name(fn),)
 
 
 def tool_name(fn: OpFn[..., Any]) -> str:
