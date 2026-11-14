@@ -496,19 +496,19 @@ def test_no_module_uses_fastmcp_exclude_args() -> None:
     assert offenders == []
 
 
-def test_write_help_shows_field_descriptions_and_the_object_format(
+def test_create_note_help_shows_field_descriptions_and_the_object_format(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """labbook-79y.6 items 6 and 17, over the real registry. Silent failure: the CLI help
     showing parameter names only, so an agent cannot tell what a list-of-object flag takes;
     measured in the labbook-79y.5 probe as two refused writes."""
-    code, raw, _ = _run_cli(monkeypatch, capsys, ["write", "--help"])
+    code, raw, _ = _run_cli(monkeypatch, capsys, ["create", "note", "--help"])
     # The help is boxed and wrapped to the terminal width, so compare it as one line of words.
     out = " ".join(raw.replace("│", " ").split())
 
     assert code == 0
-    assert "One line saying what this is. Required for a new entry." in out
-    assert "skill: how to do something, written by the offline consolidation pass." in out
+    assert "One line saying what this is." in out
+    assert 'with keys "path", "exclude" (optional), "allow_large" (optional)' in out
     assert 'with keys "location", "digest" (optional), "notes" (optional)' in out
     assert '"sha256:<64 lowercase hex>"' in out
 
@@ -523,13 +523,13 @@ def test_cli_takes_each_artifact_as_one_json_object(
     code, out, _ = _run_cli(
         monkeypatch,
         capsys,
-        ["write", "--kind", "task", "--title", "a", "--artifacts", artifact, "--json", *db],
+        ["create", "note", "--title", "a", "--artifacts", artifact, "--json", *db],
     )
     task = json.loads(out)["id"]
     bad, _, err = _run_cli(
         monkeypatch,
         capsys,
-        ["write", "--kind", "note", "--title", "c", "--artifacts", '{"digest": "x"}', *db],
+        ["create", "note", "--title", "c", "--artifacts", '{"digest": "x"}', *db],
     )
 
     entry = store.get_entry(task)

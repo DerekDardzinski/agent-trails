@@ -13,7 +13,7 @@ from trails.errors import StoreUnavailableError
 from trails.models import Entry
 from trails.ops import context
 from trails.ops._entry_types import (
-    PrimeInitiative,
+    PrimeParent,
     PrimePreference,
     PrimeProjectRow,
     PrimeResult,
@@ -63,13 +63,14 @@ async def prime(
     graph = store.task_graph()
     if ref is None:
         listed = store.list_projects()
+        top_parents = _parents(graph)
         rows = [
             PrimeProjectRow(
                 id=item.id,
                 name=item.name,
                 framing_title=item.current_framing.title if item.current_framing else None,
-                open_initiatives=sum(
-                    1 for node_id in _initiatives(graph) if item.id in graph.nodes[node_id].projects
+                open_parents=sum(
+                    1 for node_id in top_parents if item.id in graph.nodes[node_id].projects
                 ),
             )
             for item in listed[:PROJECT_PAGE]
@@ -87,8 +88,8 @@ async def prime(
             preference_conflicts=found_preferences.conflicts,
             preferences_omitted=found_preferences.omitted,
             preference_conflicts_omitted=found_preferences.conflicts_omitted,
-            initiatives=[],
-            initiative_total=0,
+            parents=[],
+            parent_total=0,
             ready=0,
             open_comments=0,
             contradicted=[],
@@ -144,11 +145,9 @@ async def prime(
         for entry_id in contradicted_ids
         if entry_id in found_contradicted and incoming.get(entry_id)
     ]
-    initiatives = [
-        PrimeInitiative(
-            id=node_id, title=graph.nodes[node_id].title, state=node_state(graph, node_id)
-        )
-        for node_id in _initiatives(graph)
+    parents = [
+        PrimeParent(id=node_id, title=graph.nodes[node_id].title, state=node_state(graph, node_id))
+        for node_id in _parents(graph)
         if ref.id in graph.nodes[node_id].projects
     ]
     return PrimeResult(
@@ -161,8 +160,8 @@ async def prime(
         preference_conflicts=found_preferences.conflicts,
         preferences_omitted=found_preferences.omitted,
         preference_conflicts_omitted=found_preferences.conflicts_omitted,
-        initiatives=initiatives[:LIST_LIMIT],
-        initiative_total=len(initiatives),
+        parents=parents[:LIST_LIMIT],
+        parent_total=len(parents),
         ready=len(graph.ready(ref.id)),
         open_comments=int(open_rows[0]["n"]),
         contradicted=contradicted[:LIST_LIMIT],
@@ -172,8 +171,8 @@ async def prime(
     )
 
 
-def _initiatives(graph: TaskGraph) -> list[str]:
-    """Open top-level tasks that have children, oldest first: the work's initiatives."""
+def _parents(graph: TaskGraph) -> list[str]:
+    """Open top-level tasks that have children, oldest first: the initiatives of the work."""
     return [
         node.id
         for node in sorted(graph.nodes.values(), key=lambda item: (item.created_at, item.id))
@@ -286,8 +285,8 @@ def _unavailable(detail: str) -> PrimeResult:
         preferences=[],
         preference_cap_hit=False,
         preference_conflicts=[],
-        initiatives=[],
-        initiative_total=0,
+        parents=[],
+        parent_total=0,
         ready=0,
         open_comments=0,
         contradicted=[],

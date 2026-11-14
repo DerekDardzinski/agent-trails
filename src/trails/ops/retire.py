@@ -22,7 +22,7 @@ async def retire(
 
     Use this when: a claim, preference, note or skill is wrong or obsolete and nothing replaces it, or a task should vanish rather than be closed.
 
-    Use instead: write(id=..., base_version=..., reason=...), to correct it; close, to finish a task with an outcome.
+    Use instead: revise_note, revise_preference or revise_task, to correct it; close, to finish a task with an outcome.
 
     Returns: confirmation. Retiring a retired entry keeps the first reason and changes nothing.
     """

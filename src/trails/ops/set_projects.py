@@ -26,7 +26,7 @@ async def set_projects(
 
     Use this when: an entry was written unscoped, a project was registered later, or an entry should be shared with or removed from a project. A preference with no project is global.
 
-    Use instead: write(projects=...), to set memberships when creating an entry.
+    Use instead: the projects parameter of create_task, create_note or create_preference, to set memberships when creating an entry.
 
     Returns: the effective add and remove changes, the requested no-ops, and the entry's complete current membership.
     """

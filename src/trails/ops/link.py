@@ -36,7 +36,7 @@ async def link(
 
     Use this when: an edge was not known at creation, such as a dependency on a task created later, or a note that supports another note.
 
-    Use instead: write(parent=..., waits_on=...), when creating an entry whose edges you know; unlink, to remove a link.
+    Use instead: create_task(parent=..., waits_on=...), when creating a task whose edges you know; unlink, to remove a link.
 
     Returns: the link and the target version it was written against, the task graph around both ends for part_of and waits_on with each entry's state, and warnings such as a dependency cycle. A link that already exists changes nothing.
     """

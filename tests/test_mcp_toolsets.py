@@ -181,6 +181,9 @@ def test_the_default_toolset_is_exactly_the_agent_tools(
         "blocked",
         "claim",
         "close",
+        "create_note",
+        "create_preference",
+        "create_task",
         "link",
         "prime",
         "ready",
@@ -188,12 +191,15 @@ def test_the_default_toolset_is_exactly_the_agent_tools(
         "release",
         "reopen",
         "retire",
+        "revise_note",
+        "revise_preference",
+        "revise_task",
         "search",
+        "set_priority",
         "set_projects",
         "show",
         "unlink",
         "update_project",
-        "write",
     ]
 
 
@@ -214,7 +220,9 @@ def test_the_full_toolset_has_register_project_and_no_removed_operations(
 def test_an_unrecognised_toolset_argument_is_refused(store: Store) -> None:
     """labbook-79y.6 item 10. Silent failure: a Python caller's misspelled toolset served as
     the default, hiding tools with no reason given."""
-    with pytest.raises(ValueError, match="toolset must be 'agent' or 'full', not 'bogus'"):
+    with pytest.raises(
+        ValueError, match="toolset must be 'agent', 'dreamer' or 'full', not 'bogus'"
+    ):
         mcp_surface.build_mcp_server(store.db_path, "bogus")  # ty: ignore[invalid-argument-type]
 
 
@@ -254,18 +262,43 @@ def test_show_array_is_exposed_through_mcp_with_partial_missing_ids(store: Store
     assert "\n\nnot found: note-zzzzz\n\n" in result.content[0].text
 
 
-def test_write_schema_exposes_the_kind_choices(store: Store) -> None:
-    """Catches literal choices degrading to unconstrained strings in the agent tool schema."""
+def test_ids_of_the_wrong_kind_cannot_be_written_in_a_call(store: Store) -> None:
+    """Silent failure caught: a revise or link call naming an entry of another kind reaching
+    the store, where only a refusal or a warning could catch it (principle 5: the tools make
+    the wrong request unwritable). The schema carries the id pattern, and the call is an
+    error that writes nothing."""
     server = mcp_surface.build_mcp_server(store.db_path)
 
-    async def go() -> dict[str, Any]:
+    async def go() -> tuple[dict[str, Any], Any]:
         async with Client(server) as client:
             tools = {tool.name: tool.inputSchema for tool in await client.list_tools()}
-            return tools["write"]["properties"]
+            refused = await client.call_tool(
+                "revise_note",
+                {"id": "tsk-abcde", "base_version": 1, "reason": "r", "title": "x"},
+                raise_on_error=False,
+            )
+            return tools, refused
 
-    properties = asyncio.run(go())
-    assert properties["kind"]["anyOf"][0]["enum"] == ["task", "note", "preference", "skill"]
-    assert "stated_by" not in properties
+    tools, refused = asyncio.run(go())
+    assert tools["revise_note"]["properties"]["id"]["pattern"] == "^(?:note)-[0-9a-z]{5,6}$"
+    assert tools["create_task"]["properties"]["waits_on"]["items"]["pattern"] == (
+        "^(?:tsk)-[0-9a-z]{5,6}$"
+    )
+    assert "kind" not in tools["create_task"]["properties"]
+    assert refused.is_error is True
+    assert store.query("SELECT COUNT(*) AS n FROM entry") == [{"n": 0}]
+
+
+def test_skills_are_written_only_through_the_dreamer_toolset(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Silent failure caught: an agent in a session able to write a skill (dec-d1krx: skills
+    come from the consolidation pass), or the dreamer missing the agent tools."""
+    monkeypatch.delenv(mcp_surface.TOOLSET_ENV, raising=False)
+    agent = set(_tools(store))
+    dreamer = set(_tools(store, "dreamer"))
+    assert {"create_skill", "revise_skill"} & agent == set()
+    assert dreamer - agent == {"create_skill", "revise_skill"}
 
 
 def test_an_mcp_write_records_the_harness_its_client_names(
@@ -283,7 +316,7 @@ def test_an_mcp_write_records_the_harness_its_client_names(
         async with Client(
             server, client_info=Implementation(name="claude-code", version="2.1.325")
         ) as client:
-            return await client.call_tool("write", {"kind": "note", "title": "from claude"})
+            return await client.call_tool("create_note", {"title": "from claude"})
 
     result = asyncio.run(go())
     written = store.get_entry(result.structured_content["id"]).current
@@ -307,7 +340,7 @@ def test_an_mcp_client_with_an_empty_name_never_takes_the_inherited_kiro_session
 
     async def go() -> Any:
         async with Client(server, client_info=Implementation(name="", version="1")) as client:
-            return await client.call_tool("write", {"kind": "note", "title": "nameless"})
+            return await client.call_tool("create_note", {"title": "nameless"})
 
     result = asyncio.run(go())
     written = store.get_entry(result.structured_content["id"]).current

@@ -60,8 +60,8 @@ async def register_project(
     nonempty path list that does not exactly match all current paths refuses with an
     update_project call.
 
-    Use instead: update_project, to change paths or framing after registration; write, to
-    record tasks, notes and preferences in zero or more projects; set_projects, to change an
+    Use instead: update_project, to change paths or framing after registration; create_task,
+    create_note or create_preference, to record tasks, notes and preferences in zero or more projects; set_projects, to change an
     existing entry's memberships without writing a version.
 
     Returns: the stable project id and name, all current paths, the framing version written or

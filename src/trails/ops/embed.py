@@ -16,7 +16,7 @@ async def embed() -> EmbedResult:
 
     Use this when: lint reports unembedded entries or framing, for example after installing the search extra.
 
-    Use instead: nothing; write embeds each version it writes, and register_project or update_project embeds new framing, when the runtime is available.
+    Use instead: nothing; every create and revise operation embeds the version it writes, and register_project or update_project embeds new framing, when the runtime is available.
 
     Returns: availability plus separate entry, framing-version, entry-vector and framing-vector counts.
     """

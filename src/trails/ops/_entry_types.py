@@ -34,6 +34,7 @@ class WriteResult(RenderedResult):
     version: int
     created: bool
     retry: bool
+    unchanged_from: int | None = None
     projects: list[ProjectRef]
     embedded: bool
     captures: list[CaptureSummary]
@@ -44,7 +45,12 @@ class WriteResult(RenderedResult):
         if self.created:
             head = f"created {self.id} · {self.kind} · version 1"
         elif self.retry:
-            head = f"{self.id} · version {self.version} had already landed; nothing written"
+            head = (
+                f"{self.id} · version {self.unchanged_from} with this content had already "
+                "landed from this session; nothing written"
+            )
+        elif self.unchanged_from is not None:
+            head = f"{self.id} · same content as version {self.unchanged_from}; nothing written"
         else:
             head = f"{self.id} · {self.kind} · version {self.version}"
         lines = [head]
@@ -167,8 +173,7 @@ class BlockedResult(RenderedResult):
         lines = [f"blocked{scope}: {len(self.blocked)} of {self.total} shown"]
         for item in self.blocked:
             priority = f"P{item.priority}" if item.priority is not None else "P-"
-            lines.append(f"  {item.id}  {priority}  {item.title}")
-            lines += [f"    waits on {target}" for target in item.waits_on]
+            lines.append(f"  {item.id}  {priority}  [{item.state}]  {item.title}")
         project = {"project": self.project.id} if self.project else {}
         hints = [call("show", self.blocked[0].id)] if self.blocked else []
         hints.append(call("ready", **project))
@@ -397,7 +402,7 @@ def _show_hints(items: list["ShownEntry | ShownProject"]) -> list[str]:
     if isinstance(first, ShownProject):
         return [call("prime", project=first.id)]
     hints = [
-        call("write", id=first.id, base_version=first.version, reason="..."),
+        call(f"revise_{first.kind}", first.id, base_version=first.version, reason="..."),
         call("add_comment", first.id, comment="..."),
     ]
     if first.kind == "task":
@@ -462,7 +467,7 @@ class SearchResult(RenderedResult):
         if self.total > self.offset + len(self.hits):
             hints.append(call("search", self.query, offset=self.offset + len(self.hits)))
         if not hints:
-            hints.append(call("write", kind="note", title="..."))
+            hints.append(call("create_note", title="..."))
         lines.append(next_line(hints))
         return "\n".join(lines)
 
@@ -475,7 +480,7 @@ class PrimePreference(BaseModel):
     full: bool
 
 
-class PrimeInitiative(BaseModel):
+class PrimeParent(BaseModel):
     id: str
     title: str
     state: str
@@ -485,7 +490,7 @@ class PrimeProjectRow(BaseModel):
     id: str
     name: str
     framing_title: str | None
-    open_initiatives: int
+    open_parents: int
 
 
 class PrimeResult(RenderedResult):
@@ -501,8 +506,8 @@ class PrimeResult(RenderedResult):
     # Preferences and conflicts left out entirely, when even their title lines pass the cap.
     preferences_omitted: int = 0
     preference_conflicts_omitted: int = 0
-    initiatives: list[PrimeInitiative]
-    initiative_total: int
+    parents: list[PrimeParent]
+    parent_total: int
     ready: int
     open_comments: int
     contradicted: list[str]
@@ -518,7 +523,7 @@ class PrimeResult(RenderedResult):
         if self.project is None:
             lines.append(f"projects: {len(self.projects)} of {self.project_total} shown")
             lines += [
-                f"  {row.id}  {row.name}  {row.open_initiatives} open parent tasks"
+                f"  {row.id}  {row.name}  {row.open_parents} open top-level parent tasks"
                 + (f"  {row.framing_title}" if row.framing_title else "")
                 for row in self.projects
             ]
@@ -536,13 +541,12 @@ class PrimeResult(RenderedResult):
         for path in project.paths:
             label = f" ({path.label})" if path.label else ""
             lines.append(f"path: {path.path}{label}")
-        if self.initiatives:
+        if self.parents:
             lines.append(
-                "open top-level tasks with children: "
-                f"{len(self.initiatives)} of {self.initiative_total} shown"
+                f"open top-level parent tasks: {len(self.parents)} of {self.parent_total} shown"
             )
-            lines += [f"  {item.id}  [{item.state}]  {item.title}" for item in self.initiatives]
-            if self.initiative_total > len(self.initiatives):
+            lines += [f"  {item.id}  [{item.state}]  {item.title}" for item in self.parents]
+            if self.parent_total > len(self.parents):
                 lines.append(
                     "  every open task: "
                     + call("search", kinds=["task"], projects=[project.id], status="open")

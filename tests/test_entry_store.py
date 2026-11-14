@@ -81,11 +81,11 @@ def test_stale_and_missing_base_version_are_refused_with_the_retry_call(
     message = str(stale.value)
     assert "base_version=1 is stale" in message
     assert f"{entry_id} is at version 2" in message
-    assert f'write(id="{entry_id}", base_version=2' in message
+    assert f'revise_note("{entry_id}", base_version=2' in message
     with pytest.raises(ValidationError) as missing:
         entries.write_entry(EntryDraft(id=entry_id, reason="r", body="three"))
     assert "needs base_version" in str(missing.value)
-    assert f'write(id="{entry_id}", base_version=2' in str(missing.value)
+    assert f'revise_note("{entry_id}", base_version=2' in str(missing.value)
     assert [v.body for v in entries.get_versions(entry_id)] == ["", "two"]
 
 
@@ -124,8 +124,8 @@ def test_an_identical_version_is_not_written(entries: EntryStore) -> None:
     base stale for nothing."""
     entry_id = entries.write_entry(EntryDraft(kind="note", title="n", body="x")).entry.id
     outcome = entries.write_entry(EntryDraft(id=entry_id, base_version=1, reason="same", body="x"))
-    assert (outcome.created, outcome.retry) == (False, False)
-    assert outcome.warnings[0].startswith("nothing changed")
+    assert (outcome.created, outcome.retry, outcome.unchanged_from) == (False, False, 1)
+    assert outcome.warnings == []
     assert [v.version for v in entries.get_versions(entry_id)] == [1]
 
 
@@ -201,5 +201,5 @@ def test_parent_and_waits_on_are_only_set_at_creation(entries: EntryStore) -> No
     assert [(link.relation, link.target_id, link.target_version) for link in task.links] == [
         ("part_of", parent, 1)
     ]
-    with pytest.raises(ValidationError, match="set when an entry is created"):
+    with pytest.raises(ValidationError, match="a new version carries content only"):
         entries.write_entry(EntryDraft(id=task.id, base_version=1, reason="r", waits_on=[parent]))

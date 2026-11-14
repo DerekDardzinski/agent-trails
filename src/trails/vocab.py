@@ -88,3 +88,17 @@ def enum_column(values: tuple[str, ...]) -> str:
     """Render a vocabulary tuple as a SQL ENUM column type."""
     members = ",".join(f"'{value}'" for value in values)
     return f"ENUM({members})"
+
+
+def id_pattern(*kinds: Kind) -> str:
+    """A full-match regular expression for the ids of `kinds`, for an operation's schema, so
+    an id of another kind cannot be written in the call at all (principle 5)."""
+    prefixes = "|".join(re.escape(KIND_PREFIXES[kind]) for kind in kinds)
+    return rf"^(?:{prefixes})-[0-9a-z]{{5,6}}$"
+
+
+TASK_ID = id_pattern("task")
+NOTE_ID = id_pattern("note")
+PREFERENCE_ID = id_pattern("preference")
+SKILL_ID = id_pattern("skill")
+KNOWLEDGE_ID = id_pattern(*KNOWLEDGE_KINDS)

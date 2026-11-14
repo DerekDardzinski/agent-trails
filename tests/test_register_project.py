@@ -82,7 +82,7 @@ def test_register_creates_stable_identity_without_a_context_entry(
     ]
     assert first.render_text().splitlines()[-1] == (
         f'Next: prime(project="{first.project.id}") · '
-        f'write(kind="task", title="...", projects=["{first.project.id}"])'
+        f'create_task(title="...", projects=["{first.project.id}"])'
     )
 
 

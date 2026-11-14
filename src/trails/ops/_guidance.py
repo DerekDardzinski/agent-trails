@@ -1,4 +1,4 @@
-"""Deterministic guidance for `write`: code or data an entry names where a later reader will
+"""Deterministic guidance for the create and revise operations: code or data an entry names where a later reader will
 not find it.
 
 NOTE: no `from __future__ import annotations` in this package. See `ops/__init__.py`.
@@ -14,12 +14,15 @@ from trails.models import ArtifactRef
 from trails.reachability import local_path
 
 
-def _rewrite(entry_id: str, version: int, repo: str | None = None) -> str:
-    """The call that writes the next version with the location fixed."""
-    call = f'write(id="{entry_id}", base_version={version}, reason="..."'
+def _rewrite(kind: str, entry_id: str, version: int, repo: str | None = None) -> str:
+    """The call that writes the next version with the location fixed. Only a note carries
+    artifacts and captured code; any other kind records a location in its body."""
+    call = f'revise_{kind}("{entry_id}", base_version={version}, reason="..."'
+    if kind != "note":
+        return call + ", body=...)"
     if repo is not None:
-        call += f', repos=["{repo}"]'
-    return call + ", artifacts=[...])" if repo is None else call + ")"
+        return call + f', repos=[{{"path": "{repo}"}}])'
+    return call + ", artifacts=[...])"
 
 
 @dataclass(frozen=True)
@@ -33,7 +36,8 @@ class CapturedRepo:
 TEXT_PATHS_SHOWN = 10
 
 
-def uncaptured_location_warnings(
+def uncaptured_location_warnings(  # noqa: PLR0917 — one warning check over a write
+    kind: str,
     entry_id: str,
     version: int,
     artifacts: Sequence[ArtifactRef],
@@ -76,25 +80,25 @@ def uncaptured_location_warnings(
                 f"{where} is a script in the temporary directory {temp}, which the operating "
                 "system may delete; trails keeps a reference to it, never a copy, so the code "
                 f"that produced this entry will be lost. {fix}: "
-                f"{_rewrite(entry_id, version, str(top) if top else '<repository>')}"
+                f"{_rewrite(kind, entry_id, version, str(top) if top else '<repository>')}"
             )
         elif temp is not None:
             warnings.append(
                 f"{where} is in the temporary directory {temp}, which the operating system "
                 "may delete; trails keeps a reference to it, never a copy. Move it somewhere "
-                f"permanent and record the new location: {_rewrite(entry_id, version)}"
+                f"permanent and record the new location: {_rewrite(kind, entry_id, version)}"
             )
         elif code and top is None:
             warnings.append(
                 f"{where} is code outside any git repository, so trails could not capture it, "
                 "and a later edit or deletion loses the version that produced this entry. "
                 f"Commit it to a git repository, then write a new version with it captured: "
-                f"{_rewrite(entry_id, version, '<repository>')}"
+                f"{_rewrite(kind, entry_id, version, '<repository>')}"
             )
         elif code and top is not None:
             warnings.append(
                 f"{where} is code in the git repository {top}, but {_why_not_captured(path, top, captured)}. "
-                f"To pin the exact code that produced this entry: {_rewrite(entry_id, version, str(top))}"
+                f"To pin the exact code that produced this entry: {_rewrite(kind, entry_id, version, str(top))}"
             )
 
     mentioned = [
@@ -118,7 +122,7 @@ def uncaptured_location_warnings(
         warnings.append(
             f"the entry names {_count(len(mentioned), 'path')} in temporary directories, which the "
             f"operating system may delete, and trails keeps no copy: {shown}. {advice}: "
-            f"{_rewrite(entry_id, version, '<repository>' if scripts else None)}"
+            f"{_rewrite(kind, entry_id, version, '<repository>' if scripts else None)}"
         )
     return warnings
 

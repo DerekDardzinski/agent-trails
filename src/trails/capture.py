@@ -52,7 +52,7 @@ from pathlib import Path
 
 from trails import gitprobe
 from trails.errors import TrailsError, ValidationError
-from trails.models import CaptureSummary, CodeCapture, SecretFinding
+from trails.models import CaptureSummary, CodeCapture, RepoCapture, SecretFinding
 from trails.secret_scan import scan_for_secrets
 
 STORE_DIR = "captures.git"
@@ -270,38 +270,64 @@ def plan_capture(
 
 
 def size_refusal(
-    plans: Sequence[CapturePlan], exclude: Sequence[str], allow_large: Sequence[str]
+    plans: Sequence[CapturePlan], repos: Sequence[RepoCapture], operation: str
 ) -> str | None:
     """The text refusing a write that would capture a file over the cap, or None.
 
-    Every element comes from the plans, `max_capture_bytes()` and the given lists; `<the same
-    arguments>` and `<what identifies this data>` are fixed placeholders for the agent to fill.
+    `plans[n]` is the plan for `repos[n]`. Every element comes from the plans,
+    `max_capture_bytes()` and the given repos; `<the same arguments>` and `<what identifies
+    this data>` are fixed placeholders for the agent to fill.
     """
     blocked = [plan for plan in plans if plan.large]
     if not blocked:
         return None
     cap = human_size(max_capture_bytes())
     lines: list[str] = []
-    new: list[str] = []
     references: list[str] = []
-    for plan in blocked:
+    left_out: list[RepoCapture] = []
+    kept: list[RepoCapture] = []
+    for plan, repo in zip(plans, repos, strict=True):
+        added = [path for path, _size in plan.large]
+        left_out.append(repo.model_copy(update={"exclude": [*repo.exclude, *added]}))
+        kept.append(repo.model_copy(update={"allow_large": [*repo.allow_large, *added]}))
+        if not plan.large:
+            continue
         lines.append(
             f"not written: {len(plan.large)} file(s) over {cap} would be captured from {plan.top}:"
         )
         for path, size in plan.large:
             lines.append(f"  {path}  {human_size(size)}")
-            new.append(path)
             location = json.dumps(f"{plan.top}/{path}")
             references.append(f'{{"location": {location}, "notes": "<what identifies this data>"}}')
-    added = list(dict.fromkeys(new))
     lines += [
         "If it is data, leave it out and reference it:",
-        f"  write(<the same arguments>, exclude={_list([*exclude, *added])}, "
+        f"  {operation}(<the same arguments>, repos={_repos(left_out)}, "
         f"artifacts=[{', '.join(references)}])",
         "If it belongs in the capture:",
-        f"  write(<the same arguments>, allow_large={_list([*allow_large, *added])})",
+        f"  {operation}(<the same arguments>, repos={_repos(kept)})",
     ]
     return "\n".join(lines)
+
+
+def _repos(repos: Sequence[RepoCapture]) -> str:
+    return json.dumps([repo.model_dump(mode="json") for repo in repos], ensure_ascii=False)
+
+
+def rename_refs(store: Path, old: str, new: str) -> None:
+    """Move every capture ref under `refs/research/<old>/` to the same place under
+    `refs/research/<new>/`, for a write that had to take a different id under the write lock.
+    Each new ref is written before its old one is deleted, so the captured commit stays pinned
+    throughout."""
+    if not store.exists():
+        return
+    prefix = f"refs/research/{old}/"
+    with gitprobe.git_lock(store):
+        listing = _run_store(store, "for-each-ref", "--format=%(objectname) %(refname)", prefix)
+        for line in listing.splitlines():
+            sha, ref = line.split(" ", 1)
+            target = f"refs/research/{new}/" + ref.removeprefix(prefix)
+            _run_store(store, "update-ref", target, sha, "")
+            _run_store(store, "update-ref", "-d", ref)
 
 
 def capture_repo(

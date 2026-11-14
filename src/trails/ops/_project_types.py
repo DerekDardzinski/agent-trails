@@ -52,7 +52,7 @@ class RegisterProjectResult(RenderedResult):
         lines += [f"warning: {warning}" for warning in self.warnings]
         lines.append(
             f'Next: prime(project="{self.project.id}") · '
-            f'write(kind="task", title="...", projects=["{self.project.id}"])'
+            f'create_task(title="...", projects=["{self.project.id}"])'
         )
         return "\n".join(lines)
 

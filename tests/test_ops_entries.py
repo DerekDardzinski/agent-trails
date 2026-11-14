@@ -13,17 +13,22 @@ from trails.ops.add_comment import add_comment
 from trails.ops.blocked import blocked
 from trails.ops.claim import claim
 from trails.ops.close import close
+from trails.ops.create_note import create_note
+from trails.ops.create_preference import create_preference
+from trails.ops.create_skill import create_skill
+from trails.ops.create_task import create_task
 from trails.ops.link import link
 from trails.ops.prime import prime
 from trails.ops.ready import ready
 from trails.ops.release import release
 from trails.ops.reopen import reopen
 from trails.ops.retire import retire
+from trails.ops.revise_task import revise_task
 from trails.ops.search import search
+from trails.ops.set_priority import set_priority
 from trails.ops.set_projects import set_projects
 from trails.ops.show import show
 from trails.ops.unlink import unlink
-from trails.ops.write import write
 from trails.present import PREFERENCE_CAP, PREFERENCE_CAP_WARNING
 
 
@@ -34,8 +39,16 @@ def run(store: EntryStore, operation: Any, **arguments: Any) -> Any:
     return asyncio.run(go())
 
 
+CREATE = {
+    "task": create_task,
+    "note": create_note,
+    "preference": create_preference,
+    "skill": create_skill,
+}
+
+
 def new(store: EntryStore, kind: str, title: str, **fields: Any) -> str:
-    return run(store, write, kind=kind, title=title, **fields).id
+    return run(store, CREATE[kind], title=title, **fields).id
 
 
 def test_prime_prints_project_preferences_first_and_warns_at_the_cap(store: EntryStore) -> None:
@@ -118,7 +131,7 @@ def test_prime_index_lists_projects_and_counts_unscoped(store: EntryStore) -> No
     new(store, "task", "a task with no children", projects=["alpha"])
     new(store, "note", "loose")
     result = run(store, prime)
-    assert [(row.name, row.open_initiatives) for row in result.projects] == [("alpha", 1)]
+    assert [(row.name, row.open_parents) for row in result.projects] == [("alpha", 1)]
     assert result.unscoped == 1
 
 
@@ -151,11 +164,11 @@ def _graph_ids(result: Any) -> list[str]:
 def test_every_task_changing_response_redraws_the_affected_graph(store: EntryStore) -> None:
     """Silent failure caught: a missing or reversed link that nothing shows, because the
     response to the change that made it named only the entry changed (dec-o0gww)."""
-    goal = run(store, write, kind="task", title="g")
+    goal = run(store, create_task, title="g")
     assert _graph_ids(goal) == [goal.id]
-    first = run(store, write, kind="task", title="a", parent=goal.id)
+    first = run(store, create_task, title="a", parent=goal.id)
     assert _graph_ids(first) == [goal.id, first.id]
-    second = run(store, write, kind="task", title="b", parent=goal.id, waits_on=[first.id])
+    second = run(store, create_task, title="b", parent=goal.id, waits_on=[first.id])
     assert _graph_ids(second) == [goal.id, second.id, first.id]
     assert [line.state for line in second.graph] == [
         "children: 2 open",
@@ -227,7 +240,7 @@ def test_show_since_comment_lists_what_changed_after_a_review(store: EntryStore)
     goal = new(store, "task", "g")
     task = new(store, "task", "t", parent=goal)
     review = run(store, add_comment, id=goal, comment="looks right", verdict="approve")
-    run(store, write, id=task, base_version=1, reason="feedback", body="more detail")
+    run(store, revise_task, id=task, base_version=1, reason="feedback", body="more detail")
     shown = run(store, show, id=goal, since_comment=review.comment_id).entries[0]
     assert shown.since == [f"{task} t: v1 -> v2"]
 
@@ -286,7 +299,7 @@ def test_a_secret_in_a_set_projects_reason_is_warned_about(store: EntryStore) ->
 
 @pytest.mark.parametrize("kind", ["note", "preference", "skill"])
 def test_a_non_work_write_draws_no_graph(store: EntryStore, kind: str) -> None:
-    assert run(store, write, kind=kind, title="x").graph == []
+    assert run(store, CREATE[kind], title="x").graph == []
 
 
 def test_a_script_artifact_in_a_temporary_directory_is_warned_about(
@@ -299,13 +312,12 @@ def test_a_script_artifact_in_a_temporary_directory_is_warned_about(
     script = tmp_path / "analysis.py"
     script.write_text("print(1)\n")
     monkeypatch.setattr(locations, "temporary_roots", lambda: (tmp_path.resolve(),))
-    result = run(
-        store, write, kind="note", title="x", artifacts=[ArtifactRef(location=str(script))]
-    )
+    result = run(store, create_note, title="x", artifacts=[ArtifactRef(location=str(script))])
     [warning] = result.warnings
     assert "is a script in the temporary directory" in warning
     assert (
-        f'write(id="{result.id}", base_version=1, reason="...", repos=["<repository>"])' in warning
+        f'revise_note("{result.id}", base_version=1, reason="...", '
+        'repos=[{"path": "<repository>"}])' in warning
     )
 
 
@@ -374,7 +386,7 @@ def test_scoped_prime_bounds_its_lists(store: EntryStore, monkeypatch: pytest.Mo
         new(store, "task", f"child {n}", parent=parent, projects=["alpha"])
     result = run(store, prime, project="alpha")
     assert (len(result.contradicted), result.contradicted_total) == (limit, limit + 2)
-    assert (len(result.initiatives), result.initiative_total) == (limit, limit + 2)
+    assert (len(result.parents), result.parent_total) == (limit, limit + 2)
 
 
 def test_search_contradicted_lists_only_currently_contradicted_entries(
@@ -397,3 +409,34 @@ def test_search_contradicted_lists_only_currently_contradicted_entries(
     run(store, retire, id=retired_rival, reason="wrong")
     result = run(store, search, kinds=["note"], projects=["alpha"], contradicted=True)
     assert [hit.id for hit in result.hits] == [contradicted]
+
+
+def test_create_task_refuses_a_parent_and_dependency_that_close_a_cycle(
+    store: EntryStore,
+) -> None:
+    """Silent failure caught: a new task stored waiting on its own grandparent, which needs
+    the new task's parent, which needs the new task: none of the three can ever become ready.
+    Creation can close a cycle although a new task has no incoming links."""
+    from trails.errors import ValidationError
+
+    grandparent = new(store, "task", "g")
+    parent = new(store, "task", "p", parent=grandparent)
+    with pytest.raises(ValidationError, match="dependency cycle") as refused:
+        run(store, create_task, title="x", parent=parent, waits_on=[grandparent])
+    assert f"the new task -> {grandparent} -> {parent} -> the new task" in str(refused.value)
+    assert store.query("SELECT COUNT(*) AS n FROM entry") == [{"n": 2}]
+
+
+def test_set_priority_writes_a_version_and_clears_with_null(store: EntryStore) -> None:
+    """Silent failure caught: null read as "keep the priority", so a priority can never be
+    removed, or a priority change written without a version and a reason."""
+    task = new(store, "task", "t", priority=1)
+    raised = run(store, set_priority, id=task, base_version=1, priority=0, reason="urgent")
+    cleared = run(store, set_priority, id=task, base_version=2, priority=None, reason="parked")
+    versions = store.get_versions(task)
+    assert [(v.version, v.priority, v.reason) for v in versions] == [
+        (1, 1, None),
+        (2, 0, "urgent"),
+        (3, None, "parked"),
+    ]
+    assert (raised.version, cleared.version) == (2, 3)

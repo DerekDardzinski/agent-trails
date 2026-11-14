@@ -26,7 +26,13 @@ from trails.ops.types import RenderedResult
 
 # The environment variable that selects the optional toolset when no argument does.
 TOOLSET_ENV = "TRAILS_MCP_TOOLSET"
-Toolset = Literal["agent", "full"]
+Toolset = Literal["agent", "dreamer", "full"]
+# Each toolset serves the operations marked with it and with every toolset before it.
+SERVED: dict[str, frozenset[str]] = {
+    "agent": frozenset({"agent"}),
+    "dreamer": frozenset({"agent", "dreamer"}),
+    "full": frozenset({"agent", "dreamer", "full"}),
+}
 
 # What a refusal looks like on this surface. It is an MCP error result, so clients cannot
 # mistake a refused write for success, and it also carries structured readable content so an
@@ -41,9 +47,9 @@ ERROR_SCHEMA = {
 def build_mcp_server(db_path: Path | None = None, toolset: Toolset | None = None) -> FastMCP:
     """The fastmcp server with the operations of one toolset registered as tools.
 
-    Each operation is registered according to its `OPERATION` mark: toolset "agent" always;
-    toolset "full" only when `toolset` is "full", or when `toolset` is None and
-    `$TRAILS_MCP_TOOLSET` is "full"; toolset "cli" never. Each tool carries the MCP
+    Each operation is registered according to its `OPERATION` mark and `SERVED`: toolset
+    "agent" always; "dreamer" when the toolset (the argument, else `$TRAILS_MCP_TOOLSET`) is
+    dreamer or full; "full" when it is full; "cli" never. Each tool carries the MCP
     annotations readOnlyHint, destructiveHint and idempotentHint from the mark. Tools are named
     by `ops.tool_name`.
 
@@ -65,9 +71,9 @@ def build_mcp_server(db_path: Path | None = None, toolset: Toolset | None = None
 
     Raises:
         TypeError: a discovered operation's module has no `OPERATION = Operation(...)`.
-        ValueError: `toolset` or `$TRAILS_MCP_TOOLSET` is something other than agent or full.
+        ValueError: `toolset` or `$TRAILS_MCP_TOOLSET` is something other than agent, dreamer or full.
     """
-    served = {"agent", "full"} if _resolved_toolset(toolset) == "full" else {"agent"}
+    served = SERVED[_resolved_toolset(toolset)]
     marked = [(operation, operation_mark(operation)) for operation in ops.operations()]
     server = FastMCP("trails")
     for operation, mark in marked:
@@ -95,17 +101,18 @@ def _resolved_toolset(toolset: Toolset | None) -> Toolset:
     reason given.
     """
     if toolset is not None:
-        if toolset not in {"agent", "full"}:
+        if toolset not in SERVED:
             # The Literal annotation binds nothing at runtime, and a Python caller passing
             # "bogus" would otherwise get the default toolset with no reason given.
-            raise ValueError(f"toolset must be 'agent' or 'full', not {toolset!r}")
+            raise ValueError(f"toolset must be 'agent', 'dreamer' or 'full', not {toolset!r}")
         return toolset
     raw = os.environ.get(TOOLSET_ENV, "").strip()
-    if raw in {"", "agent"}:
+    if raw == "":
         return "agent"
-    if raw == "full":
-        return "full"
-    raise ValueError(f"{TOOLSET_ENV}={raw!r} is not a toolset; use agent or full")
+    for name in ("agent", "dreamer", "full"):
+        if raw == name:
+            return name
+    raise ValueError(f"{TOOLSET_ENV}={raw!r} is not a toolset; use agent, dreamer or full")
 
 
 def operation_mark(operation: Any) -> Operation:

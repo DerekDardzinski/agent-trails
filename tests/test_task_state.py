@@ -78,7 +78,7 @@ def test_work_and_evidence_links_refuse_the_wrong_kinds(entries: EntryStore) -> 
         entries.write_entry(EntryDraft(kind="task", title="t2", waits_on=[note]))
     with pytest.raises(ValidationError, match=f"the source {task} is a task"):
         entries.add_entry_link(task, "supports", note)
-    with pytest.raises(ValidationError, match="supersedes is written when a task is closed"):
+    with pytest.raises(ValidationError, match="supersedes is not a link relation"):
         entries.add_entry_link(task, "supersedes", make(entries, "task", "t3"))
     assert entries.task_graph().waits == {}
 

@@ -30,12 +30,13 @@ class Operation:
     requires the return annotation to be a bare BaseModel subclass, and wrapping it in
     `Annotated` would make every operation fail that check.
 
-    toolset: "agent" is the default MCP toolset; "full" is the optional MCP toolset; "cli" is
-    never served over MCP. read_only, destructive and idempotent become the MCP annotations
+    toolset: "agent" is the default MCP toolset; "dreamer" adds the consolidation pass's
+    operations to it; "full" adds maintenance operations to both; "cli" is never served over
+    MCP. read_only, destructive and idempotent become the MCP annotations
     readOnlyHint, destructiveHint and idempotentHint.
     """
 
-    toolset: Literal["agent", "full", "cli"]
+    toolset: Literal["agent", "dreamer", "full", "cli"]
     read_only: bool
     destructive: bool
     idempotent: bool

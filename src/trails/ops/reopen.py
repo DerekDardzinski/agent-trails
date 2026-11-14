@@ -23,7 +23,7 @@ async def reopen(
 
     Use this when: closed work turns out not to be finished, or you closed it with the wrong outcome and want to close it again.
 
-    Use instead: write, to create a new task when the new work is separate.
+    Use instead: create_task, to create a new task when the new work is separate.
 
     Returns: the new state, its dependents and the task graph around it. Reopening an entry that is not closed changes nothing.
     """

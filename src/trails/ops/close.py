@@ -40,7 +40,7 @@ async def close(
 
     Use this when: a task is finished, abandoned, failed or replaced, including a parent task whose children are done. The store never closes a task itself.
 
-    Use instead: release, to stop working on a task that is not finished; write, to create follow-up tasks.
+    Use instead: release, to stop working on a task that is not finished; create_task, to create follow-up tasks.
 
     Returns: the new state, the links a supersede moved, the dependents with their new state, and the task graph with each task's children and waits_on targets as stored facts. Closing again with the same outcome changes nothing.
     """

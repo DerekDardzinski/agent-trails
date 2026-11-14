@@ -10,7 +10,7 @@ from pathlib import Path
 from trails import capture, engine as engine_seam, entry_search, gitprobe
 from trails.entry_store import EntryStore, is_open_comment, unchanged_responses
 from trails.errors import ValidationError
-from trails.models import CaptureSummary, CodeCapture, Entry
+from trails.models import CaptureSummary, CodeCapture, Entry, RepoCapture
 from trails.ops._entry_types import ShownComment, ShownEntry, ShownLink, ShownVersion
 from trails.present import GraphLine, graph_lines, node_state, stale_link_text
 
@@ -37,29 +37,27 @@ def embed_after_write(store: EntryStore, entry_ids: Sequence[str]) -> tuple[bool
 
 
 def capture_code(
-    store: EntryStore,
-    ref_name: str,
-    repos: Sequence[str],
-    exclude: Sequence[str],
-    allow_large: Sequence[str],
+    store: EntryStore, ref_name: str, repos: Sequence[RepoCapture], operation: str
 ) -> tuple[list[CodeCapture], list[CaptureSummary], list[str]]:
     """Capture each repository's working tree into the store's capture repository under
-    `refs/research/<ref_name>/<position>`, where `write` passes `<id>/v<version>/<attempt token>`
-    so that two writers capturing one version never share a ref. Returns captures, summaries and warnings, possible
-    secrets included.
+    `refs/research/<ref_name>/<position>`, where the write passes
+    `<id>/v<version>/<attempt token>` so that two writers capturing one version never share a
+    ref. Returns captures, summaries and warnings, possible secrets included. `operation`
+    names the call a size refusal prints.
 
     Raises:
-        ValidationError: an entry is not a git repository, two name one repository, or a file
+        ValidationError: a path is not a git repository, two name one repository, or a file
             is over the size cap.
     """
-    if (exclude or allow_large) and not repos:
-        raise ValidationError("exclude and allow_large apply to repos; pass repos too")
-    paths = _distinct_repos(repos)
-    if not paths:
+    if not repos:
         return [], [], []
+    paths = _distinct_repos([repo.path for repo in repos])
     capture_store = capture.store_path(store.db_path)
-    plans = [capture.plan_capture(path, capture_store, exclude, allow_large) for path in paths]
-    refusal = capture.size_refusal(plans, exclude, allow_large)
+    plans = [
+        capture.plan_capture(path, capture_store, repo.exclude, repo.allow_large)
+        for path, repo in zip(paths, repos, strict=True)
+    ]
+    refusal = capture.size_refusal(plans, repos, operation)
     if refusal is not None:
         raise ValidationError(refusal)
     capture_store = capture.open_store(store.db_path)

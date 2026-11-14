@@ -30,6 +30,23 @@ class ArtifactRef(BaseModel):
     notes: str = ""
 
 
+class RepoCapture(BaseModel):
+    """One git repository to capture, with the paths to leave out of or keep in its capture."""
+
+    path: str = Field(description="The repository, or any path inside it.")
+    exclude: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Paths relative to the repository's top level to leave out, tracked or not; a "
+            "directory leaves out everything under it."
+        ),
+    )
+    allow_large: list[str] = Field(
+        default_factory=list,
+        description="Paths relative to the repository's top level to capture though over the cap.",
+    )
+
+
 class CodeCapture(BaseModel):
     """One repository's working tree, captured as a pinned commit."""
 
@@ -257,8 +274,8 @@ class EntryDraft(BaseModel):
     Without `id` it creates version 1, and `kind` and `title` are required. With `id` it
     writes the next version: `base_version` must equal the current version and `reason` must
     be nonempty. In a new version a field left None inherits the previous version's value;
-    an explicit empty list clears it, and `value={}` clears the value (D14). `projects` None
-    leaves membership unchanged, and a list replaces it.
+    an explicit empty list clears it, and `value={}` clears the value (D14). `projects` applies
+    to a new entry only; `set_projects` changes an existing entry's memberships.
     """
 
     kind: Kind | None = None
@@ -272,6 +289,8 @@ class EntryDraft(BaseModel):
     artifacts: list[ArtifactRef] | None = None
     code: list[CodeCapture] | None = None
     priority: int | None = None
+    # Whether `priority` applies to a new version even when None (set_priority clearing it).
+    priority_given: bool = False
     projects: list[str] | None = None
     parent: str | None = None
     waits_on: list[str] = []
@@ -279,11 +298,13 @@ class EntryDraft(BaseModel):
 
 class EntryWriteOutcome(BaseModel):
     """A written version, its warnings and possible secrets. `retry` is True when the call
-    repeated a version that had already landed, so nothing new was written."""
+    repeated a version that had already landed, and `unchanged_from` names the version whose
+    content the call matched when nothing new was written."""
 
     entry: Entry
     created: bool
     retry: bool
+    unchanged_from: int | None = None
     warnings: list[str]
     secret_findings: list[SecretFinding]
 

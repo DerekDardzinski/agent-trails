@@ -6,7 +6,8 @@ the operations in `trails.ops.operations()` as tools according to each one's too
 There is no tool list here and no per-tool anything — an operation is added by adding a
 module under `trails/ops/`, which registers it here and on the CLI at once.
 
-`--toolset full` serves the optional toolset as well as the default one, and wins over
+`--toolset dreamer` adds the consolidation pass's operations to the default toolset, and
+`--toolset full` adds the maintenance operations as well; the flag wins over
 `$TRAILS_MCP_TOOLSET`. Operations marked "cli" are never served here.
 
 The operation docstrings and parameter descriptions are the load-bearing part of this
@@ -32,9 +33,9 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="trails-mcp", description="trails MCP server (stdio)")
     parser.add_argument(
         "--toolset",
-        choices=["agent", "full"],
+        choices=["agent", "dreamer", "full"],
         default=None,
-        help=f"agent (default) or full; overrides ${TOOLSET_ENV}",
+        help=f"agent (default), dreamer or full; overrides ${TOOLSET_ENV}",
     )
     arguments = parser.parse_args(argv)
     raw = os.environ.get("TRAILS_DB", "")

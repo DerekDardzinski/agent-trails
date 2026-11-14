@@ -36,7 +36,7 @@ async def add_comment(
 
     Use this when: you review a plan, a note or a change and need a response, or you answer feedback. A comment on a task records the version of every task under it, so the next review can list exactly what changed.
 
-    Use instead: write(id=..., reason=...), for your own working thoughts, which belong in a version's reason or body; never a comment.
+    Use instead: revise_task or revise_note, for your own working thoughts, which belong in a version's reason or body.
 
     Returns: the comment id, the entry version it was written against, the comments it closed, and how many versions it pinned.
     """

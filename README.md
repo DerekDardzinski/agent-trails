@@ -40,8 +40,11 @@ skill       how to do something; written by the offline consolidation pass
 A goal is a tag on a parent task. Ids are the kind's prefix (`tsk`, `note`, `prf`, `skl`) plus five lowercase base36
 characters, six after repeated collisions. An entry has append-only versions on that one id.
 A version carries the full content: title, Markdown body, tags, an optional JSON `value`,
-artifact references, code captures and `priority` (0 to 4, tasks). `write(id=..., base_version=..., reason=...)`
-writes the next version; omitted fields keep their values and `[]` clears a list.
+artifact references, code captures and `priority` (0 to 4, tasks); each kind takes only its own
+fields. Each kind has its own create and revise operation (`create_task`, `revise_task`, and so
+on); a revise takes the id (its pattern names the kind), the `base_version` you read and a
+reason, and omitted fields keep their values while `[]` clears a list. `set_priority` changes a
+task's priority. Ids are minted under the write lock, so two concurrent creations never collide.
 
 Every write records the OS user, the harness, and the session. The harness comes from the MCP
 client name or the process tree, decided before any harness variable is read; Kiro sessions are
@@ -69,14 +72,16 @@ comment `addresses` it. A comment on a task pins the version of everything under
 
 ## Code capture
 
-`write(repos=[...])` captures each repository's whole working tree, uncommitted and untracked
+`create_note(repos=[{"path": ...}])` captures each repository's whole working tree, uncommitted and untracked
 files included, as a commit in `<db>/captures.git`, a bare repository trails owns. Nothing is
 written to your repository: the commit is built through a temporary index with git's object
 directory pointed at the store, and the repository's own objects are read as an alternate. The
 capture reads after the repository is gone.
 
 A file over 50 MiB (`TRAILS_MAX_CAPTURE_BYTES`) refuses the write, and the refusal prints two
-complete calls: one leaving the file out with `exclude`, one keeping it with `allow_large`.
+complete calls: one leaving the file out with that repository's `exclude`, one keeping it with
+its `allow_large`. Both lists live inside the repository object, so neither can be written
+without a repository.
 
 ## Projects
 
@@ -102,7 +107,9 @@ the same signature and docstring. The MCP server's default toolset:
 prime             start a session: preferences in full, then where work stands
 ready             the next tasks
 blocked           the tasks waiting on another task, with that task's state
-write             create an entry or write its next version
+create_task / create_note / create_preference
+revise_task / revise_note / revise_preference
+set_priority      change a task's priority
 link / unlink     add or remove a link
 claim / release   take or give back a task
 close / reopen    close a task with an outcome, or reopen it
@@ -113,7 +120,8 @@ retire            mark an entry no longer true
 register_project / update_project / set_projects
 ```
 
-`trails-mcp --toolset full` adds `lint`, `alias`, `embed` and `version`. The CLI has every
+`trails-mcp --toolset dreamer` adds `create_skill` and `revise_skill` for the consolidation
+pass; `--toolset full` adds those and `lint`, `alias`, `embed` and `version`. The CLI has every
 operation, with multi-word names split (`trails add comment`, `trails register project`);
 `trails <name> --help` describes each.
 

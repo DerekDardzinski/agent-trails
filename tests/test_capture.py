@@ -1,4 +1,4 @@
-"""Tests for write(repos=...): code capture into trails' own git store.
+"""Tests for create_note(repos=...) and revise_note(repos=...): code capture into trails' own git store.
 
 Real git and real Dolt, each in a temporary directory.
 """
@@ -22,20 +22,35 @@ import pytest
 from trails import capture, gitprobe
 from trails.entry_store import EntryStore
 from trails.errors import TrailsError, ValidationError
-from trails.models import EntryDraft
+from trails.models import EntryDraft, RepoCapture
 from trails.ops import context
-from trails.ops.write import write
+from trails.ops.create_note import create_note
+from trails.ops.revise_note import revise_note
 
 AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
 
 
 def _run(store: EntryStore, **arguments: Any) -> Any:
-    if "id" not in arguments:
-        arguments.setdefault("kind", "note")
+    """create_note, or revise_note when `id` is given. `repos` may be plain paths, which get
+    the `exclude` and `allow_large` lists given beside them."""
+    exclude = arguments.pop("exclude", [])
+    allow_large = arguments.pop("allow_large", [])
+    if "repos" in arguments:
+        arguments["repos"] = [
+            RepoCapture(path=item, exclude=exclude, allow_large=allow_large)
+            if isinstance(item, str)
+            else item
+            for item in arguments["repos"]
+        ]
+    operation = revise_note if "id" in arguments else create_note
+    if operation is create_note:
         arguments.setdefault("title", "t")
+    return _call(store, operation, **arguments)
 
+
+def _call(store: EntryStore, operation: Any, **arguments: Any) -> Any:
     async def go() -> Any:
-        return await context.bind(write, lambda: store.db_path)(**arguments)
+        return await context.bind(operation, lambda: store.db_path)(**arguments)
 
     return asyncio.run(go())
 
@@ -107,7 +122,7 @@ def test_capture_writes_nothing_to_the_repository_and_holds_the_new_contents(
     before = _user_state(git_repo)
     head = git_cmd(git_repo, "rev-parse", "HEAD")
 
-    result = _run(store, title="t", kind="note", repos=[str(git_repo)])
+    result = _run(store, title="t", repos=[str(git_repo)])
 
     assert _user_state(git_repo) == before
     [code] = store.get_entry(result.id).current.code
@@ -188,7 +203,7 @@ def test_a_capture_is_readable_after_the_repository_is_deleted(
     """labbook-79y.10 criterion 1. Catches a capture whose unchanged files were only ever read
     through the repository's own objects, so it vanishes with the repository."""
     (git_repo / "new.txt").write_text("n\n")
-    result = _run(store, title="t", kind="note", repos=[str(git_repo)])
+    result = _run(store, title="t", repos=[str(git_repo)])
     [code] = store.get_entry(result.id).current.code
 
     shutil.rmtree(git_repo)
@@ -543,16 +558,15 @@ def test_malformed_fields_are_refused_before_repository_capture(
     store: EntryStore, git_repo: Path
 ) -> None:
     """Catches a refused write leaving an unreported capture ref or capture store."""
-    with pytest.raises(ValidationError, match="priority is a task field"):
-        _run(store, kind="note", title="bad priority", priority=1, repos=[str(git_repo)])
-    with pytest.raises(ValidationError, match="no entry has id"):
+    with pytest.raises(ValidationError, match="malformed"):
         _run(
             store,
-            kind="task",
-            title="bad dependency",
-            waits_on=["tsk-zzzzz"],
+            title="bad digest",
+            artifacts=[{"location": "s3://b/k", "digest": "md5:x"}],
             repos=[str(git_repo)],
         )
+    with pytest.raises(ValidationError, match="no registered project"):
+        _run(store, title="bad project", projects=["no-such-project"], repos=[str(git_repo)])
 
     assert store.query("SELECT COUNT(*) AS n FROM entry") == [{"n": 0}]
     assert not _store(store).exists()
@@ -601,8 +615,10 @@ def test_a_post_land_exception_keeps_the_durable_capture_ref(
     original_write = EntryStore.write_entry
     landed: list[str] = []
 
-    def write_then_raise(bound_store: EntryStore, draft: EntryDraft, new_id: Any = None) -> Any:
-        outcome = original_write(bound_store, draft, new_id)
+    def write_then_raise(
+        bound_store: EntryStore, draft: EntryDraft, new_id: Any = None, capture_ref: Any = None
+    ) -> Any:
+        outcome = original_write(bound_store, draft, new_id, capture_ref)
         landed.append(outcome.entry.id)
         raise ValidationError("injected after durable write")
 
@@ -649,10 +665,12 @@ def test_a_file_over_the_cap_refuses_the_write_and_writes_nothing(
         f"not written: 1 file(s) over 32 B would be captured from {top}:\n"
         "  data/raw.bin  2.0 KiB\n"
         "If it is data, leave it out and reference it:\n"
-        '  write(<the same arguments>, exclude=["other", "data/raw.bin"], artifacts=['
+        f'  create_note(<the same arguments>, repos=[{{"path": "{git_repo}", "exclude": '
+        '["other", "data/raw.bin"], "allow_large": []}], artifacts=['
         f'{{"location": "{top}/data/raw.bin", "notes": "<what identifies this data>"}}])\n'
         "If it belongs in the capture:\n"
-        '  write(<the same arguments>, allow_large=["data/raw.bin"])'
+        f'  create_note(<the same arguments>, repos=[{{"path": "{git_repo}", "exclude": '
+        '["other"], "allow_large": ["data/raw.bin"]}])'
     )
     assert store.query("SELECT COUNT(*) AS n FROM entry") == records
     assert not _store(store).exists()
@@ -674,14 +692,12 @@ def test_exclude_and_allow_large_each_let_the_write_through(
     excluded = _run(
         store,
         title="t",
-        kind="note",
         repos=[str(git_repo)],
         exclude=["data", "committed.bin"],
     )
     allowed = _run(
         store,
         title="t",
-        kind="note",
         repos=[str(git_repo)],
         allow_large=["data/raw.bin", "committed.bin"],
     )
@@ -796,12 +812,6 @@ def test_the_write_result_reports_the_capture_and_the_commands_to_keep_paths_out
     assert not gitignore.exists()
 
 
-def test_exclude_without_repos_is_refused(store: EntryStore) -> None:
-    """Catches exclude accepted and silently doing nothing."""
-    with pytest.raises(ValidationError, match="apply to repos"):
-        _run(store, title="t", exclude=["data"])
-
-
 def test_human_size_units() -> None:
     """Catches a unit boundary off by one, which mislabels a file at the cap."""
     assert [capture.human_size(n) for n in (1023, 1024, 50 * 1024 * 1024, 3 * 1024**3)] == [
@@ -861,7 +871,9 @@ def test_a_losing_capture_race_keeps_the_winners_pin(
         if not competing:
             competing.append("running")
             monkeypatch.setattr(capture, "capture_repo", original_capture)
-            code, _, _ = capture_code(store, f"{old}/v2/0badc0de", [str(git_repo)], [], [])
+            code, _, _ = capture_code(
+                store, f"{old}/v2/0badc0de", [RepoCapture(path=str(git_repo))], "revise_note"
+            )
             store.write_entry(
                 EntryDraft(id=old, base_version=1, reason="won the race", body="winner", code=code)
             )
@@ -877,4 +889,38 @@ def test_a_losing_capture_race_keeps_the_winners_pin(
     assert _refs(git_cmd, store) == [f"refs/research/{old}/v2/0badc0de/0"]
     assert git_cmd(_store(store), "rev-parse", _refs(git_cmd, store)[0]) == (
         winner.code[0].captured_sha
+    )
+
+
+def test_an_id_taken_during_the_capture_is_replaced_and_its_refs_move_with_it(
+    store: EntryStore,
+    git_repo: Path,
+    git_cmd: Callable[..., str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Silent failure caught: a creation refused because another write took its pre-minted id
+    while the code was captured outside the lock (neither malformed input nor an overwrite,
+    so principle 6 does not allow the refusal), or the capture refs left under the other
+    entry's id, where lint reports them as belonging to it."""
+    original_capture = capture.capture_repo
+    taken: list[str] = []
+
+    def capture_then_take_the_id(plan: Any, capture_store: Any, ref_name: str, *rest: Any) -> Any:
+        outcome = original_capture(plan, capture_store, ref_name, *rest)
+        minted = ref_name.split("/", maxsplit=1)[0]
+        store.write_entry(EntryDraft(kind="note", title="took the id"), new_id=minted)
+        taken.append(minted)
+        return outcome
+
+    monkeypatch.setattr(capture, "capture_repo", capture_then_take_the_id)
+
+    result = _run(store, title="captured", repos=[str(git_repo)])
+
+    [minted] = taken
+    assert result.id != minted
+    assert store.get_entry(minted).current.title == "took the id"
+    [ref] = _refs(git_cmd, store)
+    assert ref.startswith(f"refs/research/{result.id}/v1/")
+    assert git_cmd(_store(store), "rev-parse", ref) == (
+        store.get_entry(result.id).current.code[0].captured_sha
     )

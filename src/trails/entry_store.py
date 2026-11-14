@@ -29,7 +29,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from trails import dolt, sessions
+from trails import capture, dolt, sessions
 from trails.author import current_author
 from trails.errors import DoltError, RecordNotFoundError, StoreUnavailableError, ValidationError
 from trails.models import (
@@ -580,10 +580,15 @@ class EntryStore(Store):
             else:
                 self._version_locked(draft, check_only=True)
 
-    def write_entry(self, draft: EntryDraft, new_id: str | None = None) -> EntryWriteOutcome:
+    def write_entry(
+        self, draft: EntryDraft, new_id: str | None = None, capture_ref: str | None = None
+    ) -> EntryWriteOutcome:
         """Create an entry (version 1) or write its next version, in one transaction.
 
-        `new_id` is a pre-minted id for a creation (see `new_entry_id`).
+        `new_id` is an id minted before the lock (see `new_entry_id`) so that code could be
+        captured under it, in refs `refs/research/<capture_ref>/...`. If another write took
+        that id meanwhile, a new id is minted here, under the lock, and the capture refs are
+        moved to it, because an id collision is neither malformed input nor an overwrite.
 
         Raises:
             ValidationError: malformed input, or a stale or missing `base_version`.
@@ -591,7 +596,7 @@ class EntryStore(Store):
         """
         with dolt.exclusive(self.db_path):
             if draft.id is None:
-                created = self._create_locked(draft, new_id)
+                created = self._create_locked(draft, new_id, capture_ref=capture_ref)
             else:
                 if new_id is not None:
                     raise ValidationError("new_id is for a new entry; a new version keeps its id")
@@ -600,8 +605,13 @@ class EntryStore(Store):
                 raise DoltError("a write returned no outcome")
             return created
 
-    def _create_locked(  # noqa: PLR0912, PLR0915 — replaced by the per-kind creates (R3)
-        self, draft: EntryDraft, new_id: str | None, *, check_only: bool = False
+    def _create_locked(  # noqa: PLR0912, PLR0915 — one creation and everything it checks
+        self,
+        draft: EntryDraft,
+        new_id: str | None,
+        *,
+        capture_ref: str | None = None,
+        check_only: bool = False,
     ) -> EntryWriteOutcome | None:
         if draft.kind is None:
             raise ValidationError("a new entry needs kind: task, note, preference or skill")
@@ -633,16 +643,23 @@ class EntryStore(Store):
         project_refs = sorted(
             self.resolve_projects(draft.projects or []), key=lambda ref: (ref.name, ref.id)
         )
-        if new_id is not None:
-            if not new_id.startswith(f"{KIND_PREFIXES[kind]}-"):
-                raise ValidationError(f"id {new_id!r} does not match kind {kind!r}")
-            if self._read(_bind("SELECT id FROM entry WHERE id = ?", [new_id])):
-                raise ValidationError(
-                    f"id {new_id!r} is already used: an entry is never overwritten"
-                )
+        relations: list[tuple[LinkRelation, str]] = []
+        if draft.parent:
+            relations.append(("part_of", draft.parent))
+        relations += [("waits_on", target) for target in dict.fromkeys(draft.waits_on)]
+        if relations:
+            _refuse_cycles(self.task_graph(), relations)
+        if new_id is not None and not new_id.startswith(f"{KIND_PREFIXES[kind]}-"):
+            raise ValidationError(f"id {new_id!r} does not match kind {kind!r}")
         if check_only:
             return None
         entry_id = new_id or self.new_entry_id(kind)
+        if new_id is not None and self._read(_bind("SELECT id FROM entry WHERE id = ?", [new_id])):
+            entry_id = self.new_entry_id(kind)
+            if capture_ref is not None:
+                renamed = entry_id + capture_ref.removeprefix(new_id)
+                capture.rename_refs(capture.store_path(self.db_path), capture_ref, renamed)
+                capture_ref = renamed
         provenance = sessions.current_provenance()
         author = current_author()
         created_at = _now()
@@ -662,10 +679,6 @@ class EntryStore(Store):
             session_id=provenance.session_id,
             created_at=created_at,
         )
-        relations: list[tuple[LinkRelation, str]] = []
-        if draft.parent:
-            relations.append(("part_of", draft.parent))
-        relations += [("waits_on", target) for target in dict.fromkeys(draft.waits_on)]
         links = [
             LinkEvent(
                 source_id=entry_id,
@@ -702,33 +715,21 @@ class EntryStore(Store):
             *_session_insert(provenance, created_at),
         ]
         findings = scan_for_secrets(_scanned_fields(version))
-        warnings: list[str] = []
-        if relations and kind in WORK_KINDS:
-            graph = self.task_graph()
-            graph.nodes[entry_id] = Node(
-                id=entry_id,
-                kind=kind,
-                title=title,
+        try:
+            self._commit(
+                statements,
+                message=f"create {entry_id}",
+                entry_id=entry_id,
                 version=1,
-                priority=priority,
                 created_at=created_at,
-                state="open",
-                outcome=None,
-                claim=None,
-                retired=False,
+                tags=tags,
             )
-            for relation, target in relations:
-                table = graph.parents if relation == "part_of" else graph.waits
-                table.setdefault(entry_id, []).append(target)
-            warnings += cycle_warnings(graph, [entry_id])
-        self._commit(
-            statements,
-            message=f"create {entry_id}",
-            entry_id=entry_id,
-            version=1,
-            created_at=created_at,
-            tags=tags,
-        )
+        except Exception:
+            if capture_ref is not None and new_id is not None and entry_id != new_id:
+                # The refs were moved to the id minted here and nothing landed under it; the
+                # caller discards refs under the id it minted, which no longer has any.
+                capture.discard_unwritten_refs(capture.store_path(self.db_path), entry_id)
+            raise
         entry = Entry(
             id=entry_id,
             kind=kind,
@@ -744,7 +745,7 @@ class EntryStore(Store):
             retired_reason=None,
         )
         return EntryWriteOutcome(
-            entry=entry, created=True, retry=False, warnings=warnings, secret_findings=findings
+            entry=entry, created=True, retry=False, warnings=[], secret_findings=findings
         )
 
     def _version_locked(
@@ -755,16 +756,12 @@ class EntryStore(Store):
         if existing is None:
             raise RecordNotFoundError(f"no entry has id {entry_id!r}")
         if draft.kind is not None and draft.kind != existing.kind:
-            raise ValidationError(
-                f"{entry_id} is a {existing.kind}; the kind is fixed when an entry is created"
-            )
-        if draft.parent is not None or draft.waits_on:
-            raise ValidationError(
-                "parent and waits_on are set when an entry is created; add a later edge with "
-                f'link("{entry_id}", "part_of" or "waits_on", "<target id>")'
-            )
+            raise ValidationError(f"{entry_id} is a {existing.kind}, not a {draft.kind}")
+        if draft.parent is not None or draft.waits_on or draft.projects is not None:
+            raise ValidationError("a new version carries content only, never links or projects")
         current = existing.current
         merged = _merged(existing.kind, current, draft)
+        retry = _retry_call(existing, draft)
         if draft.base_version is None or draft.base_version != current.version:
             if draft.base_version is not None and draft.base_version < current.version:
                 landed = self._landed_retry(entry_id, draft.base_version + 1, merged)
@@ -773,81 +770,52 @@ class EntryStore(Store):
                         entry=existing,
                         created=False,
                         retry=True,
-                        warnings=[
-                            f"version {landed.version} of {entry_id} with this content had "
-                            "already landed; nothing new was written"
-                        ],
+                        unchanged_from=landed.version,
+                        warnings=[],
                         secret_findings=[],
                     )
-            raise ValidationError(_stale_message(entry_id, draft.base_version, current))
+            raise ValidationError(_stale_message(entry_id, draft.base_version, current, retry))
         reason = (draft.reason or "").strip()
         if not reason:
             raise ValidationError(
                 f"a new version of {entry_id} needs a reason: one sentence saying what changed"
             )
         _require_text_bytes("reason", reason)
-        project_refs: list[ProjectRef] | None = None
-        if draft.projects is not None:
-            project_refs = sorted(
-                self.resolve_projects(draft.projects), key=lambda ref: (ref.name, ref.id)
-            )
         if check_only:
             return None
-        same_content = _content(merged) == _content(current)
-        same_projects = project_refs is None or [ref.id for ref in project_refs] == [
-            ref.id for ref in sorted(existing.projects, key=lambda ref: (ref.name, ref.id))
-        ]
-        if same_content and same_projects:
+        if _content(merged) == _content(current):
             return EntryWriteOutcome(
                 entry=existing,
                 created=False,
                 retry=False,
-                warnings=[
-                    f"nothing changed: the content is the same as version {current.version}, so "
-                    "no version was written"
-                ],
+                unchanged_from=current.version,
+                warnings=[],
                 secret_findings=[],
             )
         provenance = sessions.current_provenance()
-        author = current_author()
         created_at = _now()
-        statements: list[str] = []
-        version = current
-        if not same_content:
-            version = merged.model_copy(
-                update={
-                    "version": current.version + 1,
-                    "reason": reason,
-                    "author": author,
-                    "harness": provenance.harness,
-                    "session_id": provenance.session_id,
-                    "created_at": created_at,
-                }
-            )
-            statements += _version_inserts(version)
-        projects = existing.projects
-        if project_refs is not None and not same_projects:
-            statements += self._membership_changes(
-                entry_id,
-                wanted=[ref.id for ref in project_refs],
-                reason=reason,
-                author=author,
-                provenance=provenance,
-                created_at=created_at,
-            )
-            projects = project_refs
-        statements += _session_insert(provenance, created_at)
-        findings = scan_for_secrets(_scanned_fields(version)) if not same_content else []
+        version = merged.model_copy(
+            update={
+                "version": current.version + 1,
+                "reason": reason,
+                "author": current_author(),
+                "harness": provenance.harness,
+                "session_id": provenance.session_id,
+                "created_at": created_at,
+            }
+        )
+        statements = [*_version_inserts(version), *_session_insert(provenance, created_at)]
+        findings = scan_for_secrets(_scanned_fields(version))
         self._commit(
             statements,
             message=f"version {entry_id} v{version.version}",
             entry_id=entry_id,
-            version=version.version if not same_content else None,
+            version=version.version,
             created_at=created_at,
             tags=version.tags,
         )
         return EntryWriteOutcome(
-            entry=existing.model_copy(update={"current": version, "projects": projects}),
+            entry=existing.model_copy(update={"current": version}),
             created=False,
             retry=False,
             warnings=[],
@@ -949,7 +917,7 @@ class EntryStore(Store):
         _require_text_bytes("reason", normal_reason)
         if relation == "supersedes":
             raise ValidationError(
-                "supersedes is written when a task is closed superseded, never as a link"
+                "supersedes is not a link relation: it records a task closed superseded"
             )
         with dolt.exclusive(self.db_path):
             found = self._require_entries([source_id, target_id])
@@ -1980,9 +1948,9 @@ def _validate_content(
                 f"artifact[{n}].digest {artifact.digest!r} is malformed: use "
                 "'sha256:<64 lowercase hex>' or null"
             )
-    for capture in code:
-        _require_length("code repo_path", capture.repo_path, PATH_CHARS)
-    repos = [capture.repo_path for capture in code]
+    for item in code:
+        _require_length("code repo_path", item.repo_path, PATH_CHARS)
+    repos = [item.repo_path for item in code]
     if len(set(repos)) != len(repos):
         raise ValidationError("code lists the same repo_path twice")
 
@@ -2001,7 +1969,9 @@ def _merged(kind: Kind, current: EntryVersion, draft: EntryDraft) -> EntryVersio
         current.code if draft.code is None else sorted(draft.code, key=lambda item: item.repo_path)
     )
     priority = (
-        current.priority if draft.priority is None else _validated_priority(kind, draft.priority)
+        _validated_priority(kind, draft.priority)
+        if draft.priority is not None or draft.priority_given
+        else current.priority
     )
     _validate_content(body, artifacts, code)
     _value_text(value)
@@ -2030,25 +2000,61 @@ def _content(version: EntryVersion) -> tuple[Any, ...]:
     )
 
 
-def _stale_message(
-    entry_id: str, given: int | None, current: EntryVersion, retry: str | None = None
-) -> str:
-    """The refusal of a stale or missing base_version, with the call to retry. `retry` is the
-    call when it is not a write, such as a claim."""
+def _stale_message(entry_id: str, given: int | None, current: EntryVersion, retry: str) -> str:
+    """The refusal of a stale or missing base_version, with the call to retry."""
     session = f", session {current.session_id}" if current.session_id else ""
     who = (
         f"{entry_id} is at version {current.version}, written by {current.author} "
         f"({current.harness}{session}) at {current.created_at.isoformat()}"
     )
-    call = retry or (
-        f'write(id="{entry_id}", base_version={current.version}, reason="...", '
+    advice = f'read it with show("{entry_id}"), then retry with {retry}'
+    if given is None:
+        return f"this call needs base_version: {who}; {advice}"
+    return f"base_version={given} is stale and would overwrite a newer version: {who}; {advice}"
+
+
+def _retry_call(entry: Entry, draft: EntryDraft) -> str:
+    """The same call against the current version."""
+    version = entry.current.version
+    if draft.priority_given:
+        return (
+            f'set_priority("{entry.id}", base_version={version}, priority=<priority>, reason="...")'
+        )
+    return (
+        f'revise_{entry.kind}("{entry.id}", base_version={version}, reason="...", '
         "<the fields you change>)"
     )
-    needed = "a new version" if retry is None else "this call"
-    advice = f'read it with show("{entry_id}"), then retry with {call}'
-    if given is None:
-        return f"{needed} needs base_version: {who}; {advice}"
-    return f"base_version={given} is stale and would overwrite a newer version: {who}; {advice}"
+
+
+NEW_TASK = "the new task"
+
+
+def _refuse_cycles(graph: TaskGraph, relations: Sequence[tuple[LinkRelation, str]]) -> None:
+    """Refuse a new task whose parent and waits_on links would close a must-finish-first
+    cycle (D8): no task on it could ever become ready, so the request is malformed. A new
+    task has no incoming links, but its parent's ancestors can wait on its own dependencies'
+    descendants, so creation can close one."""
+    graph.nodes[NEW_TASK] = Node(
+        id=NEW_TASK,
+        kind="task",
+        title=NEW_TASK,
+        version=1,
+        priority=None,
+        created_at=_now(),
+        state="open",
+        outcome=None,
+        claim=None,
+        retired=False,
+    )
+    for relation, target in relations:
+        table = graph.parents if relation == "part_of" else graph.waits
+        table.setdefault(NEW_TASK, []).append(target)
+    cycle = graph.cycle_through(NEW_TASK)
+    if cycle is not None:
+        raise ValidationError(
+            "these links would make a dependency cycle, so none of its tasks could become "
+            "ready: " + " -> ".join(cycle)
+        )
 
 
 def _require_relation_kinds(
