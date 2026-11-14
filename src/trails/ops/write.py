@@ -4,12 +4,12 @@ NOTE: no `from __future__ import annotations` in this package. See `ops/__init__
 """
 
 import json
+import secrets
 from pathlib import Path
 from typing import Annotated, Any
 
 from pydantic import Field
 
-from trails import dolt
 from trails.entry_store import EntryStore
 from trails.errors import ValidationError
 from trails.locations import safe_resolve
@@ -155,34 +155,38 @@ async def write(  # noqa: PLR0917 — the public write contract
     )
     new_id: str | None = None
     ref_name: str | None = None
+    entry_id, version = "", 0
     summaries = []
     warnings: list[str] = []
-    with dolt.exclusive(store.db_path):
-        # Every refusal before capture, so a refused write leaves no capture ref or store.
-        store.check_entry_draft(draft)
-        if repos:
-            if creating:
-                new_id = store.new_entry_id(kind)  # ty: ignore[invalid-argument-type]
-                ref_name = f"{new_id}/v1"
-            else:
-                current = store.get_entry(str(id)).current.version
-                ref_name = f"{id}/v{current + 1}"
-            captures, summaries, warnings = capture_code(
-                store, ref_name, repos, exclude, allow_large
-            )
-            draft = draft.model_copy(update={"code": captures})
-        elif repos == []:
-            if exclude or allow_large:
-                raise ValidationError("exclude and allow_large apply to repos; pass repos too")
-            draft = draft.model_copy(update={"code": []})
-        elif exclude or allow_large:
+    # Every refusal before capture, so a refused write leaves no capture ref or store. The
+    # capture itself runs OUTSIDE the write lock, because every reader in every session waits
+    # for that lock: a search took 7.35 s during a 7.5 s capture (trails fac-wqx5c).
+    # `write_entry` repeats every check under the lock, so a base_version that went stale
+    # during the capture is still refused, and the capture's refs are then removed.
+    store.check_entry_draft(draft)
+    if repos:
+        if creating:
+            new_id = store.new_entry_id(kind)  # ty: ignore[invalid-argument-type]
+            entry_id, version = new_id, 1
+        else:
+            entry_id = str(id)
+            version = store.get_entry(entry_id).current.version + 1
+        # A token per attempt, so two writers capturing the same version never share a ref.
+        ref_name = f"{entry_id}/v{version}/{secrets.token_hex(4)}"
+        captures, summaries, warnings = capture_code(store, ref_name, repos, exclude, allow_large)
+        draft = draft.model_copy(update={"code": captures})
+    elif repos == []:
+        if exclude or allow_large:
             raise ValidationError("exclude and allow_large apply to repos; pass repos too")
-        try:
-            outcome = store.write_entry(draft, new_id=new_id)
-        except ValidationError:
-            if ref_name is not None and not _landed(store, ref_name, draft.code or []):
-                discard_capture(store, ref_name)
-            raise
+        draft = draft.model_copy(update={"code": []})
+    elif exclude or allow_large:
+        raise ValidationError("exclude and allow_large apply to repos; pass repos too")
+    try:
+        outcome = store.write_entry(draft, new_id=new_id)
+    except ValidationError:
+        if ref_name is not None and not _landed(store, entry_id, version, draft.code or []):
+            discard_capture(store, ref_name)
+        raise
     # THE ENTRY IS DURABLE from here, so nothing below may raise.
     entry = outcome.entry
     warnings += [
@@ -226,16 +230,15 @@ async def write(  # noqa: PLR0917 — the public write contract
     )
 
 
-def _landed(store: EntryStore, ref_name: str, code: list[CodeCapture]) -> bool:
-    """Whether the version a capture ref `<id>/v<n>` was made for is durable with THIS
-    capture, in which case its pin must stay. A version n written by a competing writer holds
-    other captures, so its existence alone does not count."""
+def _landed(store: EntryStore, entry_id: str, version: int, code: list[CodeCapture]) -> bool:
+    """Whether version `version` of `entry_id` is durable with THIS capture, in which case its
+    pin must stay. A version written by a competing writer holds other captures, so its
+    existence alone does not count."""
     if not code:
         return False
-    entry_id, _, version = ref_name.partition("/v")
     rows = store.query(
         "SELECT captured_sha FROM version_code WHERE entry_id = ? AND version = ? AND "
         "captured_sha = ?",
-        [entry_id, int(version), code[0].captured_sha],
+        [entry_id, version, code[0].captured_sha],
     )
     return bool(rows)

@@ -31,8 +31,8 @@ the size check never saw. The commit the repository had checked out is recorded 
 
 After the commit is built, every object it reaches that the store does not hold on its own is
 packed into the store, so the capture reads with the source repository gone. The pin is
-`refs/research/<record_id>/<n>` in the store, n being the repository's position in the
-write call's repos list.
+`refs/research/<id>/v<version>/<attempt token>/<n>` in the store, n being the repository's
+position in the write call's repos list.
 
 `plan_capture` runs first, before the record id is minted: it lists every file the capture
 would take and finds the ones over the size cap. `capture_repo` then captures, scans and

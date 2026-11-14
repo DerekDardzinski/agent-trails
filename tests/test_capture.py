@@ -6,7 +6,9 @@ Real git and real Dolt, each in a temporary directory.
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -40,6 +42,16 @@ def _run(store: EntryStore, **arguments: Any) -> Any:
 
 def _store(store: EntryStore) -> Path:
     return capture.store_path(store.db_path)
+
+
+def _refs(git_cmd: Callable[..., str], store: EntryStore) -> list[str]:
+    listed = git_cmd(_store(store), "for-each-ref", "--format=%(refname)", "refs/research/")
+    return sorted(listed.splitlines())
+
+
+def _ref_shapes(git_cmd: Callable[..., str], store: EntryStore) -> list[str]:
+    """Capture refs with the per-attempt token replaced by `*`."""
+    return [re.sub(r"/v(\d+)/[0-9a-f]{8}/", r"/v\1/*/", ref) for ref in _refs(git_cmd, store)]
 
 
 def _show(store: EntryStore, sha: str, path: str) -> str:
@@ -102,8 +114,9 @@ def test_capture_writes_nothing_to_the_repository_and_holds_the_new_contents(
     assert (code.head_sha, code.dirty) == (head, True)
     assert _show(store, code.captured_sha, "tracked.txt") == "edited"
     assert _show(store, code.captured_sha, "untracked.txt") == "new"
-    pinned = git_cmd(_store(store), "rev-parse", f"refs/research/{result.id}/v1/0")
-    assert pinned == code.captured_sha
+    [ref] = _refs(git_cmd, store)
+    assert re.fullmatch(rf"refs/research/{result.id}/v1/[0-9a-f]{{8}}/0", ref)
+    assert git_cmd(_store(store), "rev-parse", ref) == code.captured_sha
 
 
 def _git_tree(repo: Path) -> dict[str, tuple[int, int]]:
@@ -222,8 +235,7 @@ def test_two_concurrent_captures_of_one_repo_both_succeed(
 
     ids = {result.id for result in results}
     assert len(ids) == 2
-    refs = git_cmd(_store(store), "for-each-ref", "--format=%(refname)", "refs/research/")
-    assert sorted(refs.splitlines()) == sorted(f"refs/research/{i}/v1/0" for i in ids)
+    assert sorted(_ref_shapes(git_cmd, store)) == sorted(f"refs/research/{i}/v1/*/0" for i in ids)
 
 
 def test_two_repositories_in_one_write_get_one_ref_each(
@@ -235,11 +247,12 @@ def test_two_repositories_in_one_write_get_one_ref_each(
 
     result = _run(store, title="t", repos=[str(first), str(second)])
 
-    refs = git_cmd(_store(store), "for-each-ref", "--format=%(refname)", "refs/research/")
-    assert refs.splitlines() == [
-        f"refs/research/{result.id}/v1/0",
-        f"refs/research/{result.id}/v1/1",
+    refs = _refs(git_cmd, store)
+    assert _ref_shapes(git_cmd, store) == [
+        f"refs/research/{result.id}/v1/*/0",
+        f"refs/research/{result.id}/v1/*/1",
     ]
+    assert len({ref.split("/")[4] for ref in refs}) == 1  # one write, one attempt token
 
 
 def test_a_non_git_directory_is_refused_by_path(store: EntryStore, tmp_path: Path) -> None:
@@ -600,8 +613,10 @@ def test_a_post_land_exception_keeps_the_durable_capture_ref(
 
     assert len(landed) == 1
     assert store.get_entry(landed[0]).current.title == "durable"
+    [ref] = _refs(git_cmd, store)
+    assert ref.startswith(f"refs/research/{landed[0]}/v1/")
     assert (
-        git_cmd(_store(store), "rev-parse", f"refs/research/{landed[0]}/v1/0")
+        git_cmd(_store(store), "rev-parse", ref)
         == store.get_entry(landed[0]).current.code[0].captured_sha
     )
 
@@ -795,3 +810,71 @@ def test_human_size_units() -> None:
         "50.0 MiB",
         "3.0 GiB",
     ]
+
+
+def test_capture_runs_without_the_write_lock(
+    store: EntryStore, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches code capture holding the store's write lock, which makes every read in every
+    session wait for the whole capture (a search took 7.35 s during a 7.5 s capture, trails
+    fac-wqx5c). A shared lock taken mid-capture on a second open of the lock file must not
+    block."""
+    original_capture = capture.capture_repo
+    shared_taken: list[bool] = []
+
+    def capture_and_try_a_reader_lock(*args: Any, **kwargs: Any) -> Any:
+        with (store.db_path / ".trails-write.lock").open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                shared_taken.append(False)
+            else:
+                shared_taken.append(True)
+                fcntl.flock(lock, fcntl.LOCK_UN)
+        return original_capture(*args, **kwargs)
+
+    monkeypatch.setattr(capture, "capture_repo", capture_and_try_a_reader_lock)
+
+    result = _run(store, title="captured", repos=[str(git_repo)])
+
+    assert shared_taken == [True]
+    assert len(store.get_entry(result.id).current.code) == 1
+
+
+def test_a_losing_capture_race_keeps_the_winners_pin(
+    store: EntryStore,
+    git_repo: Path,
+    git_cmd: Callable[..., str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches the loser of a same-version race deleting the WINNER's capture pin. Both
+    capture version 2 of one entry outside the lock; with one ref name per version, the
+    loser's cleanup would remove the pin the winner's durable version relies on."""
+    from trails.ops._common import capture_code
+
+    old = _run(store, title="old").id
+    original_capture = capture.capture_repo
+    competing: list[str] = []
+
+    def capture_then_compete(*args: Any, **kwargs: Any) -> Any:
+        outcome = original_capture(*args, **kwargs)
+        if not competing:
+            competing.append("running")
+            monkeypatch.setattr(capture, "capture_repo", original_capture)
+            code, _, _ = capture_code(store, f"{old}/v2/0badc0de", [str(git_repo)], [], [])
+            store.write_entry(
+                EntryDraft(id=old, base_version=1, reason="won the race", body="winner", code=code)
+            )
+        return outcome
+
+    monkeypatch.setattr(capture, "capture_repo", capture_then_compete)
+
+    with pytest.raises(ValidationError, match="base_version=1 is stale"):
+        _run(store, id=old, base_version=1, reason="lost the race", repos=[str(git_repo)])
+
+    winner = store.get_entry(old).current
+    assert winner.body == "winner"
+    assert _refs(git_cmd, store) == [f"refs/research/{old}/v2/0badc0de/0"]
+    assert git_cmd(_store(store), "rev-parse", _refs(git_cmd, store)[0]) == (
+        winner.code[0].captured_sha
+    )

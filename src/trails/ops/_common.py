@@ -51,7 +51,8 @@ def capture_code(
     allow_large: Sequence[str],
 ) -> tuple[list[CodeCapture], list[CaptureSummary], list[str]]:
     """Capture each repository's working tree into the store's capture repository under
-    `refs/research/<ref_name>/<position>`. Returns captures, summaries and warnings, possible
+    `refs/research/<ref_name>/<position>`, where `write` passes `<id>/v<version>/<attempt token>`
+    so that two writers capturing one version never share a ref. Returns captures, summaries and warnings, possible
     secrets included.
 
     Raises:
