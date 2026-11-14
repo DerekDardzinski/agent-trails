@@ -134,3 +134,7 @@ each one is in brackets.
     whose pid was reused could misattribute writes; set_projects reasons are not scanned for
     secrets; the preference cap can be exceeded when title lines alone pass 10,000 characters
     (over 100 preferences). The full list is the reviewer's comment on `labbook-a7p.7`.
+45. **Review outcome** [step 6]: the code review of 00df15c found 5 blocking findings, all
+    demonstrated, and the fix check of ecf84ac approved all five. Its remaining advisory notes
+    are in item 44, plus one from the fix check: prime's `more:` call for contradicted claims
+    lists every claim in the project, not only the hidden contradicted ones.
