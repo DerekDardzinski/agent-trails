@@ -15,6 +15,13 @@ from trails.errors import DoltError, RecordNotFoundError, ValidationError
 from trails.models import ArtifactRef, CodeCapture, Link, ProjectPath, RecordDraft
 from trails.store import Store
 
+
+@pytest.fixture
+def store(record_store: Store) -> Store:
+    """This module tests the old record store, removed with it in the next commit."""
+    return record_store
+
+
 DIGEST = "sha256:" + "ab" * 32
 
 

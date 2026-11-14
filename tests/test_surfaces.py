@@ -22,11 +22,11 @@ from fastmcp import Client, FastMCP
 from pydantic import BaseModel, Field
 
 from trails import ops
+from trails.entry_store import EntryStore as Store
 from trails.errors import TrailsError, UsageError
-from trails.models import RecordDraft
+from trails.models import EntryDraft
 from trails.ops import context
 from trails.ops._marks import FromFile, Operation
-from trails.store import Store
 from trails.surfaces import cli as cli_surface, mcp as mcp_surface
 
 SRC_ROOT = Path(__file__).resolve().parent.parent / "src"
@@ -330,15 +330,13 @@ def test_real_search_has_structural_parity_between_cli_and_mcp(
 ) -> None:
     """Catches one surface wrapping, aliasing, or dropping compact SearchHit fields while the
     other emits the operation model unchanged."""
-    record = store.write_record(
-        RecordDraft(
-            entry_type="result",
-            work_status="closed",
+    record = store.write_entry(
+        EntryDraft(
+            kind="claim",
             title="Batching cut p99 latency",
             body="The measured p99 fell after batching.",
-            projects=[],
         )
-    ).record
+    ).entry
 
     code, out, err = _run_cli(
         monkeypatch,
@@ -356,20 +354,17 @@ def test_real_search_has_structural_parity_between_cli_and_mcp(
     assert result.structured_content["hits"][0]["id"] == record.id
     assert set(result.structured_content["hits"][0]) == {
         "id",
-        "entry_type",
+        "kind",
+        "version",
         "title",
-        "projects",
-        "created_at",
-        "lifecycle",
-        "superseded_by",
-        "work_status",
+        "state",
         "tags",
-        "matched_by",
-        "keyword_matches",
+        "projects",
+        "standing",
+        "evidence_for",
+        "open_comments",
+        "matched",
         "excerpt",
-        "contradicted_by",
-        "verified_by",
-        "last_verified",
     }
 
 
@@ -502,82 +497,57 @@ def test_no_module_uses_fastmcp_exclude_args() -> None:
     assert offenders == []
 
 
-def test_publish_help_shows_field_descriptions_and_the_entry_format(
+def test_write_help_shows_field_descriptions_and_the_object_format(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """labbook-79y.6 items 6 and 17, over the real registry. Silent failure: the CLI help
     showing parameter names only, so an agent cannot tell what a list-of-object flag takes;
-    measured in the labbook-79y.5 probe as two refused publishes."""
-    code, raw, _ = _run_cli(monkeypatch, capsys, ["publish", "--help"])
+    measured in the labbook-79y.5 probe as two refused writes."""
+    code, raw, _ = _run_cli(monkeypatch, capsys, ["write", "--help"])
     # The help is boxed and wrapped to the terminal width, so compare it as one line of words.
     out = " ".join(raw.replace("│", " ").split())
 
     assert code == 0
-    assert (
-        "One line stating the claim or outcome rather than only naming the activity; search "
-        "and prime list this title when orienting an agent."
-    ) in out
-    assert (
-        "Open means a later action is expected on this exact record, for example an untested "
-        "hypothesis or a note with an unresolved question; closed means no later action is "
-        "expected on it. A record may be current and closed."
-    ) in out
-    assert (
-        'Each entry is one JSON object with keys "relation", "target_id"; repeat the flag'
-    ) in out
+    assert "One line saying what this is. Required for a new entry." in out
+    assert "skill: written only by the offline consolidation pass, never by an agent" in out
     assert 'with keys "location", "digest" (optional), "notes" (optional)' in out
     assert '"sha256:<64 lowercase hex>"' in out
 
 
-def test_cli_publish_takes_each_link_and_artifact_as_one_json_object(
+def test_cli_takes_each_artifact_and_follow_up_as_one_json_object(
     store: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """labbook-79y.6 item 17. Silent failure: a link or artifact accepted in a form the help
-    does not describe, or a malformed one stored rather than refused as a usage error."""
+    """labbook-79y.6 item 17. Silent failure: an artifact or follow-up accepted in a form the
+    help does not describe, or a malformed one stored rather than refused as a usage error."""
     db = ["--db", str(store.db_path)]
-    required = ["--entry-type", "note", "--work-status", "closed"]
-    _, first, _ = _run_cli(
-        monkeypatch, capsys, ["publish", *required, "--title", "a", "--json", *db]
-    )
-    target = json.loads(first)["record_id"]
-    link = json.dumps({"relation": "cites", "target_id": target})
     artifact = json.dumps({"location": "s3://bucket/key", "digest": None})
-
     code, out, _ = _run_cli(
         monkeypatch,
         capsys,
-        [
-            "publish",
-            *required,
-            "--title",
-            "b",
-            "--links",
-            link,
-            "--artifacts",
-            artifact,
-            "--json",
-            *db,
-        ],
+        ["write", "--kind", "task", "--title", "a", "--artifacts", artifact, "--json", *db],
     )
-    bad, _, err = _run_cli(
+    task = json.loads(out)["id"]
+    follow_up = json.dumps({"title": "fix the flaky test", "priority": 1})
+    closed, _, _ = _run_cli(
         monkeypatch,
         capsys,
         [
-            "publish",
-            *required,
-            "--title",
-            "c",
-            "--links",
-            '{"relation": "bogus", "target_id": "x"}',
-            *db,
+            "close", task, "--outcome", "completed", "--summary", "done",
+            "--follow-ups", follow_up, *db,
         ],
+    )  # fmt: skip
+    bad, _, err = _run_cli(
+        monkeypatch,
+        capsys,
+        ["write", "--kind", "note", "--title", "c", "--artifacts", '{"digest": "x"}', *db],
     )
 
-    record = store.get_record(json.loads(out)["record_id"])
-    assert code == 0
-    assert [(x.relation, x.target_id) for x in record.links] == [("cites", target)]
-    assert [(x.location, x.digest, x.notes) for x in record.artifacts] == [
+    entry = store.get_entry(task)
+    assert (code, closed) == (0, 0)
+    assert [(x.location, x.digest, x.notes) for x in entry.current.artifacts] == [
         ("s3://bucket/key", None, "")
     ]
+    [follow] = store.incoming_links([task], ["discovered_from"])[task]
+    assert store.get_entry(follow.source_id).current.priority == 1
     assert bad == 2
-    assert err.startswith("usage: not a valid Link")
+    assert err.startswith("usage: not a valid ArtifactRef")

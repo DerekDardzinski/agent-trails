@@ -27,7 +27,7 @@ class RegisterProjectResult(RenderedResult):
     warnings: list[str]
 
     def render_text(self) -> str:
-        """Render identity, framing summary, paths, notes, warnings, and next publish call."""
+        """Render identity, framing summary, paths, notes, warnings, and the next calls."""
         state = "registered" if self.created else "already registered"
         lines = [f"project {self.project.id} · {self.project.name} · {state}"]
         if not self.changed:
@@ -48,7 +48,10 @@ class RegisterProjectResult(RenderedResult):
             lines.append(f"{line} · {state}")
         lines += [f"note: {note}" for note in self.notes]
         lines += [f"warning: {warning}" for warning in self.warnings]
-        lines.append(f'Next: publish(..., projects=["{self.project.id}"])')
+        lines.append(
+            f'Next: prime(project="{self.project.id}") · '
+            f'write(kind="goal", title="...", projects=["{self.project.id}"])'
+        )
         return "\n".join(lines)
 
 
@@ -94,9 +97,9 @@ class UpdateProjectResult(RenderedResult):
 
 
 class SetProjectsResult(RenderedResult):
-    """The effective and idempotent parts of a record membership request."""
+    """The effective and idempotent parts of an entry membership request."""
 
-    record_id: str
+    entry_id: str
     changed: list[ProjectMembershipChange]
     unchanged_add: list[ProjectRef]
     unchanged_remove: list[ProjectRef]
@@ -104,7 +107,7 @@ class SetProjectsResult(RenderedResult):
 
     def render_text(self) -> str:
         """Render changes, no-ops, complete current membership, and exact show call."""
-        lines = [f"project memberships for {self.record_id}"]
+        lines = [f"project memberships for {self.entry_id}"]
         lines += [
             f"  {change.action}: {change.project.id} · {change.project.name}"
             for change in self.changed
@@ -117,5 +120,5 @@ class SetProjectsResult(RenderedResult):
         ]
         current = ", ".join(f"{item.id} ({item.name})" for item in self.projects) or "unscoped"
         lines.append(f"current: {current}")
-        lines.append(f'Next: show("{self.record_id}")')
+        lines.append(f'Next: show("{self.entry_id}")')
         return "\n".join(lines)

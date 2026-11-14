@@ -18,18 +18,19 @@ from contextvars import ContextVar
 from functools import cache, wraps
 from pathlib import Path
 
+from trails.entry_store import EntryStore, open_entry_store
 from trails.ops.types import OpFn
-from trails.store import Store, open_store, resolve_db_path
+from trails.store import resolve_db_path
 
-_store: ContextVar[Callable[[], Store]] = ContextVar("trails_store")
+_store: ContextVar[Callable[[], EntryStore]] = ContextVar("trails_store")
 _db_path: ContextVar[Callable[[], Path | None]] = ContextVar("trails_db_path")
 
 
-def store() -> Store:
+def store() -> EntryStore:
     """The store bound for the current invocation, opened on first use.
 
     Every call within one invocation returns the SAME store: opening is memoized per
-    invocation, because `open_store` runs `dolt init` and every dolt invocation costs about
+    invocation, because `open_entry_store` runs `dolt init` and every dolt invocation costs about
     70ms. The memo is never global — two operations running against two `--db` values in one
     process each have their own.
 
@@ -107,7 +108,7 @@ def bind[**P, R](fn: OpFn[P, R], db_path: Callable[[], Path | None]) -> OpFn[P, 
     return called
 
 
-def _opener(db_path: Callable[[], Path | None]) -> Callable[[], Store]:
+def _opener(db_path: Callable[[], Path | None]) -> Callable[[], EntryStore]:
     """One opener for one invocation: opens on first call, returns the same store after.
 
     A FRESH memo per invocation, which is the whole reason this is a function rather than a
@@ -115,4 +116,4 @@ def _opener(db_path: Callable[[], Path | None]) -> Callable[[], Store]:
     opened against a different `--db`, which is a correct-looking answer computed against the
     wrong database.
     """
-    return cache(lambda: open_store(db_path()))
+    return cache(lambda: open_entry_store(db_path()))

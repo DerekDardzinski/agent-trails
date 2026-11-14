@@ -15,9 +15,9 @@ from typing import Annotated, get_type_hints
 import pytest
 from pydantic import BaseModel, Field
 
+from trails.entry_store import EntryStore as Store
 from trails.errors import TrailsError, UsageError
 from trails.ops import context
-from trails.store import Store
 
 
 class Where(BaseModel):
@@ -47,7 +47,7 @@ def test_bind_is_indistinguishable_from_the_operation() -> None:
 
 
 def test_two_concurrent_calls_each_observe_their_own_store(
-    initialised_db: Path, tmp_path: Path
+    initialised_entry_db: Path, tmp_path: Path
 ) -> None:
     """The binding is task-local, so two calls in one event loop cannot collide.
 
@@ -58,8 +58,8 @@ def test_two_concurrent_calls_each_observe_their_own_store(
     """
     first_path = tmp_path / "db-first"
     second_path = tmp_path / "db-second"
-    shutil.copytree(initialised_db, first_path)
-    shutil.copytree(initialised_db, second_path)
+    shutil.copytree(initialised_entry_db, first_path)
+    shutil.copytree(initialised_entry_db, second_path)
 
     both_bound = asyncio.Event()
     arrived = 0
@@ -193,13 +193,13 @@ def test_one_invocation_opens_the_store_once_however_often_the_body_reads_it(
     and every result stays correct while the store's whole cost model quietly breaks.
     """
     opened: list[Path | None] = []
-    real_open = context.open_store
+    real_open = context.open_entry_store
 
     def counting_open(path: Path | None) -> Store:
         opened.append(path)
         return real_open(path)
 
-    monkeypatch.setattr(context, "open_store", counting_open)
+    monkeypatch.setattr(context, "open_entry_store", counting_open)
 
     async def reads_three_times() -> Where:
         """Read the store three times."""

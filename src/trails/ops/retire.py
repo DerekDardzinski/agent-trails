@@ -7,35 +7,26 @@ from typing import Annotated
 
 from pydantic import Field
 
-from trails import dolt
 from trails.ops import context
+from trails.ops._entry_types import RetireResult
 from trails.ops._marks import Operation
-from trails.ops._write_types import RetireResult
 
 OPERATION = Operation(toolset="agent", read_only=False, destructive=False, idempotent=True)
 
 
 async def retire(
-    record_id: Annotated[str, Field(description="The record to retire.")],
+    id: Annotated[str, Field(description="The entry to retire.")],  # noqa: A002
     reason: Annotated[str, Field(description="One sentence saying why it is no longer true.")],
 ) -> RetireResult:
-    """Mark a record as no longer true. It stays in history, and search hides it unless include_history is true.
+    """Mark an entry as no longer true. It stays in history; search hides it unless include_retired is true, and it stops counting as a child or a dependency.
 
-    Use this when: a fact, procedure or decision is wrong or obsolete and nothing replaces it.
+    Use this when: a claim, preference, note or skill is wrong or obsolete and nothing replaces it, or a task should vanish rather than be closed.
 
-    Use instead: publish(supersedes=..., reason=...) when there is a corrected version.
+    Use instead: write(id=..., base_version=..., reason=...), to correct it; close, to finish a task with an outcome.
 
-    Returns: confirmation. Retiring a retired record changes nothing.
+    Returns: confirmation. Retiring a retired entry keeps the first reason and changes nothing.
     """
-    store = context.store()
-    # Under one exclusive lock, so two concurrent retires cannot both read "not retired" and
-    # both report already_retired=False.
-    with dolt.exclusive(store.db_path):
-        before = store.query("SELECT reason FROM retirement WHERE record_id = ?", [record_id])
-        store.retire(record_id, reason)
-    if before:
-        # The store kept the first reason and wrote nothing; report the reason that stands.
-        return RetireResult(
-            record_id=record_id, reason=str(before[0]["reason"]), already_retired=True
-        )
-    return RetireResult(record_id=record_id, reason=reason.strip(), already_retired=False)
+    outcome = context.store().retire_entry(id, reason)
+    return RetireResult(
+        entry_id=outcome.entry_id, reason=outcome.reason, already_retired=outcome.already_retired
+    )

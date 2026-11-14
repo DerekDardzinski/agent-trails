@@ -27,5 +27,5 @@ async def alias(
     Returns: the tag and the canonical tag it now matches.
     """
     context.store().write_tag_alias(tag, canonical)
-    # The store normalises both tags as record tags are normalised; report what it stored.
+    # The store normalises both tags as entry tags are normalised; report what it stored.
     return AliasResult(tag=tag.strip().lower(), canonical=canonical.strip().lower())

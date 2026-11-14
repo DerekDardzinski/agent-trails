@@ -7,69 +7,53 @@ from typing import Annotated
 
 from pydantic import Field
 
-from trails import dolt
-from trails.errors import ValidationError
 from trails.ops import context
-from trails.ops._guidance import (
-    contradiction_notes,
-    result_hypothesis_link_notes,
-    superseded_target_warnings,
-)
+from trails.ops._common import redraw
+from trails.ops._entry_types import LinkResult
 from trails.ops._marks import Operation
-from trails.ops._write_types import LinkResult
-from trails.vocab import Relation
+from trails.vocab import LinkRelation
 
 OPERATION = Operation(toolset="agent", read_only=False, destructive=False, idempotent=True)
 
 
 async def link(
-    source_id: Annotated[str, Field(description="The record the relation is from.")],
-    relation: Annotated[Relation, Field(description="builds_on, contradicts or cites.")],
-    target_id: Annotated[str, Field(description="The record the relation is to.")],
+    source: Annotated[str, Field(description="The entry the link is from.")],
+    relation: Annotated[
+        LinkRelation,
+        Field(
+            description=(
+                "waits_on: source is not ready until target is closed completed. part_of: "
+                "source is a child of target. discovered_from: source came up while working on "
+                "target. supersedes: source replaces target. supports or contradicts: source is "
+                "evidence for or against target. references: source mentions target."
+            )
+        ),
+    ],
+    target: Annotated[str, Field(description="The entry the link is to.")],
+    reason: Annotated[str | None, Field(description="Optional: why the link holds.")] = None,
 ) -> LinkResult:
-    """Relate two existing records with builds_on, contradicts or cites.
+    """Add a link between two existing entries, recording the target's current version.
 
-    Use this when: you notice a relation after both records exist.
+    Use this when: an edge was not known at creation, such as a dependency on a task created later, or a note that supports a claim.
 
-    Use instead: publish(links=...) when writing the new record; publish(supersedes=..., reason=...) to replace a record, which link refuses.
+    Use instead: write(parent=..., waits_on=...), when creating an entry whose edges you know; unlink, to remove a link.
 
-    Returns: the link; any note explaining that cites or contradicts does not count as a result built on a hypothesis; for contradicts on a current record, the calls that correct or retire it; and a warning naming the current version when the target is superseded. Adding a link that already exists changes nothing.
+    Returns: the link and the target version it was written against, the task graph around both ends for part_of and waits_on with each entry's state, and warnings such as a dependency cycle. A link that already exists changes nothing.
     """
-    # `relation` admits all four values so that supersedes reaches this refusal, which names
-    # the call to make, instead of a schema rejection that names nothing.
-    if relation == "supersedes":
-        raise ValidationError(
-            "link does not write supersedes: a replacement needs a new record and a reason; "
-            "use publish(supersedes=..., reason=...)"
-        )
     store = context.store()
-    with dolt.exclusive(store.db_path):
-        records = store.get_records([source_id, target_id])
-        stored = store.add_link(source_id, relation, target_id)
-        source = records.get(source_id)
-        target = records.get(target_id)
-        tip = (
-            store.superseding_tip(target_id)
-            if target is not None and target.superseded_by is not None
-            else None
-        )
-    notes: list[str] = []
-    warnings: list[str] = []
-    if source is not None and target is not None:
-        notes = result_hypothesis_link_notes(
-            source_id,
-            source.entry_type,
-            [*source.links, stored],
-            {target_id: target},
-        )
-        notes += contradiction_notes(source_id, [stored], {target_id: target})
-        warnings = superseded_target_warnings(
-            source_id, [stored], {target_id: target}, {target_id: tip} if tip else {}
-        )
+    outcome = store.add_entry_link(source, relation, target, reason)
+    warnings = list(outcome.warnings)
+    graph = []
+    if relation in {"part_of", "waits_on"}:
+        graph, extra = redraw(store, [source, target])
+        warnings += extra
     return LinkResult(
-        source_id=source_id,
-        relation=stored.relation,
-        target_id=stored.target_id,
-        notes=notes,
+        source_id=source,
+        relation=relation,
+        target_id=target,
+        action="add",
+        changed=outcome.changed,
+        target_version=outcome.target_version,
+        graph=graph,
         warnings=warnings,
     )

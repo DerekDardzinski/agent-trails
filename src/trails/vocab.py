@@ -118,6 +118,18 @@ TASK_STATES: tuple[TaskState, ...] = ("open", "claimed", "closed")
 TaskEventKind = Literal["claim", "release", "close", "reopen"]
 TASK_EVENTS: tuple[TaskEventKind, ...] = ("claim", "release", "close", "reopen")
 
+# What search's status filter accepts (D19): a task state, or the outcome a close recorded.
+SearchStatus = Literal["open", "claimed", "closed", "completed", "dropped", "failed", "superseded"]
+SEARCH_STATUSES: tuple[SearchStatus, ...] = (
+    "open",
+    "claimed",
+    "closed",
+    "completed",
+    "dropped",
+    "failed",
+    "superseded",
+)
+
 # Lowest number first in the ready queue (dec-o0gww: priority 0-4).
 PRIORITY_RANGE: tuple[int, int] = (0, 4)
 

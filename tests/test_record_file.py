@@ -11,6 +11,13 @@ from trails.models import ArtifactRef, Link, ProjectRef, Record, RecordDraft, Wo
 from trails.record_file import from_markdown, to_markdown
 from trails.store import Store
 
+
+@pytest.fixture
+def store(record_store: Store) -> Store:
+    """This module tests the old record store, removed with it in the next commit."""
+    return record_store
+
+
 BODY = 'Step 1\n+++\nquote " and backslash \\ and tab\t and é 😀 and \x7f\n\n## Next\n'
 
 

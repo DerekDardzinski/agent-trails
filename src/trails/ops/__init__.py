@@ -92,8 +92,8 @@ def operations() -> tuple[OpFn[..., Any], ...]:
 def operation_name(fn: OpFn[..., Any]) -> str:
     """The canonical name, from which each binder derives its own spelling.
 
-    A module named `mark_verified` yields CLI path `mark verified` and tool name
-    `mark_verified`; a module named `show` yields `show` and `show`. One mapping, so a name
+    A module named `add_comment` yields CLI path `add comment` and tool name
+    `add_comment`; a module named `show` yields `show` and `show`. One mapping, so a name
     cannot be spelled two ways.
     """
     # `OpFn` is a Callable alias, which a type checker models structurally and therefore
@@ -105,7 +105,7 @@ def operation_name(fn: OpFn[..., Any]) -> str:
 def cli_path(fn: OpFn[..., Any]) -> tuple[str, ...]:
     """The CLI command path: the canonical name split into its segments.
 
-    `mark_verified` becomes ("mark", "verified"), so `trails mark verified` is the command,
+    `add_comment` becomes ("add", "comment"), so `trails add comment` is the command,
     and `show` becomes ("show",).
     """
     return tuple(operation_name(fn).split("_"))

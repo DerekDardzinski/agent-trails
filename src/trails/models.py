@@ -46,7 +46,7 @@ class CodeCapture(BaseModel):
 
 
 class CaptureSummary(BaseModel):
-    """What one publish captured from one repository."""
+    """What one write captured from one repository."""
 
     repo_path: str
     git_common_dir: str

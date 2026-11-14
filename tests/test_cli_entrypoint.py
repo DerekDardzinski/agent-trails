@@ -14,8 +14,8 @@ from __future__ import annotations
 import pytest
 
 from trails import __version__, cli
-from trails.models import RecordDraft
-from trails.store import Store
+from trails.entry_store import EntryStore as Store
+from trails.models import EntryDraft
 
 
 def _run(argv: list[str], capsys: pytest.CaptureFixture[str]) -> tuple[int, str]:
@@ -81,18 +81,14 @@ def test_cli_show_accepts_one_or_several_positional_ids(
 ) -> None:
     """Catches Cyclopts trying to infer one token count for `str | list[str]` and crashing
     before the operation runs."""
-    first = store.write_record(
-        RecordDraft(work_status="closed", title="First", entry_type="note")
-    ).record.id
-    second = store.write_record(
-        RecordDraft(work_status="closed", title="Second", entry_type="note")
-    ).record.id
+    first = store.write_entry(EntryDraft(kind="note", title="First")).entry.id
+    second = store.write_entry(EntryDraft(kind="note", title="Second")).entry.id
     db = ["--db", str(store.db_path)]
 
     one_code, one = _run(["show", first, *db], capsys)
-    many_code, many = _run(["show", second, first, "--detail", "full", *db], capsys)
+    many_code, many = _run(["show", second, first, "--versions", *db], capsys)
 
     assert (one_code, many_code) == (0, 0)
-    assert f"state: {first} · lifecycle current · work closed · detail summary" in one
+    assert one.startswith(f"{first}  note  v1  [note]  First")
     assert many.index(second) < many.index(first)
     assert many.count("Next:") == 1

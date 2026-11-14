@@ -37,10 +37,21 @@ def initialised_db(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 @pytest.fixture
-def store(initialised_db: Path, tmp_path: Path) -> Iterator[Store]:
+def record_store(initialised_db: Path, tmp_path: Path) -> Iterator[Store]:
+    """The old record store, for its own tests until it is deleted."""
     destination = tmp_path / "db"
     shutil.copytree(initialised_db, destination)
     yield open_store(destination)
+
+
+@pytest.fixture
+def store(initialised_entry_db: Path, tmp_path: Path) -> Iterator[EntryStore]:
+    """The store every operation opens."""
+    from trails.entry_store import open_entry_store
+
+    destination = tmp_path / "db"
+    shutil.copytree(initialised_entry_db, destination)
+    yield open_entry_store(destination)
 
 
 @pytest.fixture(scope="session")

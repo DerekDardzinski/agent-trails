@@ -14,10 +14,11 @@ from pathlib import Path
 from typing import Any, Literal, get_type_hints
 
 from fastmcp import FastMCP
+from fastmcp.server.dependencies import get_context
 from fastmcp.tools import ToolResult
 from mcp.types import TextContent, ToolAnnotations
 
-from trails import ops
+from trails import ops, sessions
 from trails.errors import TrailsError
 from trails.ops import context
 from trails.ops._marks import Operation
@@ -127,10 +128,13 @@ def _translating(bound: Any) -> Any:
 
     @wraps(bound)
     async def called(*args: Any, **kwargs: Any) -> Any:
+        token = sessions.CLIENT_NAME.set(_client_name())
         try:
             result = await bound(*args, **kwargs)
         except TrailsError as exc:
             return ToolResult(structured_content={"error": str(exc)}, is_error=True)
+        finally:
+            sessions.CLIENT_NAME.reset(token)
         if isinstance(result, RenderedResult):
             # The text an agent reads, and the model a host can parse, from one result.
             return ToolResult(
@@ -140,6 +144,18 @@ def _translating(bound: Any) -> Any:
         return result
 
     return called
+
+
+def _client_name() -> str | None:
+    """The MCP client's name from its `initialize` request, which decides the harness a write
+    is attributed to (`sessions`). None when the request context carries none."""
+    try:
+        params = get_context().session.client_params
+    except Exception:  # no request context, or a transport without client params
+        return None
+    info = getattr(params, "clientInfo", None) if params is not None else None
+    name = getattr(info, "name", None)
+    return name if isinstance(name, str) and name else None
 
 
 def _output_schema(operation: Any) -> dict[str, Any]:

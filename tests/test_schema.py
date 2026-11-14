@@ -4,9 +4,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from trails import dolt
 from trails.models import RecordDraft
 from trails.store import SCHEMA_MARKER, Store, open_store
+
+
+@pytest.fixture
+def store(record_store: Store) -> Store:
+    """This module tests the old record store, removed with it in the next commit."""
+    return record_store
 
 
 def test_a_fresh_database_holds_exactly_the_trails_tables(store: Store) -> None:

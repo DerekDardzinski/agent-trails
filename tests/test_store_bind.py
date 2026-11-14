@@ -9,6 +9,12 @@ from trails.models import RecordDraft
 from trails.store import Store, _bind
 
 
+@pytest.fixture
+def store(record_store: Store) -> Store:
+    """This module tests the old record store, removed with it in the next commit."""
+    return record_store
+
+
 def test_a_param_containing_a_question_mark_is_not_spliced_into_by_the_next_param() -> None:
     """Catches the original defect: substituted text was rescanned for `?`, so the second
     param landed inside the first param's literal and produced malformed or injected SQL."""

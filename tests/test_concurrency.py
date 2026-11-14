@@ -14,9 +14,18 @@ import select
 import subprocess
 import sys
 
+import pytest
+
 from trails import dolt
 from trails.models import RecordDraft
 from trails.store import Store
+
+
+@pytest.fixture
+def store(record_store: Store) -> Store:
+    """This module tests the old record store, removed with it in the next commit."""
+    return record_store
+
 
 _WORKER = """
 import sys

@@ -65,12 +65,12 @@ class MarkVerifiedResult(RenderedResult):
 
 
 class EmbedResult(RenderedResult):
-    """A backfill of record and current-framing similarity embeddings."""
+    """A backfill of entry and current-framing similarity embeddings."""
 
     available: bool
-    records: int
+    entries: int
     framing_versions: int
-    record_vectors: int
+    entry_vectors: int
     framing_vectors: int
 
     def render_text(self) -> str:
@@ -81,7 +81,7 @@ class EmbedResult(RenderedResult):
             )
         return "\n".join(
             [
-                f"{self.record_vectors} record vectors written for {self.records} records",
+                f"{self.entry_vectors} entry vectors written for {self.entries} current versions",
                 f"{self.framing_vectors} framing vectors written for "
                 f"{self.framing_versions} current framing versions",
                 "Next: search(...)",
@@ -90,9 +90,9 @@ class EmbedResult(RenderedResult):
 
 
 class LintItem(BaseModel):
-    """One store problem, naming the record it is about when there is one."""
+    """One store problem, naming the entry it is about when there is one."""
 
-    record_id: str | None  # None for a tag pair or a ref that names no record
+    entry_id: str | None  # None for a tag pair, a path, or a ref that names no entry
     detail: str
 
 
@@ -122,6 +122,6 @@ class LintResult(RenderedResult):
             for category, items in self.categories.items():
                 lines.append(f"{category}: {len(items)}")
                 for item in items:
-                    call = f' · show("{item.record_id}")' if item.record_id is not None else ""
+                    call = f' · show("{item.entry_id}")' if item.entry_id is not None else ""
                     lines.append(f"  {item.detail}{call}")
         return "\n".join(lines)

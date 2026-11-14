@@ -13,12 +13,12 @@ import pytest
 
 from tests.fakes import FakeEngine, basis
 from trails import engine as engine_seam
+from trails.entry_store import EntryStore as Store
 from trails.errors import ValidationError
 from trails.models import ProjectFramingDraft, ProjectPath
 from trails.ops import context
 from trails.ops.register_project import register_project
 from trails.ops.update_project import update_project
-from trails.store import Store
 
 AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
 
@@ -45,10 +45,10 @@ def _tree(root: Path) -> list[str]:
     return sorted(str(path.relative_to(root)) for path in root.rglob("*"))
 
 
-def test_register_creates_stable_identity_without_a_context_record(
+def test_register_creates_stable_identity_without_a_context_entry(
     store: Store, tmp_path: Path
 ) -> None:
-    """Catches registration creating a template record, changing id on retry, touching a path,
+    """Catches registration creating a template entry, changing id on retry, touching a path,
     or hiding path and secret warnings."""
     code = tmp_path / "code"
     code.mkdir()
@@ -74,14 +74,15 @@ def test_register_creates_stable_identity_without_a_context_record(
     assert (first.changed, second.changed, lookup.changed) == (True, False, False)
     assert first.framing is second.framing is lookup.framing is None
     assert _dolt_commits(store) == commits
-    assert store.query("SELECT COUNT(*) AS n FROM record") == [{"n": 0}]
+    assert store.query("SELECT COUNT(*) AS n FROM entry") == [{"n": 0}]
     assert first.warnings == [
         f"{missing} does not exist on {host}",
         "s3://bucket/mint/: not checked (s3 URI)",
         "possible secret: AWSKeyDetector in s3://bucket/mint/ access_instructions line 1",
     ]
     assert first.render_text().splitlines()[-1] == (
-        f'Next: publish(..., projects=["{first.project.id}"])'
+        f'Next: prime(project="{first.project.id}") · '
+        f'write(kind="goal", title="...", projects=["{first.project.id}"])'
     )
 
 

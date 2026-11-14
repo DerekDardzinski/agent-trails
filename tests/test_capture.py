@@ -1,4 +1,4 @@
-"""Tests for publish(repos=...): code capture into trails' own git store.
+"""Tests for write(repos=...): code capture into trails' own git store.
 
 Real git and real Dolt, each in a temporary directory.
 """
@@ -18,31 +18,31 @@ from typing import Any
 import pytest
 
 from trails import capture, gitprobe
+from trails.entry_store import EntryStore
 from trails.errors import TrailsError, ValidationError
-from trails.models import Link, RecordDraft
+from trails.models import EntryDraft
 from trails.ops import context
-from trails.ops.publish import publish
-from trails.store import Store
+from trails.ops.write import write
 
 AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
 
 
-def _run(store: Store, **arguments: Any) -> Any:
-    if "from_file" not in arguments:
-        arguments.setdefault("entry_type", "note")
-        arguments.setdefault("work_status", "closed")
+def _run(store: EntryStore, **arguments: Any) -> Any:
+    if "id" not in arguments:
+        arguments.setdefault("kind", "note")
+        arguments.setdefault("title", "t")
 
     async def go() -> Any:
-        return await context.bind(publish, lambda: store.db_path)(**arguments)
+        return await context.bind(write, lambda: store.db_path)(**arguments)
 
     return asyncio.run(go())
 
 
-def _store(store: Store) -> Path:
+def _store(store: EntryStore) -> Path:
     return capture.store_path(store.db_path)
 
 
-def _show(store: Store, sha: str, path: str) -> str:
+def _show(store: EntryStore, sha: str, path: str) -> str:
     """A file of a capture, read from the store with no alternate."""
     return subprocess.run(
         ["git", f"--git-dir={_store(store)}", "show", f"{sha}:{path}"],
@@ -54,7 +54,7 @@ def _show(store: Store, sha: str, path: str) -> str:
     ).stdout.strip()
 
 
-def _files(store: Store, sha: str) -> list[str]:
+def _files(store: EntryStore, sha: str) -> list[str]:
     listing = subprocess.run(
         ["git", f"--git-dir={_store(store)}", "ls-tree", "-r", "--name-only", sha],
         capture_output=True,
@@ -85,7 +85,7 @@ def _user_state(repo: Path) -> tuple[bytes, bytes, bytes, bytes, list[str], int]
 
 
 def test_capture_writes_nothing_to_the_repository_and_holds_the_new_contents(
-    store: Store, git_repo: Path, git_cmd: Callable[..., str]
+    store: EntryStore, git_repo: Path, git_cmd: Callable[..., str]
 ) -> None:
     """labbook-79y.10 criterion 1. Catches a capture that writes an object, a ref, a lock
     file or the index in the user's repository, misses the untracked file or the uncommitted
@@ -95,14 +95,14 @@ def test_capture_writes_nothing_to_the_repository_and_holds_the_new_contents(
     before = _user_state(git_repo)
     head = git_cmd(git_repo, "rev-parse", "HEAD")
 
-    result = _run(store, title="t", entry_type="result", repos=[str(git_repo)])
+    result = _run(store, title="t", kind="claim", repos=[str(git_repo)])
 
     assert _user_state(git_repo) == before
-    [code] = store.get_record(result.record_id).code
+    [code] = store.get_entry(result.id).current.code
     assert (code.head_sha, code.dirty) == (head, True)
     assert _show(store, code.captured_sha, "tracked.txt") == "edited"
     assert _show(store, code.captured_sha, "untracked.txt") == "new"
-    pinned = git_cmd(_store(store), "rev-parse", f"refs/research/{result.record_id}/0")
+    pinned = git_cmd(_store(store), "rev-parse", f"refs/research/{result.id}/v1/0")
     assert pinned == code.captured_sha
 
 
@@ -120,7 +120,7 @@ def _git_tree(repo: Path) -> dict[str, tuple[int, int]]:
     "setting", ["filter", "core.splitIndex", "core.fsmonitor", "core.untrackedCache"]
 )
 def test_repository_config_does_not_make_a_capture_write_into_git(
-    store: Store, git_repo: Path, git_cmd: Callable[..., str], setting: str
+    store: EntryStore, git_repo: Path, git_cmd: Callable[..., str], setting: str
 ) -> None:
     """labbook-79y.10 review round 1. Catches the capture's git commands running under the
     repository's own config, where a clean filter such as git-lfs's writes .git/lfs/objects
@@ -142,7 +142,7 @@ def test_repository_config_does_not_make_a_capture_write_into_git(
     (git_repo / "tracked.txt").write_text("edited\n")
     before = _git_tree(git_repo)
     try:
-        result = _run(store, title="t", entry_type="note", repos=[str(git_repo)])
+        result = _run(store, title="t", repos=[str(git_repo)])
     finally:
         subprocess.run(
             ["git", "-C", str(git_repo), "fsmonitor--daemon", "stop"],
@@ -152,31 +152,31 @@ def test_repository_config_does_not_make_a_capture_write_into_git(
         )
 
     assert _git_tree(git_repo) == before
-    [code] = store.get_record(result.record_id).code
+    [code] = store.get_entry(result.id).current.code
     assert _show(store, code.captured_sha, "data.bin") == "aaaa"
 
 
 def test_a_repository_whose_path_holds_a_colon_is_captured(
-    store: Store, make_git_repo: Callable[[str], Path]
+    store: EntryStore, make_git_repo: Callable[[str], Path]
 ) -> None:
     """labbook-79y.10 review round 1, advisory. Catches the alternate path split at the colon,
-    which git reports as an unnormalizable path and the publish fails."""
+    which git reports as an unnormalizable path and the write fails."""
     repo = make_git_repo("a:b/repo")
 
-    result = _run(store, title="t", entry_type="note", repos=[str(repo)])
+    result = _run(store, title="t", repos=[str(repo)])
 
-    [code] = store.get_record(result.record_id).code
+    [code] = store.get_entry(result.id).current.code
     assert _show(store, code.captured_sha, "tracked.txt") == "original"
 
 
 def test_a_capture_is_readable_after_the_repository_is_deleted(
-    store: Store, git_repo: Path
+    store: EntryStore, git_repo: Path
 ) -> None:
     """labbook-79y.10 criterion 1. Catches a capture whose unchanged files were only ever read
     through the repository's own objects, so it vanishes with the repository."""
     (git_repo / "new.txt").write_text("n\n")
-    result = _run(store, title="t", entry_type="result", repos=[str(git_repo)])
-    [code] = store.get_record(result.record_id).code
+    result = _run(store, title="t", kind="claim", repos=[str(git_repo)])
+    [code] = store.get_entry(result.id).current.code
 
     shutil.rmtree(git_repo)
 
@@ -193,82 +193,82 @@ def test_a_capture_is_readable_after_the_repository_is_deleted(
 
 
 def test_a_clean_tree_is_not_dirty_and_an_edit_is(
-    store: Store, git_repo: Path, git_cmd: Callable[..., str]
+    store: EntryStore, git_repo: Path, git_cmd: Callable[..., str]
 ) -> None:
     """labbook-79y.9 item 11a. Catches dirty compared against the commit sha rather than its
     tree, which reports every capture dirty because a capture commit is never HEAD."""
-    clean = _run(store, title="t", entry_type="note", repos=[str(git_repo)])
+    clean = _run(store, title="t", repos=[str(git_repo)])
     (git_repo / "tracked.txt").write_text("edited\n")
-    edited = _run(store, title="t", entry_type="note", repos=[str(git_repo)])
+    edited = _run(store, title="t", repos=[str(git_repo)])
 
-    assert [c.dirty for c in store.get_record(clean.record_id).code] == [False]
-    assert [c.dirty for c in store.get_record(edited.record_id).code] == [True]
+    assert [c.dirty for c in store.get_entry(clean.id).current.code] == [False]
+    assert [c.dirty for c in store.get_entry(edited.id).current.code] == [True]
 
 
 def test_two_concurrent_captures_of_one_repo_both_succeed(
-    store: Store, git_repo: Path, git_cmd: Callable[..., str]
+    store: EntryStore, git_repo: Path, git_cmd: Callable[..., str]
 ) -> None:
-    """Catches two captures colliding on the store, so one publish fails or one record names
+    """Catches two captures colliding on the store, so one write fails or one record names
     a commit that is not pinned."""
     (git_repo / "untracked.txt").write_text("new\n")
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(
             pool.map(
-                lambda n: _run(store, title=f"t{n}", entry_type="note", repos=[str(git_repo)]),
+                lambda n: _run(store, title=f"t{n}", repos=[str(git_repo)]),
                 range(2),
             )
         )
 
-    ids = {result.record_id for result in results}
+    ids = {result.id for result in results}
     assert len(ids) == 2
     refs = git_cmd(_store(store), "for-each-ref", "--format=%(refname)", "refs/research/")
-    assert sorted(refs.splitlines()) == sorted(f"refs/research/{i}/0" for i in ids)
+    assert sorted(refs.splitlines()) == sorted(f"refs/research/{i}/v1/0" for i in ids)
 
 
-def test_two_repositories_in_one_publish_get_one_ref_each(
-    store: Store, make_git_repo: Callable[[str], Path], git_cmd: Callable[..., str]
+def test_two_repositories_in_one_write_get_one_ref_each(
+    store: EntryStore, make_git_repo: Callable[[str], Path], git_cmd: Callable[..., str]
 ) -> None:
-    """labbook-79y.10 design gap. Catches both captures of one publish pinned under the same
+    """labbook-79y.10 design gap. Catches both captures of one write pinned under the same
     ref, which refuses the second after the first is written."""
     first, second = make_git_repo("one"), make_git_repo("two")
 
-    result = _run(store, title="t", entry_type="note", repos=[str(first), str(second)])
+    result = _run(store, title="t", repos=[str(first), str(second)])
 
     refs = git_cmd(_store(store), "for-each-ref", "--format=%(refname)", "refs/research/")
     assert refs.splitlines() == [
-        f"refs/research/{result.record_id}/0",
-        f"refs/research/{result.record_id}/1",
+        f"refs/research/{result.id}/v1/0",
+        f"refs/research/{result.id}/v1/1",
     ]
 
 
-def test_a_non_git_directory_is_refused_by_path(store: Store, tmp_path: Path) -> None:
+def test_a_non_git_directory_is_refused_by_path(store: EntryStore, tmp_path: Path) -> None:
     """Catches a non-repository recorded silently with no code captured."""
     plain = tmp_path / "plain"
     plain.mkdir()
 
     with pytest.raises(ValidationError, match=str(plain)):
-        _run(store, title="t", entry_type="note", repos=[str(plain)])
+        _run(store, title="t", repos=[str(plain)])
 
 
 def test_a_repo_with_no_commit_gives_a_parentless_capture(
-    store: Store, tmp_path: Path, git_cmd: Callable[..., str]
+    store: EntryStore, tmp_path: Path, git_cmd: Callable[..., str]
 ) -> None:
-    """Catches `read-tree HEAD` failing the publish in a fresh repository."""
+    """Catches `read-tree HEAD` failing the write in a fresh repository."""
     repo = tmp_path / "fresh"
     repo.mkdir()
     git_cmd(repo, "init", "-q", ".")
     (repo / "a.txt").write_text("a\n")
 
-    result = _run(store, title="t", entry_type="note", repos=[str(repo)])
+    result = _run(store, title="t", repos=[str(repo)])
 
-    [code] = store.get_record(result.record_id).code
+    [code] = store.get_entry(result.id).current.code
     assert (code.head_sha, code.dirty) == (None, True)
     assert _files(store, code.captured_sha) == ["a.txt"]
 
 
 def test_a_capture_has_no_parent_so_history_is_not_copied(
-    store: Store, git_repo: Path, git_cmd: Callable[..., str]
+    store: EntryStore, git_repo: Path, git_cmd: Callable[..., str]
 ) -> None:
     """labbook-79y.10 deviation from the design's `-p head`. Catches the capture parented on
     HEAD, which copies the whole history into the store, including a large file deleted
@@ -280,9 +280,9 @@ def test_a_capture_has_no_parent_so_history_is_not_copied(
     git_cmd(git_repo, "rm", "-q", "old.bin")
     git_cmd(git_repo, "commit", "-qm", "remove")
 
-    result = _run(store, title="t", entry_type="note", repos=[str(git_repo)])
+    result = _run(store, title="t", repos=[str(git_repo)])
 
-    [code] = store.get_record(result.record_id).code
+    [code] = store.get_entry(result.id).current.code
     parents = git_cmd(_store(store), "rev-list", "--parents", "-n", "1", code.captured_sha)
     assert parents == code.captured_sha
     present = subprocess.run(
@@ -295,7 +295,7 @@ def test_a_capture_has_no_parent_so_history_is_not_copied(
 
 
 def test_a_linked_worktree_is_captured_without_writing_to_the_main_repository(
-    store: Store, git_repo: Path, git_cmd: Callable[..., str], tmp_path: Path
+    store: EntryStore, git_repo: Path, git_cmd: Callable[..., str], tmp_path: Path
 ) -> None:
     """Catches the alternate taken from the worktree's own git dir, which holds no objects,
     so every unchanged file of a worktree fails to read."""
@@ -304,9 +304,9 @@ def test_a_linked_worktree_is_captured_without_writing_to_the_main_repository(
     (worktree / "w.txt").write_text("w\n")
     before = sorted(str(p) for p in (git_repo / ".git").rglob("*"))
 
-    result = _run(store, title="t", entry_type="note", repos=[str(worktree)])
+    result = _run(store, title="t", repos=[str(worktree)])
 
-    [code] = store.get_record(result.record_id).code
+    [code] = store.get_entry(result.id).current.code
     assert _show(store, code.captured_sha, "w.txt") == "w"
     assert _show(store, code.captured_sha, "tracked.txt") == "original"
     assert sorted(str(p) for p in (git_repo / ".git").rglob("*")) == before
@@ -314,7 +314,7 @@ def test_a_linked_worktree_is_captured_without_writing_to_the_main_repository(
 
 @pytest.mark.parametrize("second", ["same", "worktree"])
 def test_two_entries_of_one_repository_are_refused_before_capture(
-    store: Store, git_repo: Path, git_cmd: Callable[..., str], tmp_path: Path, second: str
+    store: EntryStore, git_repo: Path, git_cmd: Callable[..., str], tmp_path: Path, second: str
 ) -> None:
     """Catches one repository captured twice under one record, as two paths. Covers the same
     repo listed twice and a repo plus its own linked worktree."""
@@ -324,26 +324,28 @@ def test_two_entries_of_one_repository_are_refused_before_capture(
         git_cmd(git_repo, "worktree", "add", "-q", str(other), "-b", "side")
 
     with pytest.raises(ValidationError, match="same repository"):
-        _run(store, title="t", entry_type="note", repos=[str(git_repo), str(other)])
+        _run(store, title="t", repos=[str(git_repo), str(other)])
 
     assert not _store(store).exists()
 
 
-def test_a_secret_in_a_new_untracked_directory_is_a_warning(store: Store, git_repo: Path) -> None:
+def test_a_secret_in_a_new_untracked_directory_is_a_warning(
+    store: EntryStore, git_repo: Path
+) -> None:
     """Catches a scan that sees a new untracked directory as one entry and never reads its
     files, a secret that blocks the write, or the key text in a warning."""
     (git_repo / "newexp").mkdir()
     (git_repo / "newexp" / ".env").write_text(f"key = {AWS_KEY}\n")
 
-    result = _run(store, title="t", entry_type="note", repos=[str(git_repo)])
+    result = _run(store, title="t", repos=[str(git_repo)])
 
-    assert store.get_record(result.record_id).code
+    assert store.get_entry(result.id).current.code
     assert "possible secret: AWSKeyDetector in file:newexp/.env line 1" in result.warnings
     assert AWS_KEY not in result.render_text()
 
 
 def test_an_untracked_nested_repository_is_named_as_not_captured(
-    store: Store, git_repo: Path, make_git_repo: Callable[[str], Path]
+    store: EntryStore, git_repo: Path, make_git_repo: Callable[[str], Path]
 ) -> None:
     """labbook-79y.8 criteria 1 and 2. Catches a capture that silently drops a nested
     repository's files, and a secret scan that reads the gitlink as an empty file or fails
@@ -351,7 +353,7 @@ def test_an_untracked_nested_repository_is_named_as_not_captured(
     nested = make_git_repo("repo/vendored")
     (nested / ".env").write_text(f"key = {AWS_KEY}\n")
 
-    result = _run(store, title="t", entry_type="note", repos=[str(git_repo)])
+    result = _run(store, title="t", repos=[str(git_repo)])
 
     top = str(git_repo.resolve())
     assert (
@@ -371,7 +373,7 @@ def _add_submodule(
 
 
 def test_a_registered_submodule_is_not_reported_as_uncaptured(
-    store: Store,
+    store: EntryStore,
     git_repo: Path,
     make_git_repo: Callable[[str], Path],
     git_cmd: Callable[..., str],
@@ -382,16 +384,16 @@ def test_a_registered_submodule_is_not_reported_as_uncaptured(
     .gitmodules parse, which now reads the store's copy of .gitmodules."""
     _add_submodule(git_repo, make_git_repo, git_cmd, "third party/sub")
 
-    result = _run(store, title="t", entry_type="note", repos=[str(git_repo)])
+    result = _run(store, title="t", repos=[str(git_repo)])
 
     assert not any(warning.startswith("not captured") for warning in result.warnings)
 
 
 def test_a_nested_repository_with_no_commit_is_left_out_and_passing_it_captures_it(
-    store: Store, git_repo: Path, git_cmd: Callable[..., str]
+    store: EntryStore, git_repo: Path, git_cmd: Callable[..., str]
 ) -> None:
     """labbook-79y.6 item 16 and labbook-79y.9 item 11e. Catches `git add -A` refusing the
-    nested repository and so refusing the whole publish, the omission going unreported, and
+    nested repository and so refusing the whole write, the omission going unreported, and
     the advice not working: passing the nested repository in repos must capture its files."""
     for name in ("empty", "deep/x/inner"):
         (git_repo / name).mkdir(parents=True)
@@ -399,10 +401,8 @@ def test_a_nested_repository_with_no_commit_is_left_out_and_passing_it_captures_
     (git_repo / "empty" / "e.txt").write_text("e\n")
     (git_repo / "kept.txt").write_text("kept\n")
 
-    alone = _run(store, title="t", entry_type="note", repos=[str(git_repo)])
-    together = _run(
-        store, title="t", entry_type="note", repos=[str(git_repo), str(git_repo / "empty")]
-    )
+    alone = _run(store, title="t", repos=[str(git_repo)])
+    together = _run(store, title="t", repos=[str(git_repo), str(git_repo / "empty")])
 
     top = str(git_repo.resolve())
     left_out = "is a nested git repository with no commit, so it was left out of this capture"
@@ -410,15 +410,15 @@ def test_a_nested_repository_with_no_commit_is_left_out_and_passing_it_captures_
         f"not captured: {top}/deep/x/inner {left_out}; pass it in repos to capture it",
         f"not captured: {top}/empty {left_out}; pass it in repos to capture it",
     ]
-    [code] = store.get_record(alone.record_id).code
+    [code] = store.get_entry(alone.id).current.code
     assert _show(store, code.captured_sha, "kept.txt") == "kept"
     assert not any(f"{top}/empty " in w for w in together.warnings)
-    shas = {c.repo_path: c.captured_sha for c in store.get_record(together.record_id).code}
+    shas = {c.repo_path: c.captured_sha for c in store.get_entry(together.id).current.code}
     assert _files(store, shas[f"{top}/empty"]) == ["e.txt"]
 
 
 def test_a_submodule_with_uncommitted_changes_is_named_and_passing_it_captures_them(
-    store: Store,
+    store: EntryStore,
     git_repo: Path,
     make_git_repo: Callable[[str], Path],
     git_cmd: Callable[..., str],
@@ -428,8 +428,8 @@ def test_a_submodule_with_uncommitted_changes_is_named_and_passing_it_captures_t
     submodule = _add_submodule(git_repo, make_git_repo, git_cmd, "vendor/lib")
     (submodule / "tracked.txt").write_text("patched\n")
 
-    alone = _run(store, title="t", entry_type="note", repos=[str(git_repo)])
-    together = _run(store, title="t", entry_type="note", repos=[str(git_repo), str(submodule)])
+    alone = _run(store, title="t", repos=[str(git_repo)])
+    together = _run(store, title="t", repos=[str(git_repo), str(submodule)])
 
     top = str(git_repo.resolve())
     assert (
@@ -437,13 +437,13 @@ def test_a_submodule_with_uncommitted_changes_is_named_and_passing_it_captures_t
         "capture records only its commit; pass it in repos to capture the changes"
     ) in alone.warnings
     assert not any(w.startswith("not captured") for w in together.warnings)
-    shas = {Path(c.repo_path): c.captured_sha for c in store.get_record(together.record_id).code}
+    shas = {Path(c.repo_path): c.captured_sha for c in store.get_entry(together.id).current.code}
     assert _show(store, shas[submodule.resolve()], "tracked.txt") == "patched"
 
 
 @pytest.mark.parametrize("committed", [True, False])
 def test_ls_tree_runs_once_in_the_repository_and_once_in_the_store(
-    store: Store,
+    store: EntryStore,
     tmp_path: Path,
     git_cmd: Callable[..., str],
     monkeypatch: pytest.MonkeyPatch,
@@ -469,18 +469,18 @@ def test_ls_tree_runs_once_in_the_repository_and_once_in_the_store(
         return real_run(command, *args, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", counting)
-    _run(store, title="t", entry_type="note", repos=[str(repo)])
+    _run(store, title="t", repos=[str(repo)])
 
     in_store = [c for c in listings if any(a.startswith("--git-dir=") for a in c)]
     assert (len(in_store), len(listings) - len(in_store)) == (1, 1 if committed else 0)
 
 
 def test_git_add_runs_with_lc_all_c(
-    store: Store, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+    store: EntryStore, git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """labbook-79y.9 item 11f. Catches the add run in the caller's locale, where git prints a
     translated refusal for a nested repository with no commit, the regex does not match, and
-    the whole publish fails."""
+    the whole write fails."""
     monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")
     real_run = subprocess.run
     locales: list[str | None] = []
@@ -491,12 +491,12 @@ def test_git_add_runs_with_lc_all_c(
         return real_run(command, *args, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", recording)
-    _run(store, title="t", entry_type="note", repos=[str(git_repo)])
+    _run(store, title="t", repos=[str(git_repo)])
 
     assert locales == ["C"]
 
 
-def test_a_blob_missing_from_the_store_raises_trails_error(store: Store) -> None:
+def test_a_blob_missing_from_the_store_raises_trails_error(store: EntryStore) -> None:
     """labbook-79y.6 item 16. Catches the secret scan skipping a file it could not read,
     which would report a capture as scanned when part of it was not."""
     captures = capture.open_store(store.db_path)
@@ -505,141 +505,104 @@ def test_a_blob_missing_from_the_store_raises_trails_error(store: Store) -> None
         capture.scan_capture(captures, {"new.txt": "0" * 40})
 
 
-def test_a_capture_waits_for_the_store_lock(store: Store, git_repo: Path) -> None:
+def test_a_capture_waits_for_the_store_lock(store: EntryStore, git_repo: Path) -> None:
     """labbook-79y.6 item 14. Catches the lock removed from capture: the concurrent capture
     test usually passes without it."""
     (git_repo / "new.txt").write_text("n\n")
     order: list[str] = []
     with gitprobe.git_lock(capture.open_store(store.db_path)):
-        publisher = threading.Thread(
-            target=lambda: order.append(
-                _run(store, title="t", entry_type="note", repos=[str(git_repo)]).record_id
-            )
+        writeer = threading.Thread(
+            target=lambda: order.append(_run(store, title="t", repos=[str(git_repo)]).id)
         )
-        publisher.start()
-        publisher.join(3)
+        writeer.start()
+        writeer.join(3)
         order.append("released")
-    publisher.join(60)
+    writeer.join(60)
 
     assert order[0] == "released"
     assert len(order) == 2
 
 
-def test_an_unknown_user_home_in_from_file_is_a_validation_error(store: Store) -> None:
-    """labbook-79y.6 item 3. Catches expanduser's RuntimeError, which no surface translates."""
-    with pytest.raises(ValidationError, match="cannot read ~nosuchuser79y6/x"):
-        _run(store, from_file="~nosuchuser79y6/x")
-
-
 # ----------------------------------------------------- validation before capture
 
 
-def test_malformed_record_fields_are_refused_before_repository_capture(
-    store: Store, git_repo: Path
+def test_malformed_fields_are_refused_before_repository_capture(
+    store: EntryStore, git_repo: Path
 ) -> None:
-    """Catches a refused publish leaving an unreported capture ref or capture store."""
-    with pytest.raises(ValidationError, match="entry type, not a descriptive tag"):
+    """Catches a refused write leaving an unreported capture ref or capture store."""
+    with pytest.raises(ValidationError, match="priority is a goal and task field"):
+        _run(store, kind="claim", title="bad priority", priority=1, repos=[str(git_repo)])
+    with pytest.raises(ValidationError, match="no entry has id"):
         _run(
             store,
-            entry_type="result",
-            work_status="closed",
-            title="bad type tag",
-            tags=["result"],
-            repos=[str(git_repo)],
-        )
-    with pytest.raises(ValidationError, match="no existing record has id"):
-        _run(
-            store,
-            entry_type="result",
-            work_status="closed",
-            title="bad link",
-            links=[Link(relation="cites", target_id="hyp-ffffffffffffffff")],
+            kind="task",
+            title="bad dependency",
+            waits_on=["tsk-zzzzz"],
             repos=[str(git_repo)],
         )
 
-    assert store.query("SELECT COUNT(*) AS n FROM record") == [{"n": 0}]
+    assert store.query("SELECT COUNT(*) AS n FROM entry") == [{"n": 0}]
     assert not _store(store).exists()
 
 
-def test_a_losing_supersession_race_discards_its_unpublished_capture_refs(
-    store: Store,
+def test_a_losing_version_race_discards_its_unwritten_capture_refs(
+    store: EntryStore,
     git_repo: Path,
     git_cmd: Callable[..., str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Catches the final serialized guard leaving a capture ref for a record it refused."""
-    old = _run(store, title="old").record_id
+    """Catches the final serialized base_version check leaving a capture ref for a version it
+    refused."""
+    old = _run(store, title="old").id
     original_capture = capture.capture_repo
-    winner: list[str] = []
+    winner: list[int] = []
 
     def capture_then_compete(*args: Any, **kwargs: Any) -> Any:
         outcome = original_capture(*args, **kwargs)
         winner.append(
-            store.write_record(
-                RecordDraft(
-                    entry_type="note",
-                    work_status="closed",
-                    title="winner",
-                    supersedes=old,
-                    reason="won the race",
-                )
-            ).record.id
+            store.write_entry(
+                EntryDraft(id=old, base_version=1, reason="won the race", body="winner")
+            ).entry.current.version
         )
         return outcome
 
     monkeypatch.setattr(capture, "capture_repo", capture_then_compete)
 
     with pytest.raises(ValidationError) as refused:
-        _run(
-            store,
-            title="loser",
-            supersedes=old,
-            reason="lost the race",
-            repos=[str(git_repo)],
-        )
+        _run(store, id=old, base_version=1, reason="lost the race", repos=[str(git_repo)])
 
     refs = git_cmd(_store(store), "for-each-ref", "--format=%(refname)", "refs/research/")
-    assert len(winner) == 1
-    assert str(refused.value) == (
-        f"{old} is already superseded; current version is {winner[0]}; "
-        f"supersede {winner[0]} instead"
-    )
+    assert winner == [2]
+    assert "base_version=1 is stale" in str(refused.value)
     assert refs == ""
-    assert {row["title"] for row in store.query("SELECT id, title FROM record ORDER BY id")} == {
-        "old",
-        "winner",
-    }
+    assert [v.body for v in store.get_versions(old)] == ["", "winner"]
 
 
-def test_a_post_land_exception_keeps_the_durable_record_capture_ref(
-    store: Store,
+def test_a_post_land_exception_keeps_the_durable_capture_ref(
+    store: EntryStore,
     git_repo: Path,
     git_cmd: Callable[..., str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Catches rollback deleting a capture pin after the corresponding record became durable."""
-    original_write = Store.write_record
+    """Catches rollback deleting a capture pin after the corresponding entry became durable."""
+    original_write = EntryStore.write_entry
     landed: list[str] = []
 
-    def write_then_raise(bound_store: Store, draft: RecordDraft) -> Any:
-        outcome = original_write(bound_store, draft)
-        landed.append(outcome.record.id)
+    def write_then_raise(bound_store: EntryStore, draft: EntryDraft, new_id: Any = None) -> Any:
+        outcome = original_write(bound_store, draft, new_id)
+        landed.append(outcome.entry.id)
         raise ValidationError("injected after durable write")
 
-    monkeypatch.setattr(Store, "write_record", write_then_raise)
+    monkeypatch.setattr(EntryStore, "write_entry", write_then_raise)
 
     with pytest.raises(ValidationError, match="injected after durable write"):
         _run(store, title="durable", repos=[str(git_repo)])
 
     assert len(landed) == 1
-    assert store.get_record(landed[0]).title == "durable"
+    assert store.get_entry(landed[0]).current.title == "durable"
     assert (
-        git_cmd(
-            _store(store),
-            "rev-parse",
-            f"refs/research/{landed[0]}/0",
-        )
-        == store.get_record(landed[0]).code[0].captured_sha
+        git_cmd(_store(store), "rev-parse", f"refs/research/{landed[0]}/v1/0")
+        == store.get_entry(landed[0]).current.code[0].captured_sha
     )
 
 
@@ -653,36 +616,36 @@ def _big(repo: Path, name: str, size: int = 64) -> Path:
     return path
 
 
-def test_a_file_over_the_cap_refuses_the_publish_and_writes_nothing(
-    store: Store, git_repo: Path, git_cmd: Callable[..., str], monkeypatch: pytest.MonkeyPatch
+def test_a_file_over_the_cap_refuses_the_write_and_writes_nothing(
+    store: EntryStore, git_repo: Path, git_cmd: Callable[..., str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """labbook-79y.10 criterion 2. Catches a large file captured silently, a refusal that
     writes a record, a ref or the store first, and a refusal missing either call."""
     monkeypatch.setenv("TRAILS_MAX_CAPTURE_BYTES", "32")
     _big(git_repo, "data/raw.bin", 2048)
     _big(git_repo, "small.bin", 16)
-    records = store.query("SELECT COUNT(*) AS n FROM record")
+    records = store.query("SELECT COUNT(*) AS n FROM entry")
 
     with pytest.raises(ValidationError) as refused:
-        _run(store, title="t", entry_type="note", repos=[str(git_repo)], exclude=["other"])
+        _run(store, title="t", repos=[str(git_repo)], exclude=["other"])
 
     top = git_repo.resolve()
     assert str(refused.value) == (
-        f"not published: 1 file(s) over 32 B would be captured from {top}:\n"
+        f"not written: 1 file(s) over 32 B would be captured from {top}:\n"
         "  data/raw.bin  2.0 KiB\n"
         "If it is data, leave it out and reference it:\n"
-        '  publish(<the same arguments>, exclude=["other", "data/raw.bin"], artifacts=['
+        '  write(<the same arguments>, exclude=["other", "data/raw.bin"], artifacts=['
         f'{{"location": "{top}/data/raw.bin", "notes": "<what identifies this data>"}}])\n'
         "If it belongs in the capture:\n"
-        '  publish(<the same arguments>, allow_large=["data/raw.bin"])'
+        '  write(<the same arguments>, allow_large=["data/raw.bin"])'
     )
-    assert store.query("SELECT COUNT(*) AS n FROM record") == records
+    assert store.query("SELECT COUNT(*) AS n FROM entry") == records
     assert not _store(store).exists()
     assert git_cmd(git_repo, "for-each-ref", "refs/research/") == ""
 
 
-def test_exclude_and_allow_large_each_let_the_publish_through(
-    store: Store, git_repo: Path, git_cmd: Callable[..., str], monkeypatch: pytest.MonkeyPatch
+def test_exclude_and_allow_large_each_let_the_write_through(
+    store: EntryStore, git_repo: Path, git_cmd: Callable[..., str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """labbook-79y.10 criterion 2. Catches either suggested call refused again, an excluded
     file captured anyway, an allowed file left out, and a tracked excluded file kept in the
@@ -696,27 +659,27 @@ def test_exclude_and_allow_large_each_let_the_publish_through(
     excluded = _run(
         store,
         title="t",
-        entry_type="note",
+        kind="note",
         repos=[str(git_repo)],
         exclude=["data", "committed.bin"],
     )
     allowed = _run(
         store,
         title="t",
-        entry_type="note",
+        kind="note",
         repos=[str(git_repo)],
         allow_large=["data/raw.bin", "committed.bin"],
     )
 
-    [left_out] = store.get_record(excluded.record_id).code
-    [kept] = store.get_record(allowed.record_id).code
+    [left_out] = store.get_entry(excluded.id).current.code
+    [kept] = store.get_entry(allowed.id).current.code
     assert _files(store, left_out.captured_sha) == ["tracked.txt"]
     assert _files(store, kept.captured_sha) == ["committed.bin", "data/raw.bin", "tracked.txt"]
 
 
 @pytest.mark.parametrize("how", ["deleted", "git rm", "renamed"])
 def test_a_large_committed_file_that_will_not_be_captured_is_not_refused(
-    store: Store,
+    store: EntryStore,
     git_repo: Path,
     git_cmd: Callable[..., str],
     monkeypatch: pytest.MonkeyPatch,
@@ -724,7 +687,7 @@ def test_a_large_committed_file_that_will_not_be_captured_is_not_refused(
 ) -> None:
     """labbook-79y.10 review round 1. Catches a committed file deleted from the working tree,
     staged for removal, or renamed away measured at its committed size, which refuses a
-    publish for a file the capture does not contain."""
+    write for a file the capture does not contain."""
     monkeypatch.setenv("TRAILS_MAX_CAPTURE_BYTES", "32")
     _big(git_repo, "big.dat")
     git_cmd(git_repo, "add", "big.dat")
@@ -738,22 +701,22 @@ def test_a_large_committed_file_that_will_not_be_captured_is_not_refused(
 
     if how == "renamed":
         with pytest.raises(ValidationError) as refused:
-            _run(store, title="t", entry_type="note", repos=[str(git_repo)])
+            _run(store, title="t", repos=[str(git_repo)])
         assert "  moved.dat  64 B" in str(refused.value)
         assert "big.dat" not in str(refused.value)
     else:
-        result = _run(store, title="t", entry_type="note", repos=[str(git_repo)])
-        [code] = store.get_record(result.record_id).code
+        result = _run(store, title="t", repos=[str(git_repo)])
+        [code] = store.get_entry(result.id).current.code
         assert _files(store, code.captured_sha) == ["tracked.txt"]
 
 
 def test_a_committed_file_a_filter_shrinks_is_measured_on_disk(
-    store: Store, git_repo: Path, git_cmd: Callable[..., str], monkeypatch: pytest.MonkeyPatch
+    store: EntryStore, git_repo: Path, git_cmd: Callable[..., str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """labbook-79y.10 review round 2. Catches the size check measuring an LFS-style file by
     the pointer HEAD holds while the capture, run with filters off, packs its full bytes:
     a multi-GB model would enter the store with no refusal. Also catches the allowed file
-    refused again on the next publish once the store holds its content."""
+    refused again on the next write once the store holds its content."""
     git_cmd(git_repo, "config", "filter.pointer.clean", "sh -c 'cat >/dev/null; echo pointer'")
     (git_repo / ".gitattributes").write_text("*.bin filter=pointer\n")
     _big(git_repo, "model.bin")
@@ -763,19 +726,17 @@ def test_a_committed_file_a_filter_shrinks_is_measured_on_disk(
     monkeypatch.setenv("TRAILS_MAX_CAPTURE_BYTES", "32")
 
     with pytest.raises(ValidationError, match=r"  model\.bin  64 B"):
-        _run(store, title="t", entry_type="note", repos=[str(git_repo)])
-    allowed = _run(
-        store, title="t", entry_type="note", repos=[str(git_repo)], allow_large=["model.bin"]
-    )
-    again = _run(store, title="t", entry_type="note", repos=[str(git_repo)])
+        _run(store, title="t", repos=[str(git_repo)])
+    allowed = _run(store, title="t", repos=[str(git_repo)], allow_large=["model.bin"])
+    again = _run(store, title="t", repos=[str(git_repo)])
 
-    [code] = store.get_record(allowed.record_id).code
+    [code] = store.get_entry(allowed.id).current.code
     assert _show(store, code.captured_sha, "model.bin") == "x" * 64
-    assert store.get_record(again.record_id).code
+    assert store.get_entry(again.id).current.code
 
 
 def test_a_large_committed_blob_already_in_the_store_is_not_refused_twice(
-    store: Store, git_repo: Path, git_cmd: Callable[..., str], monkeypatch: pytest.MonkeyPatch
+    store: EntryStore, git_repo: Path, git_cmd: Callable[..., str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """labbook-79y.10 section 2. Catches every later capture of the repository refused for a
     file the user already allowed once, which the store already holds."""
@@ -783,15 +744,15 @@ def test_a_large_committed_blob_already_in_the_store_is_not_refused_twice(
     _big(git_repo, "model.bin")
     git_cmd(git_repo, "add", "model.bin")
     git_cmd(git_repo, "commit", "-qm", "model")
-    _run(store, title="t", entry_type="note", repos=[str(git_repo)], allow_large=["model.bin"])
+    _run(store, title="t", repos=[str(git_repo)], allow_large=["model.bin"])
 
-    again = _run(store, title="t", entry_type="note", repos=[str(git_repo)])
+    again = _run(store, title="t", repos=[str(git_repo)])
 
-    assert store.get_record(again.record_id).code
+    assert store.get_entry(again.id).current.code
 
 
-def test_the_publish_result_reports_the_capture_and_the_commands_to_keep_paths_out(
-    store: Store, git_repo: Path
+def test_the_write_result_reports_the_capture_and_the_commands_to_keep_paths_out(
+    store: EntryStore, git_repo: Path
 ) -> None:
     """labbook-79y.10 section 3. Catches the capture report missing or miscounted, and the
     printf lines unquoted or pointed at the wrong file. trails runs neither command."""
@@ -801,7 +762,7 @@ def test_the_publish_result_reports_the_capture_and_the_commands_to_keep_paths_o
     (git_repo / "my data" / "x").write_text("x\n")
     gitignore = git_repo / ".gitignore"
 
-    result = _run(store, title="t", entry_type="note", repos=[str(git_repo)], exclude=["my data"])
+    result = _run(store, title="t", repos=[str(git_repo)], exclude=["my data"])
 
     [item] = result.captures
     top = str(git_repo.resolve())
@@ -820,10 +781,10 @@ def test_the_publish_result_reports_the_capture_and_the_commands_to_keep_paths_o
     assert not gitignore.exists()
 
 
-def test_exclude_without_repos_is_refused(store: Store) -> None:
+def test_exclude_without_repos_is_refused(store: EntryStore) -> None:
     """Catches exclude accepted and silently doing nothing."""
     with pytest.raises(ValidationError, match="apply to repos"):
-        _run(store, title="t", entry_type="note", exclude=["data"])
+        _run(store, title="t", exclude=["data"])
 
 
 def test_human_size_units() -> None:

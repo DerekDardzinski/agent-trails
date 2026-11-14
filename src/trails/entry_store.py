@@ -47,10 +47,12 @@ from trails.models import (
     LinkEvent,
     LinkOutcome,
     MovedLink,
+    ProjectMembershipChange,
     ProjectRef,
     Provenance,
     RetireOutcome,
     SessionRow,
+    SetProjectsOutcome,
     SinceComment,
     TaskEvent,
     TaskOutcome,
@@ -522,6 +524,20 @@ class EntryStore(Store):
             f"{len(ID_LENGTHS) * ID_ATTEMPTS_PER_LENGTH} candidates"
         )
 
+    def check_entry_draft(self, draft: EntryDraft) -> None:
+        """Run every refusal `write_entry` would raise for this draft, without writing, so a
+        caller can refuse before doing expensive work such as code capture.
+
+        Raises:
+            ValidationError: as `write_entry`.
+            RecordNotFoundError: as `write_entry`.
+        """
+        with dolt.exclusive(self.db_path):
+            if draft.id is None:
+                self._create_locked(draft, None, check_only=True)
+            else:
+                self._version_locked(draft, check_only=True)
+
     def write_entry(self, draft: EntryDraft, new_id: str | None = None) -> EntryWriteOutcome:
         """Create an entry (version 1) or write its next version, in one transaction.
 
@@ -533,12 +549,18 @@ class EntryStore(Store):
         """
         with dolt.exclusive(self.db_path):
             if draft.id is None:
-                return self._create_locked(draft, new_id)
-            if new_id is not None:
-                raise ValidationError("new_id is for a new entry; a new version keeps its id")
-            return self._version_locked(draft)
+                created = self._create_locked(draft, new_id)
+            else:
+                if new_id is not None:
+                    raise ValidationError("new_id is for a new entry; a new version keeps its id")
+                created = self._version_locked(draft)
+            if created is None:  # pragma: no cover - only check_only returns None
+                raise DoltError("a write returned no outcome")
+            return created
 
-    def _create_locked(self, draft: EntryDraft, new_id: str | None) -> EntryWriteOutcome:
+    def _create_locked(
+        self, draft: EntryDraft, new_id: str | None, *, check_only: bool = False
+    ) -> EntryWriteOutcome | None:
         if draft.kind is None:
             raise ValidationError(
                 "a new entry needs kind: goal, task, note, claim, preference or skill"
@@ -574,6 +596,8 @@ class EntryStore(Store):
                 raise ValidationError(
                     f"id {new_id!r} is already used: an entry is never overwritten"
                 )
+        if check_only:
+            return None
         entry_id = new_id or self.new_entry_id(kind)
         provenance = sessions.current_provenance()
         author = current_author()
@@ -680,7 +704,9 @@ class EntryStore(Store):
             entry=entry, created=True, retry=False, warnings=warnings, secret_findings=findings
         )
 
-    def _version_locked(self, draft: EntryDraft) -> EntryWriteOutcome:
+    def _version_locked(
+        self, draft: EntryDraft, *, check_only: bool = False
+    ) -> EntryWriteOutcome | None:
         entry_id = str(draft.id)
         existing = self.get_entries([entry_id]).get(entry_id)
         if existing is None:
@@ -722,6 +748,8 @@ class EntryStore(Store):
             project_refs = sorted(
                 self.resolve_projects(draft.projects), key=lambda ref: (ref.name, ref.id)
             )
+        if check_only:
+            return None
         same_content = _content(merged) == _content(current)
         same_projects = project_refs is None or [ref.id for ref in project_refs] == [
             ref.id for ref in sorted(existing.projects, key=lambda ref: (ref.name, ref.id))
@@ -1534,6 +1562,75 @@ class EntryStore(Store):
             if stored and _as_datetime(stored[0]["created_at"]) == event.created_at:
                 return
             raise
+
+    # ------------------------------------------------------------------ projects
+
+    def set_entry_projects(
+        self, entry_id: str, add: Sequence[str], remove: Sequence[str], reason: str
+    ) -> SetProjectsOutcome:
+        """Append effective membership changes in one transaction; return current state."""
+        if not add and not remove:
+            raise ValidationError("set_projects needs at least one project to add or remove")
+        normal_reason = reason.strip()
+        if not normal_reason:
+            raise ValidationError("changing project membership needs a reason")
+        _require_text_bytes("project membership reason", normal_reason)
+        with dolt.exclusive(self.db_path):
+            resolved = self.resolve_project_values([*add, *remove])
+            add_refs = list({ref.id: ref for ref in resolved[: len(add)]}.values())
+            remove_refs = list({ref.id: ref for ref in resolved[len(add) :]}.values())
+            overlap = sorted({ref.id for ref in add_refs} & {ref.id for ref in remove_refs})
+            if overlap:
+                names = ", ".join(ref.name for ref in add_refs if ref.id in overlap)
+                raise ValidationError(f"{names} is present in both add and remove")
+            entry = self.get_entry(entry_id)
+            current = {ref.id: ref for ref in entry.projects}
+            effective_add = [ref for ref in add_refs if ref.id not in current]
+            effective_remove = [ref for ref in remove_refs if ref.id in current]
+            provenance = sessions.current_provenance()
+            author = current_author()
+            moment = _now()
+            wanted = [
+                *(pid for pid in current if pid not in {ref.id for ref in effective_remove}),
+                *(ref.id for ref in effective_add),
+            ]
+            statements = self._membership_changes(
+                entry_id,
+                wanted=wanted,
+                reason=normal_reason,
+                author=author,
+                provenance=provenance,
+                created_at=moment,
+            )
+            if statements:
+                self._execute_script(
+                    [
+                        "START TRANSACTION",
+                        *statements,
+                        *_session_insert(provenance, moment),
+                        f"CALL DOLT_COMMIT('-A','-m',{dolt.sql_literal(f'projects {entry_id}')})",
+                    ]
+                )
+            known = {**current, **{ref.id: ref for ref in add_refs}}
+            resulting = sorted((known[pid] for pid in wanted), key=lambda ref: (ref.name, ref.id))
+            changes = [
+                ProjectMembershipChange(
+                    project=ref,
+                    action=action,
+                    reason=normal_reason,
+                    author=author,
+                    created_at=moment,
+                )
+                for action, group in (("add", effective_add), ("remove", effective_remove))
+                for ref in group
+            ]
+            return SetProjectsOutcome(
+                record_id=entry_id,
+                changed=changes,
+                unchanged_add=[ref for ref in add_refs if ref.id in current],
+                unchanged_remove=[ref for ref in remove_refs if ref.id not in current],
+                projects=resulting,
+            )
 
     # ------------------------------------------------------------------ comments
 

@@ -7,193 +7,251 @@ from typing import Annotated
 
 from pydantic import Field
 
-from trails import retrieval
-from trails.errors import StoreUnavailableError, UsageError
-from trails.models import ProjectRef, Record
+from trails.entry_search import membership_condition
+from trails.entry_store import EntryStore
+from trails.errors import StoreUnavailableError
+from trails.models import Entry
 from trails.ops import context
-from trails.ops._marks import Operation
-from trails.ops._read_types import (
-    PathStatus,
-    PrimeContradicted,
-    PrimeRecordRef,
+from trails.ops._entry_types import (
+    PrimeGoal,
+    PrimePreference,
+    PrimeProjectRow,
     PrimeResult,
-    PrimeTypeCount,
-    ProjectIndexEntry,
+    ShownProject,
 )
-from trails.reachability import path_state
-from trails.vocab import ENTRY_TYPES
+from trails.ops._marks import Operation
+from trails.present import (
+    PREFERENCE_CAP,
+    PREFERENCE_CAP_WARNING,
+    node_state,
+    preference_full_lines,
+    preference_title_line,
+)
+from trails.vocab import KINDS, WORK_KINDS
+
+PROJECT_PAGE = 100
 
 OPERATION = Operation(toolset="agent", read_only=True, destructive=False, idempotent=True)
+
+_NO_MEMBERSHIP = (
+    "NOT EXISTS (SELECT 1 FROM entry_project_event m WHERE m.entry_id = e.id AND m.action = "
+    "'add' AND NOT EXISTS (SELECT 1 FROM entry_project_event later WHERE later.entry_id = "
+    "m.entry_id AND later.project_id = m.project_id AND later.sequence > m.sequence))"
+)
+_NOT_RETIRED = "NOT EXISTS (SELECT 1 FROM retirement r WHERE r.entry_id = e.id)"
 
 
 async def prime(
     project: Annotated[
         str | None,
-        Field(
-            description=(
-                "Stable project id or exact unique name. Omit for the small whole-store project index."
-            )
-        ),
+        Field(description="A project id or exact name; omit for the index of every project."),
     ] = None,
-    limit: Annotated[
-        int,
-        Field(
-            description="Maximum projects in a whole-store index page; ignored for scoped prime."
-        ),
-    ] = 100,
-    offset: Annotated[
-        int,
-        Field(description="Projects to skip in the whole-store index; ignored for scoped prime."),
-    ] = 0,
 ) -> PrimeResult:
-    """Orient to the whole store, or to one project's framing, open work and corrections.
+    """Start or resume a session: the person's preferences in full, then where work stands.
 
-    Use this when: beginning a session, choosing among registered projects, or resuming work in
-    one known project.
+    Use this when: a session starts, after a handoff or compaction, or when you switch projects.
 
-    Use instead: search, to discover records or projects by meaning; show, to read exact record
-    or project history; lineage, to inspect what a record replaced or built on.
+    Use instead: ready, for the next task; search, to find entries; show, to read one.
 
-    Returns: without project, up to 100 project ids, names, framing titles, current/open counts,
-    last activity, the total project count, paging call, and current unscoped count. With
-    project, a page whose size does not grow with history: current identity, paths and full
-    framing; one title line per open problem statement with the show call that reads them;
-    every current record that a current record contradicts, with those corrections; and per
-    entry type the open and closed counts with the search calls that list each, plus disjoint
-    current, replaced and retired counts. No other record is listed: search finds the rest.
+    Returns: preferences in full (the project's first, then global, newest first) under a 10,000-character cap, with conflicts between them; without a project, the project index and the count of unscoped entries; with one, its framing and paths, open goals with their state, the count of ready tasks and of entries with open comments with the calls that list them, contradicted claims, and counts per kind and state. A store that cannot be opened is reported, not raised.
     """
-    if limit < 1:
-        raise UsageError(f"limit must be at least 1, not {limit}")
-    if offset < 0:
-        raise UsageError(f"offset must be 0 or more, not {offset}")
     try:
         store = context.store()
-        if project is None:
-            indexed, unscoped = retrieval.project_index(store)
-            page = indexed[offset : offset + limit]
-            return PrimeResult(
-                project=None,
-                projects=[
-                    ProjectIndexEntry(
-                        project=ProjectRef(id=item.project_id, name=item.name),
-                        framing_title=item.framing_title,
-                        record_count=item.record_count,
-                        open_count=item.open_count,
-                        last_activity=item.last_activity,
-                    )
-                    for item in page
-                ],
-                project_total=len(indexed),
-                offset=offset,
-                limit=limit,
-                unscoped_count=unscoped,
-                paths=[],
-                framing=None,
-                current_count=0,
-                replaced_count=0,
-                retired_count=0,
-                problem_statements=[],
-                problem_statement_contradicted_by={},
-                contradicted=[],
-                counts=[],
-                store_error=None,
-            )
-
-        registered = store.get_project(project)
-        if registered is None:
-            store.resolve_project(project)  # raises the stable public refusal
-            raise AssertionError("unreachable")
-        seen = retrieval.overview(store, registered.id)
-        records = store.get_records(seen.current)
-        incoming = retrieval.incoming_links_many(store, seen.current)
-        contradicting_ids = [
-            source
-            for links in incoming.values()
-            for relation, source in links
-            if relation == "contradicts"
-        ]
-        sources = store.get_records(contradicting_ids)
+        ref = store.resolve_project(project) if project is not None else None
     except StoreUnavailableError as exc:
         return _unavailable(str(exc))
-
-    def corrections(record_id: str) -> list[PrimeRecordRef]:
-        found = {
-            source: _ref(sources[source])
-            for relation, source in incoming.get(record_id, [])
-            if relation == "contradicts"
-            and source in sources
-            and not sources[source].retired
-            and sources[source].superseded_by is None
-        }
-        return list(found.values())
-
-    tallies: dict[str, list[int]] = {}
-    problem_statements: list[PrimeRecordRef] = []
-    problem_contradicted: dict[str, list[PrimeRecordRef]] = {}
-    contradicted: list[PrimeContradicted] = []
-    for record_id in seen.current:
-        record = records.get(record_id)
-        if record is None:
-            continue
-        tally = tallies.setdefault(record.entry_type, [0, 0])
-        tally[0 if record.work_status == "open" else 1] += 1
-        against = corrections(record_id)
-        if record.entry_type == "problem-statement" and record.work_status == "open":
-            problem_statements.append(_ref(record))
-            if against:
-                problem_contradicted[record_id] = against
-        elif against:
-            contradicted.append(PrimeContradicted(record=_ref(record), contradicted_by=against))
-
+    preferences, cap_hit, conflicts = _preferences(store, ref.id if ref else None)
+    graph = store.task_graph()
+    if ref is None:
+        listed = store.list_projects()
+        rows = [
+            PrimeProjectRow(
+                id=item.id,
+                name=item.name,
+                framing_title=item.current_framing.title if item.current_framing else None,
+                open_goals=sum(
+                    1
+                    for node in graph.nodes.values()
+                    if node.kind == "goal"
+                    and node.state != "closed"
+                    and not node.retired
+                    and item.id in node.projects
+                ),
+            )
+            for item in listed[:PROJECT_PAGE]
+        ]
+        unscoped = store.query(
+            f"SELECT COUNT(*) AS n FROM entry e WHERE {_NOT_RETIRED} AND {_NO_MEMBERSHIP}"
+        )
+        return PrimeResult(
+            project=None,
+            projects=rows,
+            project_total=len(listed),
+            unscoped=int(unscoped[0]["n"]),
+            preferences=preferences,
+            preference_cap_hit=cap_hit,
+            preference_conflicts=conflicts,
+            goals=[],
+            ready=0,
+            open_comments=0,
+            contradicted=[],
+            counts={},
+            unavailable=None,
+        )
+    found = store.get_project(ref.id)
+    framing = found.current_framing if found else None
+    shown = ShownProject(
+        id=ref.id,
+        name=ref.name,
+        paths=found.paths if found else [],
+        framing_title=framing.title if framing else None,
+        framing_body=framing.body if framing else None,
+        framing_version=framing.version if framing else None,
+    )
+    member = membership_condition([ref.id])
+    kind_rows, open_rows, contradicted_rows = (
+        store.query(
+            f"SELECT e.id, e.kind FROM entry e WHERE {_NOT_RETIRED} AND {member} ORDER BY e.id"
+        ),
+        store.query(
+            f"SELECT COUNT(*) AS n FROM entry e WHERE {_NOT_RETIRED} AND {member} AND EXISTS "
+            "(SELECT 1 FROM comment c WHERE c.entry_id = e.id AND NOT EXISTS (SELECT 1 FROM "
+            "comment_addresses a WHERE a.addressed_id = c.id) AND NOT EXISTS (SELECT 1 FROM "
+            "comment_addresses r WHERE r.comment_id = c.id))"
+        ),
+        store.query(
+            f"SELECT DISTINCT e.id FROM entry e WHERE e.kind = 'claim' AND {_NOT_RETIRED} AND "
+            f"{member} AND EXISTS (SELECT 1 FROM link_event l WHERE l.target_id = e.id AND "
+            "l.relation = 'contradicts')"
+        ),
+    )
+    counts: dict[str, dict[str, int]] = {}
+    for row in kind_rows:
+        kind = str(row["kind"])
+        entry_id = str(row["id"])
+        if kind in WORK_KINDS and entry_id in graph.nodes:
+            state = graph.nodes[entry_id].state or "open"
+        else:
+            state = "current"
+        counts.setdefault(kind, {}).setdefault(state, 0)
+        counts[kind][state] += 1
+    ordered: dict[str, dict[str, int]] = {k: counts[k] for k in KINDS if k in counts}
+    claim_ids = [str(row["id"]) for row in contradicted_rows]
+    incoming = store.incoming_links(claim_ids, ["contradicts"])
+    claims = store.get_entries(claim_ids)
+    contradicted = [
+        f"{entry_id}  {claims[entry_id].current.title}  (contradicted by "
+        + ", ".join(link.source_id for link in incoming[entry_id])
+        + ")"
+        for entry_id in claim_ids
+        if entry_id in claims and incoming.get(entry_id)
+    ]
+    goals = [
+        PrimeGoal(id=node.id, title=node.title, state=node_state(graph, node.id))
+        for node in sorted(graph.nodes.values(), key=lambda item: (item.created_at, item.id))
+        if node.kind == "goal"
+        and node.state != "closed"
+        and not node.retired
+        and ref.id in node.projects
+    ]
     return PrimeResult(
-        project=ProjectRef(id=registered.id, name=registered.name),
+        project=shown,
         projects=[],
         project_total=0,
-        offset=0,
-        limit=limit,
-        unscoped_count=0,
-        paths=[PathStatus(path=item, state=path_state(item)) for item in registered.paths],
-        framing=registered.current_framing,
-        current_count=seen.current_count,
-        replaced_count=seen.replaced_count,
-        retired_count=seen.retired_count,
-        problem_statements=problem_statements,
-        problem_statement_contradicted_by=problem_contradicted,
+        unscoped=0,
+        preferences=preferences,
+        preference_cap_hit=cap_hit,
+        preference_conflicts=conflicts,
+        goals=goals,
+        ready=len(graph.ready(ref.id)),
+        open_comments=int(open_rows[0]["n"]),
         contradicted=contradicted,
-        counts=[
-            PrimeTypeCount(entry_type=kind, open=tallies[kind][0], closed=tallies[kind][1])
-            for kind in ENTRY_TYPES
-            if kind in tallies
-        ],
-        store_error=None,
+        counts=ordered,
+        unavailable=None,
     )
 
 
-def _ref(record: Record) -> PrimeRecordRef:
-    return PrimeRecordRef(
-        id=record.id,
-        entry_type=record.entry_type,
-        title=record.title,
-        work_status=record.work_status,
+def _preferences(
+    store: EntryStore, project_id: str | None
+) -> tuple[list[PrimePreference], bool, list[str]]:
+    """Project preferences first, then global ones, each newest version first, in full until
+    the next would push the section past the cap; the rest as title lines (D17, D24)."""
+    rows = store.query(
+        f"SELECT e.id FROM entry e WHERE e.kind = 'preference' AND {_NOT_RETIRED} AND "
+        f"{_NO_MEMBERSHIP}"
     )
+    global_ids = [str(row["id"]) for row in rows]
+    project_ids: list[str] = []
+    if project_id is not None:
+        project_rows = store.query(
+            f"SELECT e.id FROM entry e WHERE e.kind = 'preference' AND {_NOT_RETIRED} AND "
+            f"{membership_condition([project_id])}"
+        )
+        project_ids = [str(row["id"]) for row in project_rows]
+    found = store.get_entries([*project_ids, *global_ids])
+
+    def newest(ids: list[str]) -> list[Entry]:
+        return sorted(
+            (found[item] for item in ids if item in found),
+            key=lambda entry: (entry.current.created_at, entry.id),
+            reverse=True,
+        )
+
+    ordered = [(entry, "project") for entry in newest(project_ids)] + [
+        (entry, "global") for entry in newest(global_ids)
+    ]
+    incoming = store.incoming_links([entry.id for entry, _ in ordered], ["contradicts"])
+    current = {entry.id for entry, _ in ordered}
+    conflicts = [
+        f"{link.source_id} contradicts {entry.id}"
+        for entry, _scope in ordered
+        for link in incoming.get(entry.id, [])
+        if link.source_id in current
+    ]
+
+    def size(lines: list[str]) -> int:
+        return len("\n".join(lines))
+
+    titles = [preference_title_line(e.id, scope, e.current.title) for e, scope in ordered]
+    conflict_lines = [f"conflict: {item}" for item in conflicts]
+    full_count = 0
+    for count in range(len(ordered), -1, -1):
+        lines = ["preferences:"]
+        for entry, scope in ordered[:count]:
+            lines += preference_full_lines(entry.id, scope, entry.current.title, entry.current.body)
+        lines += titles[count:]
+        if count < len(ordered):
+            lines.append(PREFERENCE_CAP_WARNING)
+        lines += conflict_lines
+        if size(lines) <= PREFERENCE_CAP:
+            full_count = count
+            break
+    preferences = [
+        PrimePreference(
+            id=entry.id,
+            title=entry.current.title,
+            body=entry.current.body if position < full_count else "",
+            scope=scope,
+            full=position < full_count,
+        )
+        for position, (entry, scope) in enumerate(ordered)
+    ]
+    return preferences, full_count < len(ordered), conflicts
 
 
-def _unavailable(error: str) -> PrimeResult:
+def _unavailable(detail: str) -> PrimeResult:
     return PrimeResult(
         project=None,
         projects=[],
         project_total=0,
-        offset=0,
-        limit=100,
-        unscoped_count=0,
-        paths=[],
-        framing=None,
-        current_count=0,
-        replaced_count=0,
-        retired_count=0,
-        problem_statements=[],
-        problem_statement_contradicted_by={},
+        unscoped=0,
+        preferences=[],
+        preference_cap_hit=False,
+        preference_conflicts=[],
+        goals=[],
+        ready=0,
+        open_comments=0,
         contradicted=[],
-        counts=[],
-        store_error=error,
+        counts={},
+        unavailable=detail,
     )

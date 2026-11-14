@@ -40,7 +40,7 @@ async def update_project(  # noqa: PLR0917 — one atomic public update
         Field(
             description=(
                 "Complete new purpose and motivation. Unchanged title/body is a no-op. "
-                "Operational knowledge belongs in paths or ordinary records."
+                "Operational knowledge belongs in paths or ordinary entries."
             )
         ),
     ] = None,
@@ -64,7 +64,7 @@ async def update_project(  # noqa: PLR0917 — one atomic public update
     exclusions change.
 
     Use instead: register_project, to create stable identity; set_projects, to change which
-    projects contain a record; publish, to store operational knowledge or decisions.
+    projects contain an entry; write, to store operational knowledge as a claim or a note.
 
     Returns: whether anything changed, current paths, current framing and whether a new framing
     version was created, plus warnings. Unchanged input writes no Dolt commit.

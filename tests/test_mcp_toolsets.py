@@ -11,17 +11,19 @@ import asyncio
 import sys
 import types
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
 from fastmcp import Client
+from mcp.types import Implementation
 
 from trails import ops
+from trails.entry_store import EntryStore as Store
 from trails.mcp import server as server_entry
-from trails.models import RecordDraft
+from trails.models import EntryDraft
 from trails.ops._marks import Operation
 from trails.ops.types import RenderedResult
-from trails.store import Store
 from trails.surfaces import mcp as mcp_surface
 
 
@@ -166,34 +168,31 @@ def test_the_entry_point_passes_its_toolset_flag(
     assert seen == ["full", "stdio", None, "stdio"]
 
 
-def test_export_is_in_the_default_toolset(store: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Over the real registry. Silent failure: export missing from the toolset whose tool
-    descriptions tell agents to use it."""
-    monkeypatch.delenv(mcp_surface.TOOLSET_ENV, raising=False)
-
-    assert "export" in _tools(store)
-
-
-def test_the_default_toolset_is_exactly_the_twelve_agent_tools(
+def test_the_default_toolset_is_exactly_the_agent_tools(
     store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """labbook-79y.6 item 9, over the real registry. Silent failure: an operation's mark
-    changed so the toolset every agent gets by default grows or loses a tool."""
+    changed so the toolset every agent gets by default grows or loses a tool, or a removed
+    operation is still served."""
     monkeypatch.delenv(mcp_surface.TOOLSET_ENV, raising=False)
 
     assert sorted(_tools(store)) == [
-        "export",
-        "lineage",
+        "add_comment",
+        "claim",
+        "close",
         "link",
         "prime",
-        "publish",
+        "ready",
         "register_project",
+        "release",
+        "reopen",
         "retire",
         "search",
         "set_projects",
-        "set_work_status",
         "show",
+        "unlink",
         "update_project",
+        "write",
     ]
 
 
@@ -207,7 +206,8 @@ def test_the_full_toolset_has_register_project_and_no_removed_operations(
     tools = set(_tools(store, "full"))
 
     assert "register_project" in tools
-    assert not {"init_project", "purge", "render"} & tools
+    assert {"alias", "embed", "lint", "version"} <= tools
+    assert not {"publish", "export", "lineage", "mark_verified", "set_work_status"} & tools
 
 
 def test_an_unrecognised_toolset_argument_is_refused(store: Store) -> None:
@@ -218,117 +218,82 @@ def test_an_unrecognised_toolset_argument_is_refused(store: Store) -> None:
 
 
 def test_a_store_refusal_sets_the_mcp_error_flag_and_keeps_its_message(store: Store) -> None:
-    """Silent failure: a client that trusts MCP's error flag treating a refused lookup as a
+    """Silent failure: a client that trusts MCP's error flag treating a refused write as a
     successful tool call."""
     server = mcp_surface.build_mcp_server(store.db_path, "agent")
 
     async def go() -> Any:
         async with Client(server) as client:
             return await client.call_tool(
-                "show", {"item_id": "rec-0000000000000000"}, raise_on_error=False
+                "claim", {"id": "tsk-zzzzz", "base_version": 1}, raise_on_error=False
             )
 
     result = asyncio.run(go())
 
     assert result.is_error is True
-    assert result.structured_content == {
-        "error": "no record or project has id 'rec-0000000000000000'"
-    }
-    assert "no record or project has id" in result.content[0].text
+    assert result.structured_content == {"error": "no entry has id 'tsk-zzzzz'"}
 
 
 def test_show_array_is_exposed_through_mcp_with_partial_missing_ids(store: Store) -> None:
     """Catches the Python list form working while MCP rejects the array schema or turns a
     partial miss into an error result."""
-    record = store.write_record(
-        RecordDraft(work_status="closed", title="Found", body="body", entry_type="note")
-    ).record
-    missing = "rec-0000000000000000"
+    entry = store.write_entry(EntryDraft(kind="note", title="Found", body="body")).entry
+    missing = "note-zzzzz"
     server = mcp_surface.build_mcp_server(store.db_path, "agent")
 
     async def go() -> Any:
         async with Client(server) as client:
-            return await client.call_tool(
-                "show", {"item_id": [missing, record.id], "detail": "full"}
-            )
+            return await client.call_tool("show", {"id": [missing, entry.id]})
 
     result = asyncio.run(go())
 
     assert result.is_error is False
     assert result.structured_content["missing"] == [missing]
-    assert result.structured_content["records"][0]["record"]["id"] == record.id
-    assert result.content[0].text.startswith(
-        "state: 1 records and 0 projects found · 1 not found · detail full"
-    )
+    assert result.structured_content["entries"][0]["id"] == entry.id
+    assert "\n\nnot found: note-zzzzz\n\n" in result.content[0].text
 
 
-def test_publish_schema_exposes_entry_type_and_work_status_choices(store: Store) -> None:
+def test_write_schema_exposes_kind_and_stated_by_choices(store: Store) -> None:
     """Catches literal choices degrading to unconstrained strings in the agent tool schema."""
     server = mcp_surface.build_mcp_server(store.db_path)
 
     async def go() -> dict[str, Any]:
         async with Client(server) as client:
             tools = {tool.name: tool.inputSchema for tool in await client.list_tools()}
-            return tools["publish"]["properties"]
+            return tools["write"]["properties"]
 
     properties = asyncio.run(go())
-    assert properties["entry_type"]["anyOf"][0]["enum"] == [
-        "problem-statement",
-        "hypothesis",
-        "procedure",
-        "result",
-        "verification",
-        "fact",
-        "insight",
-        "decision",
-        "report",
+    assert properties["kind"]["anyOf"][0]["enum"] == [
+        "goal",
+        "task",
         "note",
+        "claim",
+        "preference",
+        "skill",
     ]
-    assert properties["work_status"]["anyOf"][0]["enum"] == ["open", "closed"]
+    assert properties["stated_by"]["anyOf"][0]["enum"] == ["agent", "person"]
 
 
-def test_search_schema_explains_work_status_history_behavior(store: Store) -> None:
-    """Catches an agent-facing schema that hides the current-only work-status exception or
-    fails to say which superseded and retired records include_history restores."""
-    server = mcp_surface.build_mcp_server(store.db_path)
-
-    async def go() -> dict[str, Any]:
-        async with Client(server) as client:
-            tools = {tool.name: tool.inputSchema for tool in await client.list_tools()}
-            return tools["search"]["properties"]
-
-    properties = asyncio.run(go())
-    assert properties["work_status"]["description"] == (
-        "Keep only records whose latest work status is open or closed. Unless include_history "
-        "is true, this filter searches current record versions only. Work status is separate "
-        "from whether a record is current, superseded or retired."
-    )
-    assert properties["include_history"]["description"] == (
-        "Also return retired records. When work_status is set, also restore superseded versions "
-        "that the default current-version work-status search excludes. Searches without "
-        "work_status continue to return superseded records and label them."
-    )
-
-
-def test_search_description_distinguishes_keyword_windows_from_semantic_chunks(
-    store: Store,
+def test_an_mcp_write_records_the_harness_its_client_names(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Catches the agent-facing tool description retaining the former universal 240-character
-    cap after semantic-only hits begin returning complete selected chunks."""
-    server = mcp_surface.build_mcp_server(store.db_path)
+    """Silent failure caught: the MCP client name never reaching session detection, so every
+    MCP write is attributed by the process tree alone, which for Claude Code launched from a
+    Kiro shell names the wrong harness and session (trails fac-ahxap)."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "claude-session-1")
+    monkeypatch.setenv("KIRO_SESSION_ID", "sess_inherited")
+    server = mcp_surface.build_mcp_server(store.db_path, "agent")
 
-    async def go() -> str:
-        async with Client(server) as client:
-            tools = {tool.name: tool.description for tool in await client.list_tools()}
-            return tools["search"] or ""
+    async def go() -> Any:
+        async with Client(
+            server, client_info=Implementation(name="claude-code", version="2.1.325")
+        ) as client:
+            return await client.call_tool("write", {"kind": "note", "title": "from claude"})
 
-    description = " ".join(asyncio.run(go()).split())
-    assert (
-        "A body-keyword match shows a window of at most 240 characters centered on the first match."
-    ) in description
-    assert (
-        "A semantic match with no body-keyword match shows the complete selected embedding chunk."
-    ) in description
+    result = asyncio.run(go())
+    written = store.get_entry(result.structured_content["id"]).current
+    assert (written.harness, written.session_id) == ("claude", "claude-session-1")
 
 
 def test_project_tools_separate_creation_from_mutation(store: Store) -> None:

@@ -32,7 +32,7 @@ the size check never saw. The commit the repository had checked out is recorded 
 After the commit is built, every object it reaches that the store does not hold on its own is
 packed into the store, so the capture reads with the source repository gone. The pin is
 `refs/research/<record_id>/<n>` in the store, n being the repository's position in the
-publish call's repos list.
+write call's repos list.
 
 `plan_capture` runs first, before the record id is minted: it lists every file the capture
 would take and finds the ones over the size cap. `capture_repo` then captures, scans and
@@ -119,7 +119,7 @@ def discard_unpublished_refs(store: Path, record_id: str) -> None:
     """Delete capture refs for one record ID that failed before its record was stored.
 
     Callers must establish that no durable record has `record_id`. Objects remain in the bare
-    store until ordinary Git garbage collection; only the pins created for the failed publish
+    store until ordinary Git garbage collection; only the pins created for the failed write
     are removed.
     """
     if not store.exists():
@@ -155,7 +155,7 @@ class CapturePlan:
     head: str | None  # the commit checked out, None when there is none
     config: tuple[str, ...]  # the `-c` arguments every git command in this repository carries
     head_blobs: dict[str, str]  # committed path -> blob oid, from one ls-tree of head
-    exclude: list[str]  # the publish call's exclude entries, relative to top
+    exclude: list[str]  # the write call's exclude entries, relative to top
     large: list[tuple[str, int]]  # (relpath, bytes) over the cap and not allowed, largest first
 
 
@@ -272,7 +272,7 @@ def plan_capture(
 def size_refusal(
     plans: Sequence[CapturePlan], exclude: Sequence[str], allow_large: Sequence[str]
 ) -> str | None:
-    """The text refusing a publish that would capture a file over the cap, or None.
+    """The text refusing a write that would capture a file over the cap, or None.
 
     Every element comes from the plans, `max_capture_bytes()` and the given lists; `<the same
     arguments>` and `<what identifies this data>` are fixed placeholders for the agent to fill.
@@ -286,8 +286,7 @@ def size_refusal(
     references: list[str] = []
     for plan in blocked:
         lines.append(
-            f"not published: {len(plan.large)} file(s) over {cap} would be captured from "
-            f"{plan.top}:"
+            f"not written: {len(plan.large)} file(s) over {cap} would be captured from {plan.top}:"
         )
         for path, size in plan.large:
             lines.append(f"  {path}  {human_size(size)}")
@@ -297,10 +296,10 @@ def size_refusal(
     added = list(dict.fromkeys(new))
     lines += [
         "If it is data, leave it out and reference it:",
-        f"  publish(<the same arguments>, exclude={_list([*exclude, *added])}, "
+        f"  write(<the same arguments>, exclude={_list([*exclude, *added])}, "
         f"artifacts=[{', '.join(references)}])",
         "If it belongs in the capture:",
-        f"  publish(<the same arguments>, allow_large={_list([*allow_large, *added])})",
+        f"  write(<the same arguments>, allow_large={_list([*allow_large, *added])})",
     ]
     return "\n".join(lines)
 
@@ -320,7 +319,7 @@ def capture_repo(
     capture entirely, since git cannot record it), and a registered submodule with
     uncommitted changes. Each warning tells the agent to pass that path in repos, which
     captures it as its own repository. A path in `captured_elsewhere` (resolved paths of the
-    other repos in the same publish) is being captured that way already and gets no warning.
+    other repos in the same write) is being captured that way already and gets no warning.
 
     Raises:
         TrailsError: a git command failed; message carries the command and stderr.

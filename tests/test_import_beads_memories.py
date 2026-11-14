@@ -14,7 +14,7 @@ from types import ModuleType
 import pytest
 
 from trails import ops
-from trails.store import Store
+from trails.entry_store import EntryStore
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "import_beads_memories.py"
 AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
@@ -51,8 +51,8 @@ def stub_bd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return source
 
 
-def test_import_creates_one_tagged_record_per_memory_and_a_rerun_creates_none(
-    store: Store, stub_bd: Path, capsys: pytest.CaptureFixture[str]
+def test_import_creates_one_tagged_note_per_memory_and_a_rerun_creates_none(
+    store: EntryStore, stub_bd: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Silent failures: real bd output refused for its schema_version field, so nothing is
     imported; a rerun duplicating every memory; a missing prefix tag; a flagged secret dropped
@@ -70,9 +70,9 @@ def test_import_creates_one_tagged_record_per_memory_and_a_rerun_creates_none(
         "created 3, skipped 0\npossible secret in arch-red-account: AWSKeyDetector\n"
     )
     assert second_out == "created 0, skipped 3\n"
-    rows = store.query("SELECT id FROM record")
-    records = store.get_records([str(row["id"]) for row in rows])
-    assert sorted((r.title, r.body, r.tags) for r in records.values()) == [
+    rows = store.query("SELECT id FROM entry")
+    records = store.get_entries([str(row["id"]) for row in rows])
+    assert sorted((r.current.title, r.current.body, r.current.tags) for r in records.values()) == [
         ("arch-red-account", f"Red account key {AWS_KEY}.", ["arch", "imported-memory"]),
         (
             "pattern-examples-must-be-code-derivable",
@@ -89,7 +89,7 @@ def test_the_import_is_not_an_operation() -> None:
 
 
 def test_malformed_bd_output_exits_2_and_a_dash_key_gets_no_empty_tag(
-    store: Store, stub_bd: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    store: EntryStore, stub_bd: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """labbook-79y.6 item 10. Silent failures: malformed bd output reported with the same
     exit as a store failure, and a key starting with "-" yielding an empty tag that the
@@ -107,10 +107,10 @@ def test_malformed_bd_output_exits_2_and_a_dash_key_gets_no_empty_tag(
     assert capsys.readouterr().err == (
         "error: bd memories --json did not print an object of key to text\n"
     )
-    [record] = store.get_records(
-        [str(r["id"]) for r in store.query("SELECT id FROM record")]
+    [record] = store.get_entries(
+        [str(r["id"]) for r in store.query("SELECT id FROM entry")]
     ).values()
-    assert (record.entry_type, record.title, record.tags) == (
+    assert (record.kind, record.current.title, record.current.tags) == (
         "note",
         "-leading",
         ["imported-memory"],

@@ -48,7 +48,7 @@ async def register_project(
             description=(
                 "Optional project purpose and motivation: a one-line title plus why the "
                 "project exists, who it serves, long-term success, and what is out of scope. "
-                "Put operational knowledge in paths or ordinary records instead."
+                "Put operational knowledge in paths or ordinary entries instead."
             )
         ),
     ] = None,
@@ -60,9 +60,9 @@ async def register_project(
     nonempty path list that does not exactly match all current paths refuses with an
     update_project call.
 
-    Use instead: update_project, to change paths or framing after registration; publish, to
-    record knowledge in zero or more projects; set_projects, to change an existing record's
-    memberships without revising its content.
+    Use instead: update_project, to change paths or framing after registration; write, to
+    record goals, tasks, claims and notes in zero or more projects; set_projects, to change an
+    existing entry's memberships without writing a version.
 
     Returns: the stable project id and name, all current paths, the framing version written or
     recognized as a retry, the current framing version, deterministic near-name notes, and path,

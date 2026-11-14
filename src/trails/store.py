@@ -80,7 +80,8 @@ from trails.vocab import (
 DEFAULT_DB_ENV = "TRAILS_DB"
 # Written in the database directory once the schema is known to exist.
 SCHEMA_MARKER = ".trails-schema"
-DEFAULT_DB_PATH = Path.home() / ".trails" / "db"
+# The redesign starts on a fresh database (D13, D25); the old `~/.trails/db` is left as it is.
+DEFAULT_DB_PATH = Path.home() / ".agent-trails" / "db"
 
 EMBEDDING_DIMENSIONS = 384
 
@@ -270,7 +271,7 @@ _WRITE_KEYWORDS = frozenset(
 def open_store(db_path: Path | None = None) -> Store:
     """Open the Dolt database, creating it and its schema if absent.
 
-    `None` resolves to `$TRAILS_DB`, then `~/.trails/db`. There is no migration: a
+    `None` resolves to `$TRAILS_DB`, then `~/.agent-trails/db`. There is no migration: a
     database is created with the current schema and otherwise opened as it is.
 
     Raises:

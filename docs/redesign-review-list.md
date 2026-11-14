@@ -92,3 +92,34 @@ each one is in brackets.
 31. **`since_comment` also lists descendants added after the comment** (shown with no pinned
     version), and its link list covers link events from or to the commented entry and its
     descendants, old and new [step 3].
+32. **How step 4 is split into two commits** [step 4]. The plan put "old ops and their tests"
+    in the deletion commit, but once the operations open the new schema, the old operations
+    (`publish`, `export`, `lineage`, `mark_verified`, `set_work_status`) cannot run, so the
+    switch commit removes them and their operation-level tests. The deletion commit after it
+    removes the dead store, model, retrieval and record-file code and their store-level tests.
+33. **`search` takes fewer filters than before**: `query`, `kinds`, `projects`, `tags`,
+    `status`, `open_comments`, `include_retired`, `limit`, `offset` [step 4]. The old `terms`,
+    `since`, `until`, `links` and `unscoped` filters are gone, as the plan's signature lists.
+    Identifier-shaped words in `query` (ids, paths, shas, file names) still match exactly and
+    lead the results.
+34. **`search(open_comments=True)` is new** [step 4]: prime has to name a call that lists the
+    entries with open comments, and no filter did that.
+35. **`show` of an unknown id lists it as not found** rather than refusing, so a mixed list
+    still returns what exists [step 4].
+36. **`lint` was rewritten in step 4**, with the step 5 checks (stale link versions, cycles)
+    included, because it reads entries and had to work once the switch landed [step 4]. The
+    `stale-procedures` category is gone with `mark_verified`.
+37. **Embeddings are per version**; search's vector arm reads only the current version's
+    chunks, and `embed` backfills current versions only [step 4].
+38. **Capture refs are named `refs/research/<id>/v<version>/<position>`** [step 4], since an
+    entry can capture code in more than one version. A failed write removes its refs only when
+    no version holding that capture landed.
+39. **`write` validates the whole draft before capturing code** [step 4], so a refused write
+    leaves no capture ref or capture store behind (the old `publish` guaranteed this too).
+40. **The default MCP toolset is 16 operations** [step 4]: `add_comment`, `claim`, `close`,
+    `link`, `prime`, `ready`, `register_project`, `release`, `reopen`, `retire`, `search`,
+    `set_projects`, `show`, `unlink`, `update_project`, `write`. The full toolset adds `alias`,
+    `embed`, `lint`, `version`.
+41. **`prime` counts kinds other than goals and tasks as `current`** in its per-kind counts,
+    since only goals and tasks have a state [step 4].
+42. **`scripts/import_beads_memories.py` now writes notes into the new store** [step 4].
