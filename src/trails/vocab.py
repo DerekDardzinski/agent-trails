@@ -53,6 +53,8 @@ LinkAction = Literal["add", "remove"]
 LINK_ACTIONS: tuple[LinkAction, ...] = ("add", "remove")
 
 Outcome = Literal["completed", "dropped", "failed", "superseded"]
+# What `close` records; `superseded` is recorded by `replace`, which also names the replacements.
+CloseOutcome = Literal["completed", "dropped", "failed"]
 OUTCOMES: tuple[Outcome, ...] = ("completed", "dropped", "failed", "superseded")
 
 Verdict = Literal["approve", "changes_requested"]

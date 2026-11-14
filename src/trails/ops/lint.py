@@ -15,7 +15,7 @@ from typing import Annotated
 from pydantic import Field
 
 from trails import capture, engine as engine_seam, entry_search, hygiene
-from trails.entry_store import EntryStore, cycle_warnings
+from trails.entry_store import EntryStore
 from trails.models import Entry, Project
 from trails.ops import context
 from trails.ops._maint_types import LintItem, LintResult
@@ -27,7 +27,6 @@ OPERATION = Operation(toolset="full", read_only=True, destructive=False, idempot
 
 CATEGORIES = (
     "stale-link-versions",
-    "dependency-cycles",
     "duplicate-tags",
     "changed-or-missing-artifacts",
     "unreachable-code",
@@ -45,7 +44,7 @@ async def lint(
         Field(description="Stable project id or exact unique name. Omit for the whole store."),
     ] = None,
 ) -> LintResult:
-    """List store problems: links written against an older version of their target, dependency cycles, likely duplicate tags, artifacts that changed or disappeared, captured commits that disappeared, capture refs naming no entry, registered paths that do not exist, entries without similarity embeddings, and possible secrets by entry, field and line. Changes nothing.
+    """List store problems: links written against an older version of their target, likely duplicate tags, artifacts that changed or disappeared, captured commits that disappeared, capture refs naming no entry, registered paths that do not exist, entries without similarity embeddings, and possible secrets by entry, field and line. Changes nothing.
 
     Use this when: you are tidying a project, or before handing a project to another session.
 
@@ -72,7 +71,6 @@ async def lint(
     capture_store = capture.store_path(store.db_path)
     categories: dict[str, list[LintItem]] = {
         "stale-link-versions": _stale_links(store, entries),
-        "dependency-cycles": _cycles(store, ids),
         "duplicate-tags": _duplicate_tags(store, entries),
         "changed-or-missing-artifacts": _changed_or_missing_artifacts(entries),
         "unreachable-code": _unreachable_code(entries, capture_store),
@@ -105,14 +103,6 @@ def _stale_links(store: EntryStore, entries: Sequence[Entry]) -> list[LintItem]:
                     )
                 )
     return items
-
-
-def _cycles(store: EntryStore, ids: Sequence[str]) -> list[LintItem]:
-    graph = store.task_graph()
-    return [
-        LintItem(entry_id=None, detail=warning)
-        for warning in cycle_warnings(graph, [item for item in ids if graph.is_work(item)])
-    ]
 
 
 def _duplicate_tags(store: EntryStore, entries: Sequence[Entry]) -> list[LintItem]:

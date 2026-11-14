@@ -72,13 +72,18 @@ class LinkResult(RenderedResult):
     action: str
     changed: bool
     target_version: int | None
+    refreshed_from: int | None = None
     graph: list[GraphLine]
     warnings: list[str]
 
     def render_text(self) -> str:
         verb = "linked" if self.action == "add" else "unlinked"
+        if self.refreshed_from is not None:
+            verb = "re-linked"
         against = f" (against v{self.target_version})" if self.target_version else ""
         head = f"{verb} {self.source_id} {self.relation} {self.target_id}{against}"
+        if self.refreshed_from is not None:
+            head += f", was against v{self.refreshed_from}"
         if not self.changed:
             head += " · already so; nothing changed"
         lines = [head, *graph_text(self.graph), *_warnings(self.warnings)]

@@ -31,23 +31,6 @@ def test_lint_reports_a_link_written_against_an_older_version(store: EntryStore)
     ]
 
 
-def test_lint_reports_a_dependency_cycle(store: EntryStore) -> None:
-    """Silent failure caught: tasks that can never become ready, with nothing saying why once
-    the write-time warning has scrolled away."""
-    first = store.write_entry(EntryDraft(kind="task", title="a")).entry.id
-    second = store.write_entry(EntryDraft(kind="task", title="b", waits_on=[first])).entry.id
-    store.add_entry_link(first, "waits_on", second)
-
-    items = run_lint(store).categories["dependency-cycles"]
-
-    assert len(items) == 1
-    assert items[0].detail.startswith("dependency cycle: ")
-    assert set(items[0].detail.split(";")[0].removeprefix("dependency cycle: ").split(" -> ")) == {
-        first,
-        second,
-    }
-
-
 def test_a_clean_store_has_no_problems(store: EntryStore) -> None:
     store.write_entry(EntryDraft(kind="note", title="fine"))
     result = run_lint(store)

@@ -17,18 +17,19 @@ from trails.ops.create_note import create_note
 from trails.ops.create_preference import create_preference
 from trails.ops.create_skill import create_skill
 from trails.ops.create_task import create_task
-from trails.ops.link import link
+from trails.ops.link_evidence import link_evidence
+from trails.ops.link_work import link_work
 from trails.ops.prime import prime
-from trails.ops.ready import ready
 from trails.ops.release import release
 from trails.ops.reopen import reopen
+from trails.ops.replace import replace
 from trails.ops.retire import retire
 from trails.ops.revise_task import revise_task
 from trails.ops.search import search
 from trails.ops.set_priority import set_priority
 from trails.ops.set_projects import set_projects
 from trails.ops.show import show
-from trails.ops.unlink import unlink
+from trails.ops.unlink_work import unlink_work
 from trails.present import PREFERENCE_CAP, PREFERENCE_CAP_WARNING
 
 
@@ -148,8 +149,8 @@ def test_a_hit_shows_supporting_and_contradicting_entries_as_plain_links(
     )
     backer = new(store, "note", "load test notes")
     rival = new(store, "note", "p99 did not fall")
-    run(store, link, source=backer, relation="supports", target=measured)
-    run(store, link, source=rival, relation="contradicts", target=measured)
+    run(store, link_evidence, source=backer, relation="supports", target=measured)
+    run(store, link_evidence, source=rival, relation="contradicts", target=measured)
     [hit] = [item for item in run(store, search, kinds=["note"]).hits if item.id == measured]
     assert hit.evidence == [f"supported by {backer}", f"contradicted by {rival}"]
     text = run(store, search, kinds=["note"]).render_text()
@@ -175,9 +176,11 @@ def test_every_task_changing_response_redraws_the_affected_graph(store: EntrySto
         f"waits on {first.id} (open)",
         "ready",
     ]
-    linked = run(store, link, source=second.id, relation="part_of", target=goal.id)
+    linked = run(store, link_work, source=second.id, relation="part_of", target=goal.id)
     assert _graph_ids(linked) == [goal.id, second.id, first.id]
-    removed = run(store, unlink, source=second.id, relation="waits_on", target=first.id, reason="x")
+    removed = run(
+        store, unlink_work, source=second.id, relation="waits_on", target=first.id, reason="x"
+    )
     assert _graph_ids(removed) == [goal.id, second.id, first.id]
     claimed = run(store, claim, id=first.id, base_version=1)
     assert _graph_ids(claimed) == [goal.id, first.id]
@@ -263,14 +266,17 @@ def test_show_since_comment_on_another_entry_warns_instead_of_printing_nothing(
     assert f"warning: since_comment {review.comment_id} is on {goal}" in result.render_text()
 
 
-def test_retired_dependency_keeps_its_dependent_waiting(store: EntryStore) -> None:
-    """Silent failure caught: retiring a task silently unblocking work that needed it done."""
-    first = new(store, "task", "a")
-    waiting = new(store, "task", "b", waits_on=[first])
-    run(store, retire, id=first, reason="wrong plan")
-    assert [item.id for item in run(store, ready).ready] == []
-    assert run(store, search, query="", kinds=["task"]).total == 1
-    assert run(store, show, id=waiting).entries[0].state == f"waits on {first} (retired)"
+def test_retire_takes_knowledge_ids_and_hides_them_from_search(store: EntryStore) -> None:
+    """Silent failure caught: a task retired (it ends only by close or replace, so a retire
+    would hide it from its dependents' facts), or a retired note still listed by search."""
+    from trails.errors import ValidationError
+
+    task = new(store, "task", "a")
+    note = new(store, "note", "wrong finding")
+    with pytest.raises(ValidationError, match="retire takes a note, preference or skill"):
+        store.retire_entry(task, "wrong plan")
+    run(store, retire, id=note, reason="wrong")
+    assert run(store, search, query="", kinds=["note"]).total == 0
 
 
 def test_set_projects_moves_an_entry_between_projects(store: EntryStore) -> None:
@@ -324,21 +330,32 @@ def test_a_script_artifact_in_a_temporary_directory_is_warned_about(
 AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
 
 
-def test_a_supersede_that_closes_a_cycle_warns_and_shows_the_moved_dependent(
-    store: EntryStore,
-) -> None:
-    """Review finding 1. Silent failure caught: a supersede moving a child onto its own parent,
-    so the child can never become ready, with no warning and the child missing from the
-    response."""
+def test_a_replace_that_would_close_a_cycle_is_refused(store: EntryStore) -> None:
+    """Review finding 1, updated for principle 6. Silent failure caught: a replace moving a
+    child onto its own parent, so the child can never become ready; the move is malformed,
+    so the replace is refused and the task stays open."""
+    from trails.errors import ValidationError
+
     parent = new(store, "task", "parent")
     old = new(store, "task", "old")
     child = new(store, "task", "child", parent=parent, waits_on=[old])
-    closed = run(store, close, id=old, outcome="superseded", summary="moved", by=[parent])
-    assert any(
-        w.startswith(f"dependency cycle: {child} -> {parent} -> {child}") for w in closed.warnings
-    )
-    assert [line.id for line in closed.dependents] == [child]
-    assert child in [line.id for line in closed.graph]
+    with pytest.raises(ValidationError, match=f"{child} -> {parent} -> {child}"):
+        run(store, replace, id=old, by=[parent], reason="moved")
+    assert store.get_entry(old).state == "open"
+
+
+def test_replace_moves_dependents_and_shows_them(store: EntryStore) -> None:
+    """Silent failure caught: a dependent missing from the response to the replace that
+    moved its waits_on link, so the agent cannot see what now waits on the replacements."""
+    old = new(store, "task", "old")
+    first = new(store, "task", "part a")
+    waiting = new(store, "task", "uses it", waits_on=[old])
+    replaced = run(store, replace, id=old, by=[first], reason="split")
+    assert replaced.state == "closed superseded"
+    assert [(m.source_id, m.to_id) for m in replaced.moved] == [(waiting, first)]
+    assert [(line.id, line.state) for line in replaced.dependents] == [
+        (waiting, f"waits on {first} (open)")
+    ]
 
 
 def test_every_free_text_write_is_scanned_for_secrets(store: EntryStore) -> None:
@@ -348,7 +365,9 @@ def test_every_free_text_write_is_scanned_for_secrets(store: EntryStore) -> None
     note = new(store, "note", "n")
     other = new(store, "note", "o")
     comment = run(store, add_comment, id=task, comment=f"aws_key = {AWS_KEY}")
-    linked = run(store, link, source=note, relation="supports", target=other, reason=AWS_KEY)
+    linked = run(
+        store, link_evidence, source=note, relation="supports", target=other, reason=AWS_KEY
+    )
     closed = run(store, close, id=task, outcome="completed", summary=f"used {AWS_KEY}")
     assert any("AWSKeyDetector in comment" in w for w in comment.warnings)
     assert any("AWSKeyDetector in reason" in w for w in linked.warnings)

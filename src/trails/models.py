@@ -214,6 +214,8 @@ class EntryLink(BaseModel):
     target_version: int | None
     reason: str | None
     author: str
+    harness: str = "unknown"
+    session_id: str | None = None
     created_at: datetime
 
 
@@ -345,6 +347,8 @@ class LinkOutcome(BaseModel):
     changed: bool
     target_version: int | None
     warnings: list[str]
+    # The target version an evidence link named before this call recorded it again.
+    refreshed_from: int | None = None
 
 
 class MovedLink(BaseModel):

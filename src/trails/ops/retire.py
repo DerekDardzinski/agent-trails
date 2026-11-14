@@ -10,19 +10,22 @@ from pydantic import Field
 from trails.ops import context
 from trails.ops._entry_types import RetireResult
 from trails.ops._marks import Operation
+from trails.vocab import KNOWLEDGE_ID
 
 OPERATION = Operation(toolset="agent", read_only=False, destructive=False, idempotent=True)
 
 
 async def retire(
-    id: Annotated[str, Field(description="The entry to retire.")],  # noqa: A002
+    id: Annotated[  # noqa: A002
+        str, Field(pattern=KNOWLEDGE_ID, description="The note, preference or skill to retire.")
+    ],
     reason: Annotated[str, Field(description="One sentence saying why it is no longer true.")],
 ) -> RetireResult:
-    """Mark an entry as no longer true. It stays in history; search hides it unless include_retired is true, and it stops counting as a child or a dependency.
+    """Mark a note, preference or skill as no longer true. It stays in history, and search hides it unless include_retired is true.
 
-    Use this when: a claim, preference, note or skill is wrong or obsolete and nothing replaces it, or a task should vanish rather than be closed.
+    Use this when: a note, preference or skill is wrong or obsolete and nothing replaces it.
 
-    Use instead: revise_note, revise_preference or revise_task, to correct it; close, to finish a task with an outcome.
+    Use instead: revise_note or revise_preference, to correct it; close or replace, to end a task.
 
     Returns: confirmation. Retiring a retired entry keeps the first reason and changes nothing.
     """

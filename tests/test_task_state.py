@@ -84,8 +84,9 @@ def test_work_and_evidence_links_refuse_the_wrong_kinds(entries: EntryStore) -> 
 
 
 def test_claim_refusals(entries: EntryStore) -> None:
-    """Silent failure caught: two sessions working one task, a note claimed as work, or a
-    claim made against a version the claimant never read."""
+    """Silent failure caught: two sessions working one task, a note claimed as work, a claim
+    made against a version the claimant never read, or a takeover of a claim the caller did
+    not read (the holder plays the part of base_version for the claim itself)."""
     note = make(entries, "note", "n")
     task = make(entries, "task", "t")
     with pytest.raises(ValidationError, match="only a task is claimed"):
@@ -94,21 +95,45 @@ def test_claim_refusals(entries: EntryStore) -> None:
     with pytest.raises(ValidationError, match="base_version=1 is stale"):
         entries.claim(task, 1)
     held = entries.claim(task, 2)
+    assert held.event is not None
+    holder = held.event.session_id or held.event.harness
     assert (held.changed, held.entry.state) == (True, "claimed")
     assert entries.claim(task, 2).changed is False
     token = as_client("other-harness")
     try:
-        with pytest.raises(ValidationError, match="take_over_reason"):
+        with pytest.raises(ValidationError, match="this call named no holder") as refused:
             entries.claim(task, 2)
-        taken = entries.claim(task, 2, take_over_reason="the first session ended")
+        assert f'retry with claim("{task}", base_version=2, holder="{holder}")' in str(
+            refused.value
+        )
+        with pytest.raises(ValidationError, match='named holder="someone-else"'):
+            entries.claim(task, 2, holder="someone-else")
+        taken = entries.claim(task, 2, holder=holder)
     finally:
         sessions.CLIENT_NAME.reset(token)
     assert taken.event is not None
-    assert (taken.event.harness, taken.event.reason) == ("other-harness", "the first session ended")
+    assert (taken.changed, taken.event.harness) == (True, "other-harness")
+
+
+def test_claiming_or_closing_a_closed_task_changes_nothing_and_names_its_state(
+    entries: EntryStore,
+) -> None:
+    """Silent failure caught: a closed task's outcome overwritten by a second close, or a
+    claim reopening closed work, or a refusal pointing at another operation (principle 5);
+    the call is a no-op with a warning naming the state (dec-d1krx item 4)."""
     done = make(entries, "task", "done")
     entries.close(done, "completed", "ok")
-    with pytest.raises(ValidationError, match="is closed completed"):
-        entries.claim(done, 1)
+    claimed = entries.claim(done, 1)
+    closed_again = entries.close(done, "failed", "second thoughts")
+    assert (claimed.changed, claimed.warnings) == (
+        False,
+        [f"{done} is closed completed; nothing changed"],
+    )
+    assert (closed_again.changed, closed_again.warnings) == (
+        False,
+        [f"{done} is closed completed; nothing changed"],
+    )
+    assert entries.get_entry(done).outcome == "completed"
 
 
 def test_supersede_moves_every_dependent_onto_every_replacement(entries: EntryStore) -> None:
@@ -152,17 +177,35 @@ def test_a_parent_shows_how_its_children_ended_as_counts(entries: EntryStore) ->
     assert node_state(entries.task_graph(), parent) == "children: 1 completed, 1 failed, 1 open"
 
 
-def test_a_cycle_warns_with_its_ids(entries: EntryStore) -> None:
-    """Silent failure caught: a child waiting on its own ancestor, which never becomes ready
-    and nothing says why (D8)."""
+def test_a_link_closing_a_cycle_is_refused_with_its_ids(entries: EntryStore) -> None:
+    """Silent failure caught: a child stored waiting on its own ancestor, which can never
+    become ready (D8); a cycle is malformed, so it is refused and nothing is written."""
     parent = make(entries, "task", "parent")
     child = make(entries, "task", "child", parent=parent)
-    outcome = entries.add_entry_link(child, "waits_on", parent)
-    assert outcome.warnings == [
-        f"dependency cycle: {child} -> {parent} -> {child}; none of these can become ready "
-        "until one link in the cycle is removed with unlink"
-    ]
-    assert entries.add_entry_link(child, "waits_on", parent).changed is False
+    with pytest.raises(ValidationError) as refused:
+        entries.add_entry_link(child, "waits_on", parent)
+    assert str(refused.value) == (
+        "these links would make a dependency cycle, so none of its tasks could become ready: "
+        f"{child} -> {parent} -> {child}"
+    )
+    assert entries.task_graph().waits == {}
+
+
+def test_an_evidence_link_made_again_records_the_targets_new_version(
+    entries: EntryStore,
+) -> None:
+    """Silent failure caught: re-linking after reading a changed target leaving the link
+    marked "written against v1, now v2" forever, or a re-link at the same version writing a
+    duplicate event."""
+    source = make(entries, "note", "evidence")
+    target = make(entries, "note", "finding")
+    entries.add_entry_link(source, "supports", target)
+    assert entries.add_entry_link(source, "supports", target).changed is False
+    entries.write_entry(EntryDraft(id=target, base_version=1, reason="r", body="more"))
+    again = entries.add_entry_link(source, "supports", target)
+    assert (again.changed, again.target_version, again.refreshed_from) == (True, 2, 1)
+    [link] = entries.get_entry(source).links
+    assert link.target_version == 2
 
 
 def test_ready_sorts_by_priority_then_age(entries: EntryStore) -> None:

@@ -11,12 +11,13 @@ from trails.ops import context
 from trails.ops._entry_types import TaskResult
 from trails.ops._marks import Operation
 from trails.ops._task_result import task_result
+from trails.vocab import TASK_ID
 
 OPERATION = Operation(toolset="agent", read_only=False, destructive=False, idempotent=True)
 
 
 async def reopen(
-    id: Annotated[str, Field(description="The closed task.")],  # noqa: A002
+    id: Annotated[str, Field(pattern=TASK_ID, description="The closed task.")],  # noqa: A002
     reason: Annotated[str, Field(description="Why it needs more work.")],
 ) -> TaskResult:
     """Move a closed task back to open. Links that a supersede moved stay moved.

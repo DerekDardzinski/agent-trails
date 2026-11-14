@@ -10,9 +10,10 @@ from pathlib import Path
 from trails import capture, engine as engine_seam, entry_search, gitprobe
 from trails.entry_store import EntryStore, is_open_comment, unchanged_responses
 from trails.errors import ValidationError
-from trails.models import CaptureSummary, CodeCapture, Entry, RepoCapture
+from trails.models import CaptureSummary, CodeCapture, Entry, EntryLink, RepoCapture
 from trails.ops._entry_types import ShownComment, ShownEntry, ShownLink, ShownVersion
 from trails.present import GraphLine, graph_lines, node_state, stale_link_text
+from trails.vocab import EVIDENCE_RELATIONS
 
 
 def redraw(store: EntryStore, entry_ids: Sequence[str]) -> tuple[list[GraphLine], list[str]]:
@@ -101,6 +102,13 @@ def _distinct_repos(repos: Sequence[str]) -> list[Path]:
     return paths
 
 
+def _linked_by(link: EntryLink) -> str:
+    """Who recorded an evidence link at the version it names: the agent's word that the
+    link holds for that version (principle 3)."""
+    session = f" session {link.session_id}" if link.session_id else ""
+    return f" · linked at v{link.target_version} by {link.author} ({link.harness}{session})"
+
+
 def shown_entries(
     store: EntryStore,
     entries: Sequence[Entry],
@@ -129,7 +137,8 @@ def shown_entries(
                 note=stale_link_text(
                     link,
                     related[link.target_id].current.version if link.target_id in related else None,
-                ),
+                )
+                + (_linked_by(link) if link.relation in EVIDENCE_RELATIONS else ""),
             )
             for link in entry.links
         ] + [

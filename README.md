@@ -15,12 +15,12 @@ checked against.
 
 The store refuses exactly two things, both as `ValidationError`:
 
-1. **Malformed input**: an empty title, a link to an entry that does not exist, a link between
+1. **Malformed input**: an empty title, a link that would close a dependency cycle, a link to an entry that does not exist, a link between
    the wrong kinds (work links join tasks, evidence links join notes, preferences and skills), a
    priority on a note, `addresses` naming a comment that is not open on the same entry, a value wider than its
    column, or two tags the database's case- and accent-insensitive comparison treats as one.
 2. **An attempt to overwrite**: a new version written from a stale or missing `base_version`,
-   or a claim on a task another session holds without `take_over_reason`.
+   or a claim on a task another session holds that does not name that session as `holder`.
 
 Everything else is recorded as given. Warnings cover only what happens outside the store: data
 in a temporary folder, code outside git, a path that does not exist, a possible secret, or an
@@ -57,11 +57,15 @@ Work relations `waits_on` and `part_of` join tasks; evidence relations `supports
 `contradicts` join notes, preferences and skills; `supersedes` is written only when a task is
 closed superseded. Links are add and remove events, and each add records the target
 version it was written against, so `show` and `lint` can say "written against v2, now v3".
+`link_work` and `unlink_work` take task ids; `link_evidence` and `unlink_evidence` take note,
+preference and skill ids. Linking evidence again after its target changed records it at the new
+version, shown with the harness and session that vouched for it.
 
 A task is **ready** when it is not closed or retired, none of its children is open, and every
-task it or an ancestor waits on is closed `completed`. Close outcomes: `completed` unblocks
-dependents; `dropped` and `failed` leave them waiting; `superseded` with `by=[ids]` moves every
-dependent onto every replacement. A task's state is shown as facts: "children: 2 completed, 1
+task it or an ancestor waits on is closed `completed`. `close` records `completed`, which
+unblocks dependents, or `dropped` or `failed`, which leave them waiting; `replace` closes a task
+`superseded` by other tasks and moves every dependent onto every replacement. Claiming or
+closing a task that is already closed changes nothing and names its state. A task's state is shown as facts: "children: 2 completed, 1
 failed", "waits on tsk-x (closed dropped)". `blocked` lists the tasks waiting on a task that is
 not closed completed. `show` names the tasks the creating session held claims on when an entry
 was created. Every task-changing response redraws the graph around the change.
@@ -110,13 +114,15 @@ blocked           the tasks waiting on another task, with that task's state
 create_task / create_note / create_preference
 revise_task / revise_note / revise_preference
 set_priority      change a task's priority
-link / unlink     add or remove a link
-claim / release   take or give back a task
+link_work / unlink_work          a dependency or parent link between tasks
+link_evidence / unlink_evidence  a supports or contradicts link between knowledge entries
+claim / release   take or give back a task (claim names the holder it takes over)
 close / reopen    close a task with an outcome, or reopen it
+replace           close a task as superseded by other tasks
 add_comment       feedback that needs a response, or the response that closes it
 show              read entries or projects by id
 search            find entries by meaning, id or filters; also projects
-retire            mark an entry no longer true
+retire            mark a note, preference or skill no longer true
 register_project / update_project / set_projects
 ```
 

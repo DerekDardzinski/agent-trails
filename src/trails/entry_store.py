@@ -85,6 +85,7 @@ from trails.store import (
 from trails.taskgraph import Node, TaskGraph
 from trails.vocab import (
     COMMENT_ID_PREFIX,
+    EVIDENCE_RELATIONS,
     ID_ALPHABET,
     ID_ATTEMPTS_PER_LENGTH,
     ID_LENGTHS,
@@ -903,11 +904,17 @@ class EntryStore(Store):
     def add_entry_link(
         self, source_id: str, relation: LinkRelation, target_id: str, reason: str | None = None
     ) -> LinkOutcome:
-        """Append an `add` event, recording the target's current version. A link that is
-        already current is left as it is.
+        """Append an `add` event, recording the target's current version.
+
+        A work link (`waits_on`, `part_of`) that is already current is left as it is, and one
+        that would close a dependency cycle is refused. An evidence link (`supports`,
+        `contradicts`) that is already current is recorded again when the target has moved
+        on since, so it now names the target's current version; at that version already, it
+        is left as it is.
 
         Raises:
-            ValidationError: a self-link, an unknown relation, or an id naming no entry.
+            ValidationError: a self-link, an unknown relation, an id naming no entry, a link
+                between the wrong kinds, or a work link closing a cycle.
         """
         if relation not in LINK_RELATIONS:
             raise ValidationError(f"relation must be one of {', '.join(LINK_RELATIONS)}")
@@ -926,7 +933,12 @@ class EntryStore(Store):
             )
             latest = self._latest_link(source_id, relation, target_id)
             target_version = found[target_id].current.version
-            if latest is not None and latest.action == "add":
+            refresh = relation in EVIDENCE_RELATIONS and (
+                latest is not None
+                and latest.action == "add"
+                and latest.target_version != target_version
+            )
+            if latest is not None and latest.action == "add" and not refresh:
                 return LinkOutcome(
                     source_id=source_id,
                     relation=relation,
@@ -948,11 +960,11 @@ class EntryStore(Store):
                 provenance=provenance,
             )
             warnings = _secret_warnings({"reason": normal_reason or ""})
-            if relation in {"part_of", "waits_on"}:
+            if relation in WORK_RELATIONS:
                 graph = self.task_graph()
                 table = graph.parents if relation == "part_of" else graph.waits
                 table.setdefault(source_id, []).append(target_id)
-                warnings += cycle_warnings(graph, [source_id, target_id])
+                _refuse_cycle_through(graph, source_id)
             self._commit_events(
                 [_link_insert(event)], f"link {source_id} {relation} {target_id}", event, provenance
             )
@@ -964,6 +976,7 @@ class EntryStore(Store):
             changed=True,
             target_version=target_version,
             warnings=warnings,
+            refreshed_from=latest.target_version if refresh and latest is not None else None,
         )
 
     def remove_entry_link(
@@ -994,7 +1007,7 @@ class EntryStore(Store):
                     action="remove",
                     changed=False,
                     target_version=None,
-                    warnings=[f"{source_id} has no current {relation} link to {target_id}"],
+                    warnings=[],
                 )
             provenance = sessions.current_provenance()
             event = self._link_event(
@@ -1115,57 +1128,57 @@ class EntryStore(Store):
         return graph
 
     def claim(
-        self, entry_id: str, base_version: int | None, take_over_reason: str | None = None
+        self, entry_id: str, base_version: int | None, holder: str | None = None
     ) -> TaskOutcome:
         """Claim a task for this session, atomically under the write lock.
 
-        Refused: an entry of another kind (malformed), a closed task, a stale or missing
-        `base_version` (an attempted overwrite), and a task another session holds unless
-        `take_over_reason` says why (D3). Claiming a task this session already holds changes
-        nothing.
+        `holder` is who held the task when the caller read it (`claim_holder` of the claim
+        event: its session id, or its harness when it recorded none), or None when it was
+        unclaimed. Like `base_version`, it names the state the claim replaces: a task another
+        session holds is taken over only when `holder` names that session, and refused as an
+        overwrite otherwise. A closed task is left as it is, with a warning naming its state
+        (dec-d1krx item 4). Claiming a task this session already holds changes nothing.
+
+        Refused: an entry of another kind (malformed), a stale or missing `base_version`, and
+        a held task whose holder the caller did not name (both attempted overwrites).
         """
         with dolt.exclusive(self.db_path):
             entry = self.get_entry(entry_id)
             if entry.kind != "task":
                 raise ValidationError(f"{entry_id} is a {entry.kind}; only a task is claimed")
             if entry.state == "closed":
-                raise ValidationError(
-                    f"{entry_id} is closed {entry.outcome}; reopen it first with "
-                    f'reopen("{entry_id}", reason="...")'
-                )
+                return TaskOutcome(
+                    entry=entry, event=None, changed=False, moved=[],
+                    warnings=[f"{entry_id} is closed {entry.outcome}; nothing changed"],
+                )  # fmt: skip
+            retry = f'claim("{entry_id}", base_version={entry.current.version}'
+            held = entry.claim
+            if held is not None:
+                retry += f", holder={json.dumps(claim_holder(held))}"
+            retry += ")"
             if base_version != entry.current.version:
                 raise ValidationError(
-                    _stale_message(
-                        entry_id,
-                        base_version,
-                        entry.current,
-                        retry=f'claim("{entry_id}", base_version={entry.current.version})',
-                    )
+                    _stale_message(entry_id, base_version, entry.current, retry=retry)
                 )
             provenance = sessions.current_provenance()
-            held = entry.claim
-            take_over = (take_over_reason or "").strip()
             if held is not None:
                 if _same_session(held, provenance):
                     return TaskOutcome(
-                        entry=entry, event=held, changed=False, moved=[],
-                        warnings=[],
-                    )  # fmt: skip
-                if not take_over:
+                        entry=entry, event=held, changed=False, moved=[], warnings=[]
+                    )
+                if holder != claim_holder(held):
+                    named = f"holder={json.dumps(holder)}" if holder else "no holder"
                     raise ValidationError(
                         f"{entry_id} is claimed by {_claimant(held)} since "
-                        f"{held.created_at.isoformat()}; to take it over, say why: "
-                        f'claim("{entry_id}", base_version={entry.current.version}, '
-                        'take_over_reason="...")'
+                        f"{held.created_at.isoformat()}, and this call named {named}, so it "
+                        f"would take over a claim it did not read; read it with "
+                        f'show("{entry_id}"), then retry with {retry}'
                     )
-            _require_text_bytes("take_over_reason", take_over or None)
             event = self._task_event(
-                entry, "claim", outcome=None, reason=take_over or None, provenance=provenance
+                entry, "claim", outcome=None, reason=None, provenance=provenance
             )
             self._commit_events([_task_insert(event)], f"claim {entry_id}", event, provenance)
-        return self._task_outcome(
-            entry, event, warnings=_secret_warnings({"take_over_reason": take_over})
-        )
+        return self._task_outcome(entry, event)
 
     def release(self, entry_id: str, reason: str) -> TaskOutcome:
         """Drop the current claim (D11); the task stays not closed. Releasing an unclaimed
@@ -1176,7 +1189,7 @@ class EntryStore(Store):
             if entry.claim is None:
                 return TaskOutcome(
                     entry=entry, event=None, changed=False, moved=[],
-                    warnings=[f"{entry_id} is not claimed; nothing to release"],
+                    warnings=[],
                 )  # fmt: skip
             provenance = sessions.current_provenance()
             event = self._task_event(
@@ -1198,7 +1211,7 @@ class EntryStore(Store):
             if entry.state != "closed":
                 return TaskOutcome(
                     entry=entry, event=None, changed=False, moved=[],
-                    warnings=[f"{entry_id} is not closed; nothing to reopen"],
+                    warnings=[],
                 )  # fmt: skip
             provenance = sessions.current_provenance()
             event = self._task_event(
@@ -1245,15 +1258,10 @@ class EntryStore(Store):
                     f"{', '.join(not_work)} is not a task; only a task can replace one"
                 )
             if entry.state == "closed":
-                if entry.outcome == outcome:
-                    return TaskOutcome(
-                        entry=entry, event=None, changed=False, moved=[],
-                        warnings=[f"{entry_id} was already closed {outcome}; nothing changed"],
-                    )  # fmt: skip
-                raise ValidationError(
-                    f"{entry_id} is already closed {entry.outcome}; to change the outcome, "
-                    f'reopen("{entry_id}", reason="...") and close it again'
-                )
+                return TaskOutcome(
+                    entry=entry, event=None, changed=False, moved=[],
+                    warnings=[f"{entry_id} is closed {entry.outcome}; nothing changed"],
+                )  # fmt: skip
             provenance = sessions.current_provenance()
             graph = self.task_graph()
             event = self._task_event(
@@ -1276,7 +1284,6 @@ class EntryStore(Store):
                         for item in replacements
                         if item != source
                     ]
-            warnings: list[str] = []
             if moved:
                 for item in moved:
                     targets = graph.waits.setdefault(item.source_id, [])
@@ -1284,8 +1291,9 @@ class EntryStore(Store):
                         targets.remove(entry_id)
                     if item.to_id not in targets:
                         targets.append(item.to_id)
-                warnings += cycle_warnings(graph, sorted({item.source_id for item in moved}))
-            warnings += _secret_warnings({"summary": normal_summary})
+                for source in sorted({item.source_id for item in moved}):
+                    _refuse_cycle_through(graph, source)
+            warnings = _secret_warnings({"summary": normal_summary})
             self._commit_events(statements, f"close {entry_id} {outcome}", event, provenance)
         return self._task_outcome(entry, event, moved=moved, warnings=warnings)
 
@@ -1298,6 +1306,10 @@ class EntryStore(Store):
         _require_text_bytes("reason", normal_reason)
         with dolt.exclusive(self.db_path):
             entry = self.get_entry(entry_id)
+            if entry.kind not in KNOWLEDGE_KINDS:
+                raise ValidationError(
+                    f"retire takes a note, preference or skill; {entry_id} is a {entry.kind}"
+                )
             if entry.retired:
                 return RetireOutcome(
                     entry_id=entry_id, reason=str(entry.retired_reason), already_retired=True
@@ -2049,7 +2061,11 @@ def _refuse_cycles(graph: TaskGraph, relations: Sequence[tuple[LinkRelation, str
     for relation, target in relations:
         table = graph.parents if relation == "part_of" else graph.waits
         table.setdefault(NEW_TASK, []).append(target)
-    cycle = graph.cycle_through(NEW_TASK)
+    _refuse_cycle_through(graph, NEW_TASK)
+
+
+def _refuse_cycle_through(graph: TaskGraph, entry_id: str) -> None:
+    cycle = graph.cycle_through(entry_id)
     if cycle is not None:
         raise ValidationError(
             "these links would make a dependency cycle, so none of its tasks could become "
@@ -2298,6 +2314,8 @@ def _entry_link(event: LinkEvent) -> EntryLink:
         target_version=event.target_version,
         reason=event.reason,
         author=event.author,
+        harness=event.harness,
+        session_id=event.session_id,
         created_at=event.created_at,
     )
 
@@ -2384,19 +2402,15 @@ def _same_session(event: TaskEvent, provenance: Provenance) -> bool:
     return (event.harness, event.session_id) == (provenance.harness, provenance.session_id)
 
 
+def claim_holder(event: TaskEvent) -> str:
+    """How a claim's holder is named to `claim`: its session id, or its harness when the
+    claim recorded no session."""
+    return event.session_id or event.harness
+
+
 def _claimant(event: TaskEvent) -> str:
     session = f"session {event.session_id}" if event.session_id else "no session id"
     return f"{event.author} ({event.harness}, {session})"
-
-
-def cycle_warnings(graph: TaskGraph, entry_ids: Sequence[str]) -> list[str]:
-    """One warning per must-finish-first cycle through any of `entry_ids` (D8)."""
-    return [
-        "dependency cycle: "
-        + " -> ".join(cycle)
-        + "; none of these can become ready until one link in the cycle is removed with unlink"
-        for cycle in graph.cycles_among(entry_ids)
-    ]
 
 
 def _comments(rows: Sequence[dict[str, Any]], addresses: Sequence[dict[str, Any]]) -> list[Comment]:
